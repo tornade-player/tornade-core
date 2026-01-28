@@ -1,0 +1,155 @@
+// Duplicate detection service
+
+use crate::db::DbPool;
+use crate::models::Track;
+use crate::services::error::LibraryError;
+use log::info;
+use std::collections::HashMap;
+
+type Result<T> = std::result::Result<T, LibraryError>;
+
+/// Represents a group of duplicate tracks
+#[derive(Debug, Clone)]
+pub struct DuplicateGroup {
+    pub key: String,
+    pub tracks: Vec<Track>,
+}
+
+/// Service for detecting duplicate tracks in the library
+pub struct DuplicateService {
+    pool: DbPool,
+}
+
+impl DuplicateService {
+    pub fn new(pool: DbPool) -> Self {
+        DuplicateService { pool }
+    }
+
+    /// Find duplicate tracks based on metadata (T125, T126)
+    /// Groups tracks by (title + artist + duration) to identify potential duplicates
+    pub fn find_duplicates(&self) -> Result<Vec<DuplicateGroup>> {
+        let conn = self.pool.get().map_err(|e| {
+            LibraryError::Database(rusqlite::Error::InvalidPath(
+                std::path::PathBuf::from(format!("Pool error: {}", e))
+            ))
+        })?;
+
+        // Get all tracks
+        let mut stmt = conn.prepare(
+            "SELECT id, title, album_id, artist_id, source_id, file_path,
+                    duration, track_number, disc_number, sample_rate, bit_depth,
+                    file_type, file_size, rating, fingerprint, is_duplicate,
+                    duplicate_of, last_played_at, play_count
+             FROM tracks
+             ORDER BY title, artist_id"
+        )?;
+
+        let tracks: Vec<Track> = stmt.query_map([], |row| {
+            Ok(Track {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                album_id: row.get(2)?,
+                artist_id: row.get(3)?,
+                source_id: row.get(4)?,
+                file_path: std::path::PathBuf::from(row.get::<_, String>(5)?),
+                duration: std::time::Duration::from_millis(row.get::<_, i64>(6)? as u64),
+                track_number: row.get(7)?,
+                disc_number: row.get(8)?,
+                sample_rate: row.get(9)?,
+                bit_depth: row.get(10)?,
+                file_type: crate::models::AudioFormat::from_str(&row.get::<_, String>(11)?).unwrap(),
+                file_size: row.get::<_, i64>(12)? as u64,
+                rating: row.get(13)?,
+                fingerprint: row.get(14)?,
+                is_duplicate: row.get::<_, i32>(15)? != 0,
+                duplicate_of: row.get(16)?,
+                last_played_at: row.get(17)?,
+                play_count: row.get::<_, i32>(18)? as u32,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        // Group tracks by (normalized_title, artist_id, duration_seconds)
+        let mut groups: HashMap<String, Vec<Track>> = HashMap::new();
+
+        for track in tracks {
+            // Create a key for duplicate detection
+            // Normalize title (lowercase, trim) + artist + duration (rounded to seconds)
+            let normalized_title = track.title.to_lowercase().trim().to_string();
+            let duration_secs = track.duration.as_secs();
+            let key = format!("{}:{}:{}", normalized_title, track.artist_id, duration_secs);
+
+            groups.entry(key).or_insert_with(Vec::new).push(track);
+        }
+
+        // Filter to only groups with 2+ tracks (actual duplicates)
+        let duplicates: Vec<DuplicateGroup> = groups
+            .into_iter()
+            .filter(|(_, tracks)| tracks.len() > 1)
+            .map(|(key, tracks)| DuplicateGroup { key, tracks })
+            .collect();
+
+        info!("Found {} duplicate groups", duplicates.len());
+
+        Ok(duplicates)
+    }
+
+    /// Mark a track as a duplicate (T127)
+    /// This can be used to hide duplicates from the main library view
+    pub fn mark_duplicate(&self, track_id: i64, is_duplicate: bool, duplicate_of: Option<i64>) -> Result<()> {
+        let conn = self.pool.get().map_err(|e| {
+            LibraryError::Database(rusqlite::Error::InvalidPath(
+                std::path::PathBuf::from(format!("Pool error: {}", e))
+            ))
+        })?;
+
+        conn.execute(
+            "UPDATE tracks SET is_duplicate = ?1, duplicate_of = ?2 WHERE id = ?3",
+            rusqlite::params![is_duplicate as i32, duplicate_of, track_id],
+        )?;
+
+        info!("Marked track {} as duplicate: {}", track_id, is_duplicate);
+
+        Ok(())
+    }
+
+    /// Hide a duplicate track from library views (T127)
+    /// Marks it as a duplicate of another track
+    pub fn hide_duplicate(&self, track_id: i64, original_track_id: i64) -> Result<()> {
+        self.mark_duplicate(track_id, true, Some(original_track_id))
+    }
+
+    /// Unhide a track marked as duplicate
+    pub fn unhide_duplicate(&self, track_id: i64) -> Result<()> {
+        self.mark_duplicate(track_id, false, None)
+    }
+
+    /// Get statistics about duplicates in the library
+    pub fn get_duplicate_stats(&self) -> Result<(usize, usize)> {
+        let duplicates = self.find_duplicates()?;
+        let num_groups = duplicates.len();
+        let num_tracks: usize = duplicates.iter().map(|g| g.tracks.len()).sum();
+
+        Ok((num_groups, num_tracks))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_find_duplicates_empty() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let pool = db::create_pool(db_path.clone()).unwrap();
+        db::initialize_database(&pool).unwrap();
+
+        let service = DuplicateService::new(pool);
+        let duplicates = service.find_duplicates().unwrap();
+
+        assert_eq!(duplicates.len(), 0);
+    }
+}

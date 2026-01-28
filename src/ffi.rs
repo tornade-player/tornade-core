@@ -1,0 +1,731 @@
+// FFI Bridge for Swift/Rust interop
+// This module exposes Rust functions to Swift via swift-bridge
+
+use std::path::PathBuf;
+use std::sync::Mutex;
+use once_cell::sync::Lazy;
+
+use crate::db;
+use crate::services::*;
+use crate::utils::AppPaths;
+
+// Global database pool - the only shared state we need
+static DB_POOL: Lazy<Mutex<Option<db::DbPool>>> = Lazy::new(|| Mutex::new(None));
+
+fn get_or_init_pool() -> Result<db::DbPool, String> {
+    let mut pool_opt = DB_POOL.lock().unwrap();
+
+    if pool_opt.is_none() {
+        // Initialize application paths
+        let app_paths = AppPaths::new()
+            .map_err(|e| format!("Failed to initialize app paths: {}", e))?;
+
+        // Create database connection pool
+        let pool = db::create_pool(app_paths.database_path())
+            .map_err(|e| format!("Failed to create database pool: {}", e))?;
+
+        // Initialize database schema
+        db::initialize_database(&pool)
+            .map_err(|e| format!("Failed to initialize database: {}", e))?;
+
+        *pool_opt = Some(pool);
+    }
+
+    Ok(pool_opt.as_ref().unwrap().clone())
+}
+
+#[swift_bridge::bridge]
+mod ffi {
+    extern "Rust" {
+        // Library Management Functions
+        fn get_library_stats() -> String;
+        fn scan_library(folder_path: &str) -> String;
+
+        // Track Functions
+        fn get_tracks_page(offset: u32, limit: u32) -> String;
+        fn get_track_by_id(track_id: i64) -> String;
+        fn search_tracks(query: &str, limit: u32) -> String;
+
+        // Album Functions
+        fn get_albums_page(offset: u32, limit: u32) -> String;
+        fn get_album_artwork(album_id: i64) -> Vec<u8>;
+
+        // Artist Functions
+        fn get_artists_page(offset: u32, limit: u32) -> String;
+
+        // Playlist Functions
+        fn get_playlists() -> String;
+        fn create_playlist(name: &str) -> String;
+        fn delete_playlist(playlist_id: i64) -> String;
+        fn add_track_to_playlist(playlist_id: i64, track_id: i64) -> String;
+
+        // Playback Control Functions
+        fn play_track(track_id: i64) -> String;
+        fn pause_playback() -> String;
+        fn resume_playback() -> String;
+        fn stop_playback() -> String;
+        fn next_track() -> String;
+        fn previous_track() -> String;
+        fn get_player_state() -> String;
+
+        // Queue Management Functions
+        fn get_queue() -> String;
+        fn add_to_queue(track_id: i64) -> String;
+        fn clear_queue() -> String;
+        fn reorder_queue(track_ids: &str) -> String;
+
+        // Audio Control Functions
+        fn set_volume(volume: f64) -> String;
+        fn seek_to_position(position: f64) -> String;
+    }
+}
+
+// Function implementations will be added in subsequent tasks (T012-T036)
+// Each function returns JSON-serialized results for cross-language data transfer
+
+fn get_library_stats() -> String {
+    // T012: Get library statistics (album count, artist count, track count)
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let conn = match pool.get() {
+                Ok(conn) => conn,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get database connection: {}", e)
+                    }).to_string();
+                }
+            };
+
+            // Query counts directly
+            let album_count: Result<i64, _> = conn.query_row(
+                "SELECT COUNT(*) FROM albums",
+                [],
+                |row| row.get(0)
+            );
+            let artist_count: Result<i64, _> = conn.query_row(
+                "SELECT COUNT(*) FROM artists",
+                [],
+                |row| row.get(0)
+            );
+            let track_count: Result<i64, _> = conn.query_row(
+                "SELECT COUNT(*) FROM tracks",
+                [],
+                |row| row.get(0)
+            );
+
+            match (album_count, artist_count, track_count) {
+                (Ok(albums), Ok(artists), Ok(tracks)) => {
+                    serde_json::json!({
+                        "success": true,
+                        "data": {
+                            "album_count": albums,
+                            "artist_count": artists,
+                            "track_count": tracks,
+                        }
+                    }).to_string()
+                }
+                _ => {
+                    serde_json::json!({
+                        "success": false,
+                        "error": "Failed to query library statistics"
+                    }).to_string()
+                }
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn scan_library(folder_path: &str) -> String {
+    // T013: Scan a folder for music files and add to library
+    match get_or_init_pool() {
+        Ok(pool) => {
+            // Initialize app paths for library service
+            let app_paths = match AppPaths::new() {
+                Ok(paths) => paths,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to initialize app paths: {}", e)
+                    }).to_string();
+                }
+            };
+
+            let library_service = LibraryService::new(pool.clone(), app_paths);
+            let path = PathBuf::from(folder_path);
+
+            // First, add the source
+            match library_service.add_source("Music Library", &path) {
+                Ok(source) => {
+                    // Then scan it
+                    match library_service.scan_directory(&path, source.id) {
+                        Ok(result) => {
+                            serde_json::json!({
+                                "success": true,
+                                "data": {
+                                    "source_id": source.id,
+                                    "tracks_added": result.tracks_added,
+                                    "tracks_updated": result.tracks_updated,
+                                    "tracks_skipped": result.tracks_skipped,
+                                    "errors_count": result.errors.len(),
+                                    "duration_ms": result.duration.as_millis()
+                                }
+                            }).to_string()
+                        }
+                        Err(e) => {
+                            serde_json::json!({
+                                "success": false,
+                                "error": format!("Failed to scan directory: {}", e)
+                            }).to_string()
+                        }
+                    }
+                }
+                Err(e) => {
+                    serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to add source: {}", e)
+                    }).to_string()
+                }
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn get_tracks_page(offset: u32, limit: u32) -> String {
+    // T014: Get paginated list of tracks (limit capped at 100)
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let limit_capped = std::cmp::min(limit, 100) as usize;
+            let offset_val = offset as usize;
+
+            let conn = match pool.get() {
+                Ok(conn) => conn,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get database connection: {}", e)
+                    }).to_string();
+                }
+            };
+
+            // Query tracks with pagination
+            let query = format!(
+                "SELECT id, title, artist_id, album_id, duration, file_path, file_format, \
+                 sample_rate, bit_depth, bitrate, track_number, rating \
+                 FROM tracks ORDER BY title LIMIT {} OFFSET {}",
+                limit_capped, offset_val
+            );
+
+            match conn.prepare(&query) {
+                Ok(mut stmt) => {
+                    let tracks_iter = stmt.query_map([], |row| {
+                        Ok(serde_json::json!({
+                            "id": row.get::<_, i64>(0)?,
+                            "title": row.get::<_, String>(1)?,
+                            "artist_id": row.get::<_, Option<i64>>(2)?,
+                            "album_id": row.get::<_, Option<i64>>(3)?,
+                            "duration": row.get::<_, Option<u32>>(4)?,
+                            "file_path": row.get::<_, String>(5)?,
+                            "file_format": row.get::<_, String>(6)?,
+                            "sample_rate": row.get::<_, Option<u32>>(7)?,
+                            "bit_depth": row.get::<_, Option<u16>>(8)?,
+                            "bitrate": row.get::<_, Option<u32>>(9)?,
+                            "track_number": row.get::<_, Option<u16>>(10)?,
+                            "rating": row.get::<_, Option<u8>>(11)?,
+                        }))
+                    });
+
+                    match tracks_iter {
+                        Ok(tracks) => {
+                            let tracks_vec: Result<Vec<_>, _> = tracks.collect();
+                            match tracks_vec {
+                                Ok(tracks_data) => {
+                                    serde_json::json!({
+                                        "success": true,
+                                        "data": {
+                                            "tracks": tracks_data,
+                                            "offset": offset,
+                                            "limit": limit_capped
+                                        }
+                                    }).to_string()
+                                }
+                                Err(e) => {
+                                    serde_json::json!({
+                                        "success": false,
+                                        "error": format!("Failed to fetch tracks: {}", e)
+                                    }).to_string()
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            serde_json::json!({
+                                "success": false,
+                                "error": format!("Failed to query tracks: {}", e)
+                            }).to_string()
+                        }
+                    }
+                }
+                Err(e) => {
+                    serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to prepare query: {}", e)
+                    }).to_string()
+                }
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn get_track_by_id(track_id: i64) -> String {
+    // T015: Get a single track by ID
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let conn = match pool.get() {
+                Ok(conn) => conn,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get database connection: {}", e)
+                    }).to_string();
+                }
+            };
+
+            match crate::db::queries::get_track(&conn, track_id) {
+                Ok(Some(track)) => {
+                    serde_json::json!({
+                        "success": true,
+                        "data": track
+                    }).to_string()
+                }
+                Ok(None) => {
+                    serde_json::json!({
+                        "success": false,
+                        "error": format!("Track {} not found", track_id)
+                    }).to_string()
+                }
+                Err(e) => {
+                    serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get track: {}", e)
+                    }).to_string()
+                }
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn search_tracks(query: &str, limit: u32) -> String {
+    // T016: FTS5 search
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let search_service = SearchService::new(pool.clone());
+            match search_service.search(query) {
+                Ok(results) => {
+                    // Apply limit to results
+                    let limit_val = limit as usize;
+                    let tracks: Vec<_> = results.tracks.into_iter().take(limit_val).collect();
+                    let albums: Vec<_> = results.albums.into_iter().take(limit_val).collect();
+                    let artists: Vec<_> = results.artists.into_iter().take(limit_val).collect();
+
+                    serde_json::json!({
+                        "success": true,
+                        "data": {
+                            "tracks": tracks,
+                            "albums": albums,
+                            "artists": artists
+                        }
+                    }).to_string()
+                }
+                Err(e) => {
+                    serde_json::json!({
+                        "success": false,
+                        "error": format!("Search failed: {}", e)
+                    }).to_string()
+                }
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn get_albums_page(offset: u32, limit: u32) -> String {
+    // T017: Get paginated list of albums
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let limit_capped = std::cmp::min(limit, 100) as usize;
+            let offset_val = offset as usize;
+
+            let conn = match pool.get() {
+                Ok(conn) => conn,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get database connection: {}", e)
+                    }).to_string();
+                }
+            };
+
+            match crate::db::queries::list_albums(
+                &conn,
+                None,  // artist_id
+                None,  // genre_id
+                None,  // min_rating
+                Some(limit_capped),
+                Some(offset_val),
+            ) {
+                Ok(albums) => {
+                    serde_json::json!({
+                        "success": true,
+                        "data": {
+                            "albums": albums,
+                            "offset": offset,
+                            "limit": limit_capped
+                        }
+                    }).to_string()
+                }
+                Err(e) => {
+                    serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to list albums: {}", e)
+                    }).to_string()
+                }
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn get_artists_page(offset: u32, limit: u32) -> String {
+    // T018: Get paginated list of artists
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let limit_capped = std::cmp::min(limit, 100) as usize;
+            let offset_val = offset as usize;
+
+            let conn = match pool.get() {
+                Ok(conn) => conn,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get database connection: {}", e)
+                    }).to_string();
+                }
+            };
+
+            match crate::db::queries::list_artists(&conn) {
+                Ok(all_artists) => {
+                    // Apply pagination manually
+                    let artists: Vec<_> = all_artists.into_iter()
+                        .skip(offset_val)
+                        .take(limit_capped)
+                        .collect();
+
+                    serde_json::json!({
+                        "success": true,
+                        "data": {
+                            "artists": artists,
+                            "offset": offset,
+                            "limit": limit_capped
+                        }
+                    }).to_string()
+                }
+                Err(e) => {
+                    serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to list artists: {}", e)
+                    }).to_string()
+                }
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn get_album_artwork(album_id: i64) -> Vec<u8> {
+    // T019: Get album artwork as raw bytes
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let conn = match pool.get() {
+                Ok(conn) => conn,
+                Err(_) => return Vec::new(),
+            };
+
+            match crate::db::queries::get_album(&conn, album_id) {
+                Ok(Some(album)) => {
+                    if let Some(artwork_path) = album.artwork_path {
+                        if let Ok(bytes) = std::fs::read(&artwork_path) {
+                            return bytes;
+                        }
+                    }
+                    Vec::new()
+                }
+                _ => Vec::new(),
+            }
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+fn get_playlists() -> String {
+    // T020: Get all playlists
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let playlist_service = PlaylistService::new(pool.clone());
+            match playlist_service.list_playlists() {
+                Ok(playlists) => {
+                    serde_json::json!({
+                        "success": true,
+                        "data": { "playlists": playlists }
+                    }).to_string()
+                }
+                Err(e) => {
+                    serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to list playlists: {}", e)
+                    }).to_string()
+                }
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn create_playlist(name: &str) -> String {
+    // T021: Create a new playlist
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let playlist_service = PlaylistService::new(pool.clone());
+            match playlist_service.create_playlist(name, None) {
+                Ok(playlist) => {
+                    serde_json::json!({
+                        "success": true,
+                        "data": { "playlist": playlist }
+                    }).to_string()
+                }
+                Err(e) => {
+                    serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to create playlist: {}", e)
+                    }).to_string()
+                }
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn delete_playlist(playlist_id: i64) -> String {
+    // T022: Delete a playlist
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let playlist_service = PlaylistService::new(pool.clone());
+            match playlist_service.delete_playlist(playlist_id) {
+                Ok(_) => {
+                    serde_json::json!({
+                        "success": true,
+                        "data": { "playlist_id": playlist_id }
+                    }).to_string()
+                }
+                Err(e) => {
+                    serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to delete playlist: {}", e)
+                    }).to_string()
+                }
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn add_track_to_playlist(playlist_id: i64, track_id: i64) -> String {
+    // T023: Add a track to a playlist
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let playlist_service = PlaylistService::new(pool.clone());
+            match playlist_service.add_tracks(playlist_id, vec![track_id]) {
+                Ok(_) => {
+                    serde_json::json!({
+                        "success": true,
+                        "data": {
+                            "playlist_id": playlist_id,
+                            "track_id": track_id
+                        }
+                    }).to_string()
+                }
+                Err(e) => {
+                    serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to add track to playlist: {}", e)
+                    }).to_string()
+                }
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn play_track(_track_id: i64) -> String {
+    // T024: Play a specific track
+    // Note: Player service requires proper initialization in a real implementation
+    // For now, return a placeholder response
+    serde_json::json!({
+        "success": false,
+        "error": "Player service not yet initialized in FFI bridge. This will be implemented in full SwiftUI integration."
+    }).to_string()
+}
+
+fn pause_playback() -> String {
+    // T025: Pause playback
+    serde_json::json!({
+        "success": false,
+        "error": "Player service not yet initialized in FFI bridge. This will be implemented in full SwiftUI integration."
+    }).to_string()
+}
+
+fn resume_playback() -> String {
+    // T026: Resume playback
+    serde_json::json!({
+        "success": false,
+        "error": "Player service not yet initialized in FFI bridge. This will be implemented in full SwiftUI integration."
+    }).to_string()
+}
+
+fn stop_playback() -> String {
+    // T027: Stop playback
+    serde_json::json!({
+        "success": false,
+        "error": "Player service not yet initialized in FFI bridge. This will be implemented in full SwiftUI integration."
+    }).to_string()
+}
+
+fn next_track() -> String {
+    // T028: Skip to next track
+    serde_json::json!({
+        "success": false,
+        "error": "Player service not yet initialized in FFI bridge. This will be implemented in full SwiftUI integration."
+    }).to_string()
+}
+
+fn previous_track() -> String {
+    // T029: Go to previous track
+    serde_json::json!({
+        "success": false,
+        "error": "Player service not yet initialized in FFI bridge. This will be implemented in full SwiftUI integration."
+    }).to_string()
+}
+
+fn get_player_state() -> String {
+    // T030: Get current player state
+    serde_json::json!({
+        "success": false,
+        "error": "Player service not yet initialized in FFI bridge. This will be implemented in full SwiftUI integration."
+    }).to_string()
+}
+
+fn get_queue() -> String {
+    // T031: Get current playback queue
+    serde_json::json!({
+        "success": false,
+        "error": "Player service not yet initialized in FFI bridge. This will be implemented in full SwiftUI integration."
+    }).to_string()
+}
+
+fn add_to_queue(_track_id: i64) -> String {
+    // T032: Add track to queue
+    serde_json::json!({
+        "success": false,
+        "error": "Player service not yet initialized in FFI bridge. This will be implemented in full SwiftUI integration."
+    }).to_string()
+}
+
+fn clear_queue() -> String {
+    // T033: Clear the playback queue
+    serde_json::json!({
+        "success": false,
+        "error": "Player service not yet initialized in FFI bridge. This will be implemented in full SwiftUI integration."
+    }).to_string()
+}
+
+fn reorder_queue(_track_ids: &str) -> String {
+    // T034: Reorder queue with provided track IDs (JSON array string)
+    serde_json::json!({
+        "success": false,
+        "error": "Player service not yet initialized in FFI bridge. This will be implemented in full SwiftUI integration."
+    }).to_string()
+}
+
+fn set_volume(_volume: f64) -> String {
+    // T035: Set playback volume (0.0 - 1.0)
+    serde_json::json!({
+        "success": false,
+        "error": "Player service not yet initialized in FFI bridge. This will be implemented in full SwiftUI integration."
+    }).to_string()
+}
+
+fn seek_to_position(_position: f64) -> String {
+    // T036: Seek to specific position in track (in seconds)
+    serde_json::json!({
+        "success": false,
+        "error": "Player service not yet initialized in FFI bridge. This will be implemented in full SwiftUI integration."
+    }).to_string()
+}

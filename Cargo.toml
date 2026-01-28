@@ -1,0 +1,40 @@
+[package]
+name = "tornade-core"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "tornade_core"
+crate-type = ["staticlib"]  # For production builds (Swift linking)
+
+[dependencies]
+# Workspace dependencies
+serde = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { workspace = true }
+r2d2 = { workspace = true }
+r2d2_sqlite = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+directories = { workspace = true }
+once_cell = { workspace = true }
+rodio = { workspace = true }
+symphonia = { workspace = true }
+lofty = { workspace = true }
+image = { workspace = true }
+walkdir = { workspace = true }
+rand = { workspace = true }
+
+# FFI bridge for Swift/Rust interop
+swift-bridge = "0.1"
+
+[build-dependencies]
+swift-bridge-build = "0.1"
+
+[dev-dependencies]
+tempfile = "3.8"
+
+[features]
+default = []
+device-support = []
