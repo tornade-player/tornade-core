@@ -5,7 +5,7 @@ edition = "2024"
 
 [lib]
 name = "tornade_core"
-crate-type = ["staticlib"]  # For production builds (Swift linking)
+crate-type = ["staticlib", "rlib"]  # staticlib for Swift, rlib for Rust crates
 
 [dependencies]
 # Workspace dependencies
