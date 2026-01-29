@@ -222,7 +222,7 @@ fn get_tracks_page(offset: u32, limit: u32) -> String {
 
             // Query tracks with pagination
             let query = format!(
-                "SELECT id, title, artist_id, album_id, duration, file_path, file_format, \
+                "SELECT id, title, artist_id, album_id, duration, file_path, file_type, \
                  sample_rate, bit_depth, bitrate, track_number, rating \
                  FROM tracks ORDER BY title LIMIT {} OFFSET {}",
                 limit_capped, offset_val
@@ -238,7 +238,7 @@ fn get_tracks_page(offset: u32, limit: u32) -> String {
                             "album_id": row.get::<_, Option<i64>>(3)?,
                             "duration": row.get::<_, Option<u32>>(4)?,
                             "file_path": row.get::<_, String>(5)?,
-                            "file_format": row.get::<_, String>(6)?,
+                            "file_type": row.get::<_, String>(6)?,
                             "sample_rate": row.get::<_, Option<u32>>(7)?,
                             "bit_depth": row.get::<_, Option<u16>>(8)?,
                             "bitrate": row.get::<_, Option<u32>>(9)?,
