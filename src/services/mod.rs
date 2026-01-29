@@ -12,7 +12,7 @@ pub mod search;
 pub use error::{LibraryError, PlayerError, PlaylistError};
 pub use events::{
     LibraryEvent, PlayerEvent, PlaylistEvent,
-    PlaybackState, RepeatMode, ScanProgress, ScanResult, ScanError,
+    PlaybackState, ScanProgress, ScanResult, ScanError,
     EventListener,
 };
 pub use metadata::{MetadataService, TrackMetadata};
@@ -21,3 +21,4 @@ pub use player::PlayerService;
 pub use playlist::PlaylistService;
 pub use duplicate::{DuplicateService, DuplicateGroup};
 pub use search::{SearchService, SearchResults};
+// RepeatMode is re-exported from crate::models

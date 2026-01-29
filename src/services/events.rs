@@ -1,6 +1,7 @@
 // Service layer event types for UI subscription
 
-use crate::models::{Track, Playlist};
+use crate::models::{Track, Playlist, RepeatMode};
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -38,19 +39,15 @@ pub enum LibraryEvent {
     TrackRated { track_id: i64, rating: u8 },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum PlaybackState {
     Stopped,
     Playing,
     Paused,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RepeatMode {
-    Off,
-    All,
-    One,
-}
+// RepeatMode is imported from crate::models::RepeatMode
 
 #[derive(Debug, Clone)]
 pub enum PlayerEvent {

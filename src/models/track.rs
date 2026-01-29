@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum AudioFormat {
     Flac,
     Mp3,
@@ -34,6 +35,7 @@ impl AudioFormat {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct Track {
     pub id: i64,
     pub title: String,

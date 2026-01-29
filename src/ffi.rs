@@ -12,6 +12,12 @@ use crate::utils::AppPaths;
 // Global database pool - the only shared state we need
 static DB_POOL: Lazy<Mutex<Option<db::DbPool>>> = Lazy::new(|| Mutex::new(None));
 
+// Thread-local player service (rodio's OutputStream is not Send/Sync)
+use std::cell::RefCell;
+thread_local! {
+    static PLAYER_SERVICE: RefCell<Option<player::PlayerService>> = RefCell::new(None);
+}
+
 fn get_or_init_pool() -> Result<db::DbPool, String> {
     let mut pool_opt = DB_POOL.lock().unwrap();
 
@@ -32,6 +38,25 @@ fn get_or_init_pool() -> Result<db::DbPool, String> {
     }
 
     Ok(pool_opt.as_ref().unwrap().clone())
+}
+
+fn get_or_init_player() -> Result<(), String> {
+    PLAYER_SERVICE.with(|player_cell| {
+        let mut player_opt = player_cell.borrow_mut();
+
+        if player_opt.is_none() {
+            // Get database pool first
+            let pool = get_or_init_pool()?;
+
+            // Create player service
+            let player = player::PlayerService::new(pool)
+                .map_err(|e| format!("Failed to create player service: {}", e))?;
+
+            *player_opt = Some(player);
+        }
+
+        Ok(())
+    })
 }
 
 #[swift_bridge::bridge]
@@ -220,10 +245,11 @@ fn get_tracks_page(offset: u32, limit: u32) -> String {
                 }
             };
 
-            // Query tracks with pagination
+            // Query tracks with pagination - all fields to match Swift Track model
             let query = format!(
-                "SELECT id, title, artist_id, album_id, duration, file_path, file_type, \
-                 sample_rate, bit_depth, bitrate, track_number, rating \
+                "SELECT id, title, artist_id, album_id, source_id, file_path, duration, \
+                 track_number, disc_number, sample_rate, bit_depth, file_type, file_size, \
+                 rating, fingerprint, is_duplicate, duplicate_of, last_played_at, play_count \
                  FROM tracks ORDER BY title LIMIT {} OFFSET {}",
                 limit_capped, offset_val
             );
@@ -234,16 +260,23 @@ fn get_tracks_page(offset: u32, limit: u32) -> String {
                         Ok(serde_json::json!({
                             "id": row.get::<_, i64>(0)?,
                             "title": row.get::<_, String>(1)?,
-                            "artist_id": row.get::<_, Option<i64>>(2)?,
+                            "artist_id": row.get::<_, i64>(2)?,
                             "album_id": row.get::<_, Option<i64>>(3)?,
-                            "duration": row.get::<_, Option<u32>>(4)?,
+                            "source_id": row.get::<_, i64>(4)?,
                             "file_path": row.get::<_, String>(5)?,
-                            "file_type": row.get::<_, String>(6)?,
-                            "sample_rate": row.get::<_, Option<u32>>(7)?,
-                            "bit_depth": row.get::<_, Option<u16>>(8)?,
-                            "bitrate": row.get::<_, Option<u32>>(9)?,
-                            "track_number": row.get::<_, Option<u16>>(10)?,
-                            "rating": row.get::<_, Option<u8>>(11)?,
+                            "duration": row.get::<_, i64>(6)?,  // Duration in milliseconds
+                            "track_number": row.get::<_, Option<u32>>(7)?,
+                            "disc_number": row.get::<_, u32>(8)?,
+                            "sample_rate": row.get::<_, Option<u32>>(9)?,
+                            "bit_depth": row.get::<_, Option<u8>>(10)?,
+                            "file_type": row.get::<_, String>(11)?,
+                            "file_size": row.get::<_, i64>(12)?,
+                            "rating": row.get::<_, u8>(13)?,
+                            "fingerprint": row.get::<_, Option<String>>(14)?,
+                            "is_duplicate": row.get::<_, bool>(15)?,
+                            "duplicate_of": row.get::<_, Option<i64>>(16)?,
+                            "last_played_at": row.get::<_, Option<String>>(17)?,
+                            "play_count": row.get::<_, u32>(18)?,
                         }))
                     });
 
@@ -624,108 +657,536 @@ fn add_track_to_playlist(playlist_id: i64, track_id: i64) -> String {
     }
 }
 
-fn play_track(_track_id: i64) -> String {
+fn play_track(track_id: i64) -> String {
     // T024: Play a specific track
-    // Note: Player service requires proper initialization in a real implementation
-    // For now, return a placeholder response
-    serde_json::json!({
-        "success": false,
-        "error": "Player service not yet initialized in FFI bridge. This will be implemented in full SwiftUI integration."
-    }).to_string()
+    // Sets queue to just this track and starts playback
+    match get_or_init_player() {
+        Ok(()) => {
+            PLAYER_SERVICE.with(|player_cell| {
+                let player = player_cell.borrow();
+                if let Some(ref player_service) = *player {
+                    // Set queue to this single track
+                    if let Err(e) = player_service.set_queue(vec![track_id]) {
+                        return serde_json::json!({
+                            "success": false,
+                            "error": format!("Failed to set queue: {}", e)
+                        }).to_string();
+                    }
+
+                    // Now play it
+                    match player_service.play(track_id) {
+                        Ok(()) => {
+                            serde_json::json!({
+                                "success": true,
+                                "data": "Track playing"
+                            }).to_string()
+                        }
+                        Err(e) => {
+                            serde_json::json!({
+                                "success": false,
+                                "error": format!("Failed to play track: {}", e)
+                            }).to_string()
+                        }
+                    }
+                } else {
+                    serde_json::json!({
+                        "success": false,
+                        "error": "Player service not initialized"
+                    }).to_string()
+                }
+            })
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
 }
 
 fn pause_playback() -> String {
     // T025: Pause playback
-    serde_json::json!({
-        "success": false,
-        "error": "Player service not yet initialized in FFI bridge. This will be implemented in full SwiftUI integration."
-    }).to_string()
+    match get_or_init_player() {
+        Ok(()) => {
+            PLAYER_SERVICE.with(|player_cell| {
+                let player = player_cell.borrow();
+                if let Some(ref player_service) = *player {
+                    match player_service.pause() {
+                        Ok(()) => {
+                            serde_json::json!({
+                                "success": true,
+                                "data": "Playback paused"
+                            }).to_string()
+                        }
+                        Err(e) => {
+                            serde_json::json!({
+                                "success": false,
+                                "error": format!("Failed to pause: {}", e)
+                            }).to_string()
+                        }
+                    }
+                } else {
+                    serde_json::json!({
+                        "success": false,
+                        "error": "Player service not initialized"
+                    }).to_string()
+                }
+            })
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
 }
 
 fn resume_playback() -> String {
     // T026: Resume playback
-    serde_json::json!({
-        "success": false,
-        "error": "Player service not yet initialized in FFI bridge. This will be implemented in full SwiftUI integration."
-    }).to_string()
+    match get_or_init_player() {
+        Ok(()) => {
+            PLAYER_SERVICE.with(|player_cell| {
+                let player = player_cell.borrow();
+                if let Some(ref player_service) = *player {
+                    match player_service.resume() {
+                        Ok(()) => {
+                            serde_json::json!({
+                                "success": true,
+                                "data": "Playback resumed"
+                            }).to_string()
+                        }
+                        Err(e) => {
+                            serde_json::json!({
+                                "success": false,
+                                "error": format!("Failed to resume: {}", e)
+                            }).to_string()
+                        }
+                    }
+                } else {
+                    serde_json::json!({
+                        "success": false,
+                        "error": "Player service not initialized"
+                    }).to_string()
+                }
+            })
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
 }
 
 fn stop_playback() -> String {
     // T027: Stop playback
-    serde_json::json!({
-        "success": false,
-        "error": "Player service not yet initialized in FFI bridge. This will be implemented in full SwiftUI integration."
-    }).to_string()
+    match get_or_init_player() {
+        Ok(()) => {
+            PLAYER_SERVICE.with(|player_cell| {
+                let player = player_cell.borrow();
+                if let Some(ref player_service) = *player {
+                    match player_service.stop() {
+                        Ok(()) => {
+                            serde_json::json!({
+                                "success": true,
+                                "data": "Playback stopped"
+                            }).to_string()
+                        }
+                        Err(e) => {
+                            serde_json::json!({
+                                "success": false,
+                                "error": format!("Failed to stop: {}", e)
+                            }).to_string()
+                        }
+                    }
+                } else {
+                    serde_json::json!({
+                        "success": false,
+                        "error": "Player service not initialized"
+                    }).to_string()
+                }
+            })
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
 }
 
 fn next_track() -> String {
     // T028: Skip to next track
-    serde_json::json!({
-        "success": false,
-        "error": "Player service not yet initialized in FFI bridge. This will be implemented in full SwiftUI integration."
-    }).to_string()
+    match get_or_init_player() {
+        Ok(()) => {
+            PLAYER_SERVICE.with(|player_cell| {
+                let player = player_cell.borrow();
+                if let Some(ref player_service) = *player {
+                    match player_service.next() {
+                        Ok(()) => {
+                            serde_json::json!({
+                                "success": true,
+                                "data": "Skipped to next track"
+                            }).to_string()
+                        }
+                        Err(e) => {
+                            serde_json::json!({
+                                "success": false,
+                                "error": format!("Failed to skip to next: {}", e)
+                            }).to_string()
+                        }
+                    }
+                } else {
+                    serde_json::json!({
+                        "success": false,
+                        "error": "Player service not initialized"
+                    }).to_string()
+                }
+            })
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
 }
 
 fn previous_track() -> String {
     // T029: Go to previous track
-    serde_json::json!({
-        "success": false,
-        "error": "Player service not yet initialized in FFI bridge. This will be implemented in full SwiftUI integration."
-    }).to_string()
+    match get_or_init_player() {
+        Ok(()) => {
+            PLAYER_SERVICE.with(|player_cell| {
+                let player = player_cell.borrow();
+                if let Some(ref player_service) = *player {
+                    match player_service.previous() {
+                        Ok(()) => {
+                            serde_json::json!({
+                                "success": true,
+                                "data": "Skipped to previous track"
+                            }).to_string()
+                        }
+                        Err(e) => {
+                            serde_json::json!({
+                                "success": false,
+                                "error": format!("Failed to skip to previous: {}", e)
+                            }).to_string()
+                        }
+                    }
+                } else {
+                    serde_json::json!({
+                        "success": false,
+                        "error": "Player service not initialized"
+                    }).to_string()
+                }
+            })
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
 }
 
 fn get_player_state() -> String {
     // T030: Get current player state
-    serde_json::json!({
-        "success": false,
-        "error": "Player service not yet initialized in FFI bridge. This will be implemented in full SwiftUI integration."
-    }).to_string()
+    match get_or_init_player() {
+        Ok(()) => {
+            PLAYER_SERVICE.with(|player_cell| {
+                let player = player_cell.borrow();
+                if let Some(ref player_service) = *player {
+                    use crate::services::events::PlaybackState;
+
+                    let current_track = player_service.get_current_track();
+                    let playback_state = player_service.get_state();
+                    let volume = player_service.get_volume();
+                    let shuffle = player_service.is_shuffle_enabled();
+                    let repeat_mode = player_service.get_repeat_mode();
+
+                    // Convert PlaybackState to is_playing boolean
+                    let is_playing = matches!(playback_state, PlaybackState::Playing);
+
+                    // Extract track ID and duration
+                    let current_track_id = current_track.as_ref().map(|t| t.id);
+                    let duration = current_track.as_ref()
+                        .map(|t| t.duration.as_secs_f64())
+                        .unwrap_or(0.0);
+
+                    let json_result = serde_json::json!({
+                        "success": true,
+                        "data": {
+                            "is_playing": is_playing,
+                            "current_track_id": current_track_id,
+                            "position": 0.0,  // TODO: rodio doesn't expose position easily
+                            "duration": duration,
+                            "volume": volume as f64,  // Cast f32 to f64 for JSON
+                            "shuffle": shuffle,
+                            "repeat_mode": repeat_mode
+                        }
+                    });
+                    log::debug!("get_player_state JSON: {}", json_result);
+                    json_result.to_string()
+                } else {
+                    serde_json::json!({
+                        "success": false,
+                        "error": "Player service not initialized"
+                    }).to_string()
+                }
+            })
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
 }
 
 fn get_queue() -> String {
     // T031: Get current playback queue
-    serde_json::json!({
-        "success": false,
-        "error": "Player service not yet initialized in FFI bridge. This will be implemented in full SwiftUI integration."
-    }).to_string()
+    match get_or_init_player() {
+        Ok(()) => {
+            PLAYER_SERVICE.with(|player_cell| {
+                let player = player_cell.borrow();
+                if let Some(ref player_service) = *player {
+                    let queue = player_service.get_queue();
+                    let current_index = player_service.get_queue_index();
+                    let shuffle = player_service.is_shuffle_enabled();
+                    let repeat_mode = player_service.get_repeat_mode();
+
+                    serde_json::json!({
+                        "success": true,
+                        "data": {
+                            "items": queue,  // Changed from "queue" to "items" to match Swift model
+                            "current_index": current_index,
+                            "shuffle": shuffle,
+                            "repeat_mode": repeat_mode
+                        }
+                    }).to_string()
+                } else {
+                    serde_json::json!({
+                        "success": false,
+                        "error": "Player service not initialized"
+                    }).to_string()
+                }
+            })
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
 }
 
-fn add_to_queue(_track_id: i64) -> String {
+fn add_to_queue(track_id: i64) -> String {
     // T032: Add track to queue
-    serde_json::json!({
-        "success": false,
-        "error": "Player service not yet initialized in FFI bridge. This will be implemented in full SwiftUI integration."
-    }).to_string()
+    match get_or_init_player() {
+        Ok(()) => {
+            PLAYER_SERVICE.with(|player_cell| {
+                let player = player_cell.borrow();
+                if let Some(ref player_service) = *player {
+                    match player_service.add_to_queue(vec![track_id]) {
+                        Ok(()) => {
+                            serde_json::json!({
+                                "success": true,
+                                "data": "Track added to queue"
+                            }).to_string()
+                        }
+                        Err(e) => {
+                            serde_json::json!({
+                                "success": false,
+                                "error": format!("Failed to add to queue: {}", e)
+                            }).to_string()
+                        }
+                    }
+                } else {
+                    serde_json::json!({
+                        "success": false,
+                        "error": "Player service not initialized"
+                    }).to_string()
+                }
+            })
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
 }
 
 fn clear_queue() -> String {
     // T033: Clear the playback queue
-    serde_json::json!({
-        "success": false,
-        "error": "Player service not yet initialized in FFI bridge. This will be implemented in full SwiftUI integration."
-    }).to_string()
+    match get_or_init_player() {
+        Ok(()) => {
+            PLAYER_SERVICE.with(|player_cell| {
+                let player = player_cell.borrow();
+                if let Some(ref player_service) = *player {
+                    match player_service.clear_queue() {
+                        Ok(()) => {
+                            serde_json::json!({
+                                "success": true,
+                                "data": "Queue cleared"
+                            }).to_string()
+                        }
+                        Err(e) => {
+                            serde_json::json!({
+                                "success": false,
+                                "error": format!("Failed to clear queue: {}", e)
+                            }).to_string()
+                        }
+                    }
+                } else {
+                    serde_json::json!({
+                        "success": false,
+                        "error": "Player service not initialized"
+                    }).to_string()
+                }
+            })
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
 }
 
-fn reorder_queue(_track_ids: &str) -> String {
+fn reorder_queue(track_ids: &str) -> String {
     // T034: Reorder queue with provided track IDs (JSON array string)
-    serde_json::json!({
-        "success": false,
-        "error": "Player service not yet initialized in FFI bridge. This will be implemented in full SwiftUI integration."
-    }).to_string()
+    match get_or_init_player() {
+        Ok(()) => {
+            // Parse track IDs from JSON array
+            let track_ids_vec: Vec<i64> = match serde_json::from_str(track_ids) {
+                Ok(ids) => ids,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to parse track IDs: {}", e)
+                    }).to_string();
+                }
+            };
+
+            PLAYER_SERVICE.with(|player_cell| {
+                let player = player_cell.borrow();
+                if let Some(ref player_service) = *player {
+                    match player_service.set_queue(track_ids_vec) {
+                        Ok(()) => {
+                            serde_json::json!({
+                                "success": true,
+                                "data": "Queue reordered"
+                            }).to_string()
+                        }
+                        Err(e) => {
+                            serde_json::json!({
+                                "success": false,
+                                "error": format!("Failed to reorder queue: {}", e)
+                            }).to_string()
+                        }
+                    }
+                } else {
+                    serde_json::json!({
+                        "success": false,
+                        "error": "Player service not initialized"
+                    }).to_string()
+                }
+            })
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
 }
 
-fn set_volume(_volume: f64) -> String {
+fn set_volume(volume: f64) -> String {
     // T035: Set playback volume (0.0 - 1.0)
-    serde_json::json!({
-        "success": false,
-        "error": "Player service not yet initialized in FFI bridge. This will be implemented in full SwiftUI integration."
-    }).to_string()
+    match get_or_init_player() {
+        Ok(()) => {
+            PLAYER_SERVICE.with(|player_cell| {
+                let player = player_cell.borrow();
+                if let Some(ref player_service) = *player {
+                    match player_service.set_volume(volume as f32) {
+                        Ok(()) => {
+                            serde_json::json!({
+                                "success": true,
+                                "data": format!("Volume set to {}", volume)
+                            }).to_string()
+                        }
+                        Err(e) => {
+                            serde_json::json!({
+                                "success": false,
+                                "error": format!("Failed to set volume: {}", e)
+                            }).to_string()
+                        }
+                    }
+                } else {
+                    serde_json::json!({
+                        "success": false,
+                        "error": "Player service not initialized"
+                    }).to_string()
+                }
+            })
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
 }
 
-fn seek_to_position(_position: f64) -> String {
+fn seek_to_position(position: f64) -> String {
     // T036: Seek to specific position in track (in seconds)
-    serde_json::json!({
-        "success": false,
-        "error": "Player service not yet initialized in FFI bridge. This will be implemented in full SwiftUI integration."
-    }).to_string()
+    match get_or_init_player() {
+        Ok(()) => {
+            PLAYER_SERVICE.with(|player_cell| {
+                let player = player_cell.borrow();
+                if let Some(ref player_service) = *player {
+                    use std::time::Duration;
+                    let duration = Duration::from_secs_f64(position);
+                    match player_service.seek(duration) {
+                        Ok(()) => {
+                            serde_json::json!({
+                                "success": true,
+                                "data": format!("Seeked to {}", position)
+                            }).to_string()
+                        }
+                        Err(e) => {
+                            serde_json::json!({
+                                "success": false,
+                                "error": format!("Seek not supported: {}", e)
+                            }).to_string()
+                        }
+                    }
+                } else {
+                    serde_json::json!({
+                        "success": false,
+                        "error": "Player service not initialized"
+                    }).to_string()
+                }
+            })
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
 }
