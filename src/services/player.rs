@@ -179,12 +179,14 @@ impl PlayerService {
         Ok(())
     }
 
-    /// Seek to position (rodio has limited seek support)
-    pub fn seek(&self, _position: Duration) -> Result<()> {
-        // Note: rodio doesn't support seeking directly
-        // This would require implementing a custom source with seek capability
-        warn!("Seek not yet implemented in rodio backend");
-        Err(PlayerError::Audio("Seek not supported".to_string()))
+    /// Seek to position in the current track
+    ///
+    /// Note: Seeking is not currently implemented due to rodio/decoder limitations.
+    /// Implementing seek support would require using symphonia directly with a custom
+    /// Source implementation that supports the Seek trait.
+    pub fn seek(&self, position: Duration) -> Result<()> {
+        warn!("Seek to {:?} requested but not implemented - rodio decoder doesn't support seeking", position);
+        Err(PlayerError::Audio("Seeking not supported - requires custom symphonia decoder".to_string()))
     }
 
     /// Skip to next track
