@@ -75,6 +75,7 @@ mod ffi {
         // Album Functions
         fn get_albums_page(offset: u32, limit: u32) -> String;
         fn get_album_by_id(album_id: i64) -> String;
+        fn get_album_tracks(album_id: i64) -> String;
         fn get_album_artwork(album_id: i64) -> Vec<u8>;
 
         // Artist Functions
@@ -84,8 +85,10 @@ mod ffi {
         // Playlist Functions
         fn get_playlists() -> String;
         fn create_playlist(name: &str) -> String;
+        fn rename_playlist(playlist_id: i64, name: &str) -> String;
         fn delete_playlist(playlist_id: i64) -> String;
         fn add_track_to_playlist(playlist_id: i64, track_id: i64) -> String;
+        fn remove_track_from_playlist(playlist_id: i64, position: i64) -> String;
 
         // Playback Control Functions
         fn play_track(track_id: i64) -> String;
@@ -99,6 +102,8 @@ mod ffi {
         // Queue Management Functions
         fn get_queue() -> String;
         fn add_to_queue(track_id: i64) -> String;
+        fn add_tracks_to_queue(track_ids: &str) -> String;
+        fn set_queue(track_ids: &str) -> String;
         fn clear_queue() -> String;
         fn reorder_queue(track_ids: &str) -> String;
 
@@ -635,6 +640,44 @@ fn get_album_artwork(album_id: i64) -> Vec<u8> {
     }
 }
 
+fn get_album_tracks(album_id: i64) -> String {
+    // Get all tracks for a specific album
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let conn = match pool.get() {
+                Ok(conn) => conn,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get database connection: {}", e)
+                    }).to_string();
+                }
+            };
+
+            match crate::db::queries::get_album_tracks(&conn, album_id) {
+                Ok(tracks) => {
+                    serde_json::json!({
+                        "success": true,
+                        "data": { "tracks": tracks }
+                    }).to_string()
+                }
+                Err(e) => {
+                    serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get album tracks: {}", e)
+                    }).to_string()
+                }
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("Database pool error: {}", e)
+            }).to_string()
+        }
+    }
+}
+
 fn get_playlists() -> String {
     // T020: Get all playlists
     match get_or_init_pool() {
@@ -680,6 +723,35 @@ fn create_playlist(name: &str) -> String {
                     serde_json::json!({
                         "success": false,
                         "error": format!("Failed to create playlist: {}", e)
+                    }).to_string()
+                }
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn rename_playlist(playlist_id: i64, name: &str) -> String {
+    // Rename an existing playlist
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let playlist_service = PlaylistService::new(pool.clone());
+            match playlist_service.rename_playlist(playlist_id, name) {
+                Ok(()) => {
+                    serde_json::json!({
+                        "success": true,
+                        "data": { "playlist_id": playlist_id, "name": name }
+                    }).to_string()
+                }
+                Err(e) => {
+                    serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to rename playlist: {}", e)
                     }).to_string()
                 }
             }
@@ -741,6 +813,38 @@ fn add_track_to_playlist(playlist_id: i64, track_id: i64) -> String {
                     serde_json::json!({
                         "success": false,
                         "error": format!("Failed to add track to playlist: {}", e)
+                    }).to_string()
+                }
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn remove_track_from_playlist(playlist_id: i64, position: i64) -> String {
+    // Remove a track from a playlist at the given position
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let playlist_service = PlaylistService::new(pool.clone());
+            match playlist_service.remove_track(playlist_id, position as usize) {
+                Ok(()) => {
+                    serde_json::json!({
+                        "success": true,
+                        "data": {
+                            "playlist_id": playlist_id,
+                            "position": position
+                        }
+                    }).to_string()
+                }
+                Err(e) => {
+                    serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to remove track from playlist: {}", e)
                     }).to_string()
                 }
             }
@@ -1099,6 +1203,102 @@ fn add_to_queue(track_id: i64) -> String {
                             }).to_string()
                         }
                     }
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "error": "Player service not initialized"
+                }).to_string()
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn add_tracks_to_queue(track_ids: &str) -> String {
+    // Add multiple tracks to queue
+    match get_or_init_player() {
+        Ok(()) => {
+            // Parse JSON array of track IDs
+            let ids: Vec<i64> = match serde_json::from_str(track_ids) {
+                Ok(ids) => ids,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to parse track IDs: {}", e)
+                    }).to_string();
+                }
+            };
+
+            let player = PLAYER_SERVICE.lock().unwrap();
+            if let Some(ref wrapped) = *player {
+                let player_service = &wrapped.0;
+                match player_service.add_to_queue(ids.clone()) {
+                    Ok(()) => {
+                        serde_json::json!({
+                            "success": true,
+                            "data": format!("{} tracks added to queue", ids.len())
+                        }).to_string()
+                    }
+                    Err(e) => {
+                        serde_json::json!({
+                            "success": false,
+                            "error": format!("Failed to add tracks to queue: {}", e)
+                        }).to_string()
+                    }
+                }
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "error": "Player service not initialized"
+                }).to_string()
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn set_queue(track_ids: &str) -> String {
+    // Replace the entire queue with new tracks
+    match get_or_init_player() {
+        Ok(()) => {
+            // Parse JSON array of track IDs
+            let ids: Vec<i64> = match serde_json::from_str(track_ids) {
+                Ok(ids) => ids,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to parse track IDs: {}", e)
+                    }).to_string();
+                }
+            };
+
+            let player = PLAYER_SERVICE.lock().unwrap();
+            if let Some(ref wrapped) = *player {
+                let player_service = &wrapped.0;
+                match player_service.set_queue(ids.clone()) {
+                    Ok(()) => {
+                        serde_json::json!({
+                            "success": true,
+                            "data": format!("Queue set with {} tracks", ids.len())
+                        }).to_string()
+                    }
+                    Err(e) => {
+                        serde_json::json!({
+                            "success": false,
+                            "error": format!("Failed to set queue: {}", e)
+                        }).to_string()
+                    }
+                }
             } else {
                 serde_json::json!({
                     "success": false,
