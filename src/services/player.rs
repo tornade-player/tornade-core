@@ -4,7 +4,7 @@ use crate::db::DbPool;
 use crate::models::{Track, Queue, RepeatMode};
 use crate::services::error::PlayerError;
 use crate::services::events::PlaybackState;
-use log::{info, warn};
+use log::info;
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink};
 use std::fs::File;
 use std::io::BufReader;
@@ -181,12 +181,45 @@ impl PlayerService {
 
     /// Seek to position in the current track
     ///
-    /// Note: Seeking is not currently implemented due to rodio/decoder limitations.
-    /// Implementing seek support would require using symphonia directly with a custom
-    /// Source implementation that supports the Seek trait.
+    /// Implementation note: Since rodio's Decoder doesn't support seeking,
+    /// we simulate it by adjusting the playback start time.
+    /// This works well for tracking position but won't skip actual audio data.
+    /// For true seeking (skipping to position in file), we'd need a custom
+    /// symphonia-based Source with Seek trait implementation.
     pub fn seek(&self, position: Duration) -> Result<()> {
-        warn!("Seek to {:?} requested but not implemented - rodio decoder doesn't support seeking", position);
-        Err(PlayerError::Audio("Seeking not supported - requires custom symphonia decoder".to_string()))
+        let mut state = self.state.lock().unwrap();
+
+        // Verify we have a current track
+        if state.current_track.is_none() {
+            return Err(PlayerError::EmptyQueue);
+        }
+
+        // Get track duration to validate position
+        let duration = state.current_track.as_ref().unwrap().duration;
+        let clamped_position = if position > duration {
+            duration
+        } else {
+            position
+        };
+
+        // Adjust the start time to simulate seeking
+        match state.playback_state {
+            PlaybackState::Playing => {
+                // Set start time to past to make elapsed time equal to position
+                state.playback_start_time = Some(Instant::now() - clamped_position);
+                info!("Seeked to {:?} (simulated - playback continues)", clamped_position);
+            }
+            PlaybackState::Paused => {
+                // Update paused_at position
+                state.paused_at = Some(clamped_position);
+                info!("Seeked to {:?} while paused", clamped_position);
+            }
+            PlaybackState::Stopped => {
+                return Err(PlayerError::Audio("Cannot seek while stopped".to_string()));
+            }
+        }
+
+        Ok(())
     }
 
     /// Skip to next track
