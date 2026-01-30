@@ -105,6 +105,12 @@ mod ffi {
         // Audio Control Functions
         fn set_volume(volume: f64) -> String;
         fn seek_to_position(position: f64) -> String;
+
+        // Playback Mode Functions
+        fn toggle_shuffle() -> String;
+        fn set_shuffle(enabled: bool) -> String;
+        fn toggle_repeat() -> String;
+        fn set_repeat_mode(mode: &str) -> String;
     }
 }
 
@@ -1254,6 +1260,174 @@ fn seek_to_position(position: f64) -> String {
                             }).to_string()
                         }
                     }
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "error": "Player service not initialized"
+                }).to_string()
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn toggle_shuffle() -> String {
+    // Toggle shuffle mode on/off
+    match get_or_init_player() {
+        Ok(()) => {
+            let player = PLAYER_SERVICE.lock().unwrap();
+            if let Some(ref wrapped) = *player {
+                let player_service = &wrapped.0;
+                let current = player_service.is_shuffle_enabled();
+                match player_service.set_shuffle(!current) {
+                    Ok(()) => {
+                        serde_json::json!({
+                            "success": true,
+                            "data": format!("Shuffle {}", if !current { "enabled" } else { "disabled" })
+                        }).to_string()
+                    }
+                    Err(e) => {
+                        serde_json::json!({
+                            "success": false,
+                            "error": format!("Failed to toggle shuffle: {}", e)
+                        }).to_string()
+                    }
+                }
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "error": "Player service not initialized"
+                }).to_string()
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn set_shuffle(enabled: bool) -> String {
+    // Set shuffle mode to specific state
+    match get_or_init_player() {
+        Ok(()) => {
+            let player = PLAYER_SERVICE.lock().unwrap();
+            if let Some(ref wrapped) = *player {
+                let player_service = &wrapped.0;
+                match player_service.set_shuffle(enabled) {
+                    Ok(()) => {
+                        serde_json::json!({
+                            "success": true,
+                            "data": format!("Shuffle {}", if enabled { "enabled" } else { "disabled" })
+                        }).to_string()
+                    }
+                    Err(e) => {
+                        serde_json::json!({
+                            "success": false,
+                            "error": format!("Failed to set shuffle: {}", e)
+                        }).to_string()
+                    }
+                }
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "error": "Player service not initialized"
+                }).to_string()
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn toggle_repeat() -> String {
+    // Cycle through repeat modes: Off -> All -> One -> Off
+    match get_or_init_player() {
+        Ok(()) => {
+            let player = PLAYER_SERVICE.lock().unwrap();
+            if let Some(ref wrapped) = *player {
+                let player_service = &wrapped.0;
+                use crate::models::RepeatMode;
+                let current = player_service.get_repeat_mode();
+                let next = match current {
+                    RepeatMode::Off => RepeatMode::All,
+                    RepeatMode::All => RepeatMode::One,
+                    RepeatMode::One => RepeatMode::Off,
+                };
+                match player_service.set_repeat(next) {
+                    Ok(()) => {
+                        serde_json::json!({
+                            "success": true,
+                            "data": format!("Repeat mode: {:?}", next)
+                        }).to_string()
+                    }
+                    Err(e) => {
+                        serde_json::json!({
+                            "success": false,
+                            "error": format!("Failed to toggle repeat: {}", e)
+                        }).to_string()
+                    }
+                }
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "error": "Player service not initialized"
+                }).to_string()
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn set_repeat_mode(mode: &str) -> String {
+    // Set specific repeat mode: "off", "all", or "one"
+    match get_or_init_player() {
+        Ok(()) => {
+            let player = PLAYER_SERVICE.lock().unwrap();
+            if let Some(ref wrapped) = *player {
+                let player_service = &wrapped.0;
+                use crate::models::RepeatMode;
+                let repeat_mode = match mode.to_lowercase().as_str() {
+                    "off" => RepeatMode::Off,
+                    "all" => RepeatMode::All,
+                    "one" => RepeatMode::One,
+                    _ => {
+                        return serde_json::json!({
+                            "success": false,
+                            "error": format!("Invalid repeat mode: {}. Use 'off', 'all', or 'one'", mode)
+                        }).to_string();
+                    }
+                };
+                match player_service.set_repeat(repeat_mode) {
+                    Ok(()) => {
+                        serde_json::json!({
+                            "success": true,
+                            "data": format!("Repeat mode: {:?}", repeat_mode)
+                        }).to_string()
+                    }
+                    Err(e) => {
+                        serde_json::json!({
+                            "success": false,
+                            "error": format!("Failed to set repeat mode: {}", e)
+                        }).to_string()
+                    }
+                }
             } else {
                 serde_json::json!({
                     "success": false,
