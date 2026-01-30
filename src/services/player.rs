@@ -187,38 +187,70 @@ impl PlayerService {
     /// For true seeking (skipping to position in file), we'd need a custom
     /// symphonia-based Source with Seek trait implementation.
     pub fn seek(&self, position: Duration) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
+        // Get current track info before locking state
+        let (track, was_playing, volume) = {
+            let state = self.state.lock().unwrap();
 
-        // Verify we have a current track
-        if state.current_track.is_none() {
-            return Err(PlayerError::EmptyQueue);
-        }
+            // Verify we have a current track
+            let track = state.current_track.as_ref()
+                .ok_or(PlayerError::EmptyQueue)?
+                .clone();
 
-        // Get track duration to validate position
-        let duration = state.current_track.as_ref().unwrap().duration;
-        let clamped_position = if position > duration {
-            duration
+            let was_playing = matches!(state.playback_state, PlaybackState::Playing);
+            let volume = state.volume;
+
+            (track, was_playing, volume)
+        };
+
+        // Validate and clamp position
+        let clamped_position = if position > track.duration {
+            track.duration
         } else {
             position
         };
 
-        // Adjust the start time to simulate seeking
-        match state.playback_state {
-            PlaybackState::Playing => {
-                // Set start time to past to make elapsed time equal to position
-                state.playback_start_time = Some(Instant::now() - clamped_position);
-                info!("Seeked to {:?} (simulated - playback continues)", clamped_position);
-            }
-            PlaybackState::Paused => {
-                // Update paused_at position
-                state.paused_at = Some(clamped_position);
-                info!("Seeked to {:?} while paused", clamped_position);
-            }
-            PlaybackState::Stopped => {
-                return Err(PlayerError::Audio("Cannot seek while stopped".to_string()));
-            }
+        // If not playing, just update the paused position
+        if !was_playing {
+            let mut state = self.state.lock().unwrap();
+            state.paused_at = Some(clamped_position);
+            info!("Seeked to {:?} while paused", clamped_position);
+            return Ok(());
         }
 
+        // For playing state, we need to restart playback from the new position
+        // Get stream handle
+        let stream_handle = self.ensure_audio_stream()?;
+
+        // Open and decode file
+        let file = File::open(&track.file_path)
+            .map_err(|e| PlayerError::Audio(format!("Failed to open file: {}", e)))?;
+
+        let source = Decoder::new(BufReader::new(file))
+            .map_err(|e| PlayerError::Audio(format!("Failed to decode audio: {}", e)))?;
+
+        // Skip to the desired position using rodio's skip_duration
+        use rodio::Source;
+        let source_at_position = source.skip_duration(clamped_position);
+
+        // Create new sink
+        let sink = Sink::try_new(&stream_handle)
+            .map_err(|e| PlayerError::Audio(format!("Failed to create sink: {}", e)))?;
+
+        sink.set_volume(volume);
+        sink.append(source_at_position);
+        sink.play();
+
+        // Update state
+        {
+            let mut state = self.state.lock().unwrap();
+            state.playback_start_time = Some(Instant::now() - clamped_position);
+            state.playback_state = PlaybackState::Playing;
+
+            // Replace sink
+            *self.sink.lock().unwrap() = Some(sink);
+        }
+
+        info!("Seeked to {:?}", clamped_position);
         Ok(())
     }
 
