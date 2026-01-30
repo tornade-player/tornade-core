@@ -908,18 +908,19 @@ fn get_player_state() -> String {
                     // Convert PlaybackState to is_playing boolean
                     let is_playing = matches!(playback_state, PlaybackState::Playing);
 
-                    // Extract track ID and duration
+                    // Extract track ID, duration, and position
                     let current_track_id = current_track.as_ref().map(|t| t.id);
                     let duration = current_track.as_ref()
                         .map(|t| t.duration.as_secs_f64())
                         .unwrap_or(0.0);
+                    let position = player_service.get_position();
 
                     let json_result = serde_json::json!({
                         "success": true,
                         "data": {
                             "is_playing": is_playing,
                             "current_track_id": current_track_id,
-                            "position": 0.0,  // TODO: rodio doesn't expose position easily
+                            "position": position,
                             "duration": duration,
                             "volume": volume as f64,  // Cast f32 to f64 for JSON
                             "shuffle": shuffle,

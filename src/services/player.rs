@@ -9,7 +9,7 @@ use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink};
 use std::fs::File;
 use std::io::BufReader;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 type Result<T> = std::result::Result<T, PlayerError>;
 
@@ -25,6 +25,8 @@ struct PlayerState {
     queue: Queue,
     playback_state: PlaybackState,
     volume: f32,
+    playback_start_time: Option<Instant>,
+    paused_at: Option<Duration>,
 }
 
 impl PlayerService {
@@ -36,6 +38,8 @@ impl PlayerService {
                 queue: Queue::new(),
                 playback_state: PlaybackState::Stopped,
                 volume: 1.0,
+                playback_start_time: None,
+                paused_at: None,
             })),
             audio: Arc::new(Mutex::new(None)),
             sink: Arc::new(Mutex::new(None)),
@@ -100,6 +104,8 @@ impl PlayerService {
             let mut state = self.state.lock().unwrap();
             state.current_track = Some(track);
             state.playback_state = PlaybackState::Playing;
+            state.playback_start_time = Some(Instant::now());
+            state.paused_at = None;
         }
 
         // Store sink
@@ -116,7 +122,14 @@ impl PlayerService {
         let sink_lock = self.sink.lock().unwrap();
         if let Some(ref sink) = *sink_lock {
             sink.pause();
-            self.state.lock().unwrap().playback_state = PlaybackState::Paused;
+
+            // Save current position when pausing
+            let mut state = self.state.lock().unwrap();
+            if let Some(start_time) = state.playback_start_time {
+                state.paused_at = Some(start_time.elapsed());
+            }
+            state.playback_state = PlaybackState::Paused;
+
             info!("Playback paused");
             Ok(())
         } else {
@@ -129,7 +142,15 @@ impl PlayerService {
         let sink_lock = self.sink.lock().unwrap();
         if let Some(ref sink) = *sink_lock {
             sink.play();
-            self.state.lock().unwrap().playback_state = PlaybackState::Playing;
+
+            // Adjust start time to account for paused duration
+            let mut state = self.state.lock().unwrap();
+            if let Some(paused_at) = state.paused_at {
+                state.playback_start_time = Some(Instant::now() - paused_at);
+                state.paused_at = None;
+            }
+            state.playback_state = PlaybackState::Playing;
+
             info!("Playback resumed");
             Ok(())
         } else {
@@ -150,6 +171,8 @@ impl PlayerService {
             let mut state = self.state.lock().unwrap();
             state.current_track = None;
             state.playback_state = PlaybackState::Stopped;
+            state.playback_start_time = None;
+            state.paused_at = None;
         }
 
         info!("Playback stopped");
@@ -341,6 +364,25 @@ impl PlayerService {
 
     pub fn get_current_track(&self) -> Option<Track> {
         self.state.lock().unwrap().current_track.clone()
+    }
+
+    /// Get current playback position in seconds
+    pub fn get_position(&self) -> f64 {
+        let state = self.state.lock().unwrap();
+
+        match state.playback_state {
+            PlaybackState::Playing => {
+                if let Some(start_time) = state.playback_start_time {
+                    start_time.elapsed().as_secs_f64()
+                } else {
+                    0.0
+                }
+            }
+            PlaybackState::Paused => {
+                state.paused_at.map(|d| d.as_secs_f64()).unwrap_or(0.0)
+            }
+            PlaybackState::Stopped => 0.0,
+        }
     }
 
     // ========================================================================
