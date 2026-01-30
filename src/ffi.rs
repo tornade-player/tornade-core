@@ -12,11 +12,14 @@ use crate::utils::AppPaths;
 // Global database pool - the only shared state we need
 static DB_POOL: Lazy<Mutex<Option<db::DbPool>>> = Lazy::new(|| Mutex::new(None));
 
-// Thread-local player service (rodio's OutputStream is not Send/Sync)
-use std::cell::RefCell;
-thread_local! {
-    static PLAYER_SERVICE: RefCell<Option<player::PlayerService>> = RefCell::new(None);
-}
+// Unsafe wrapper to make PlayerService Send+Sync (needed for rodio's OutputStream)
+// SAFETY: All access is protected by Mutex, ensuring no concurrent access
+struct SendSyncPlayerService(player::PlayerService);
+unsafe impl Send for SendSyncPlayerService {}
+unsafe impl Sync for SendSyncPlayerService {}
+
+// Global player service (wrapped for thread safety)
+static PLAYER_SERVICE: Lazy<Mutex<Option<SendSyncPlayerService>>> = Lazy::new(|| Mutex::new(None));
 
 fn get_or_init_pool() -> Result<db::DbPool, String> {
     let mut pool_opt = DB_POOL.lock().unwrap();
@@ -41,22 +44,20 @@ fn get_or_init_pool() -> Result<db::DbPool, String> {
 }
 
 fn get_or_init_player() -> Result<(), String> {
-    PLAYER_SERVICE.with(|player_cell| {
-        let mut player_opt = player_cell.borrow_mut();
+    let mut player_opt = PLAYER_SERVICE.lock().unwrap();
 
-        if player_opt.is_none() {
-            // Get database pool first
-            let pool = get_or_init_pool()?;
+    if player_opt.is_none() {
+        // Get database pool first
+        let pool = get_or_init_pool()?;
 
-            // Create player service
-            let player = player::PlayerService::new(pool)
-                .map_err(|e| format!("Failed to create player service: {}", e))?;
+        // Create player service
+        let player = player::PlayerService::new(pool)
+            .map_err(|e| format!("Failed to create player service: {}", e))?;
 
-            *player_opt = Some(player);
-        }
+        *player_opt = Some(SendSyncPlayerService(player));
+    }
 
-        Ok(())
-    })
+    Ok(())
 }
 
 #[swift_bridge::bridge]
@@ -662,9 +663,9 @@ fn play_track(track_id: i64) -> String {
     // Sets queue to just this track and starts playback
     match get_or_init_player() {
         Ok(()) => {
-            PLAYER_SERVICE.with(|player_cell| {
-                let player = player_cell.borrow();
-                if let Some(ref player_service) = *player {
+            let player = PLAYER_SERVICE.lock().unwrap();
+            if let Some(ref wrapped) = *player {
+                let player_service = &wrapped.0;
                     // Set queue to this single track
                     if let Err(e) = player_service.set_queue(vec![track_id]) {
                         return serde_json::json!({
@@ -688,13 +689,12 @@ fn play_track(track_id: i64) -> String {
                             }).to_string()
                         }
                     }
-                } else {
-                    serde_json::json!({
-                        "success": false,
-                        "error": "Player service not initialized"
-                    }).to_string()
-                }
-            })
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "error": "Player service not initialized"
+                }).to_string()
+            }
         }
         Err(e) => {
             serde_json::json!({
@@ -709,9 +709,9 @@ fn pause_playback() -> String {
     // T025: Pause playback
     match get_or_init_player() {
         Ok(()) => {
-            PLAYER_SERVICE.with(|player_cell| {
-                let player = player_cell.borrow();
-                if let Some(ref player_service) = *player {
+            let player = PLAYER_SERVICE.lock().unwrap();
+            if let Some(ref wrapped) = *player {
+                let player_service = &wrapped.0;
                     match player_service.pause() {
                         Ok(()) => {
                             serde_json::json!({
@@ -726,13 +726,12 @@ fn pause_playback() -> String {
                             }).to_string()
                         }
                     }
-                } else {
-                    serde_json::json!({
-                        "success": false,
-                        "error": "Player service not initialized"
-                    }).to_string()
-                }
-            })
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "error": "Player service not initialized"
+                }).to_string()
+            }
         }
         Err(e) => {
             serde_json::json!({
@@ -747,9 +746,9 @@ fn resume_playback() -> String {
     // T026: Resume playback
     match get_or_init_player() {
         Ok(()) => {
-            PLAYER_SERVICE.with(|player_cell| {
-                let player = player_cell.borrow();
-                if let Some(ref player_service) = *player {
+            let player = PLAYER_SERVICE.lock().unwrap();
+            if let Some(ref wrapped) = *player {
+                let player_service = &wrapped.0;
                     match player_service.resume() {
                         Ok(()) => {
                             serde_json::json!({
@@ -764,13 +763,12 @@ fn resume_playback() -> String {
                             }).to_string()
                         }
                     }
-                } else {
-                    serde_json::json!({
-                        "success": false,
-                        "error": "Player service not initialized"
-                    }).to_string()
-                }
-            })
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "error": "Player service not initialized"
+                }).to_string()
+            }
         }
         Err(e) => {
             serde_json::json!({
@@ -785,9 +783,9 @@ fn stop_playback() -> String {
     // T027: Stop playback
     match get_or_init_player() {
         Ok(()) => {
-            PLAYER_SERVICE.with(|player_cell| {
-                let player = player_cell.borrow();
-                if let Some(ref player_service) = *player {
+            let player = PLAYER_SERVICE.lock().unwrap();
+            if let Some(ref wrapped) = *player {
+                let player_service = &wrapped.0;
                     match player_service.stop() {
                         Ok(()) => {
                             serde_json::json!({
@@ -802,13 +800,12 @@ fn stop_playback() -> String {
                             }).to_string()
                         }
                     }
-                } else {
-                    serde_json::json!({
-                        "success": false,
-                        "error": "Player service not initialized"
-                    }).to_string()
-                }
-            })
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "error": "Player service not initialized"
+                }).to_string()
+            }
         }
         Err(e) => {
             serde_json::json!({
@@ -823,9 +820,9 @@ fn next_track() -> String {
     // T028: Skip to next track
     match get_or_init_player() {
         Ok(()) => {
-            PLAYER_SERVICE.with(|player_cell| {
-                let player = player_cell.borrow();
-                if let Some(ref player_service) = *player {
+            let player = PLAYER_SERVICE.lock().unwrap();
+            if let Some(ref wrapped) = *player {
+                let player_service = &wrapped.0;
                     match player_service.next() {
                         Ok(()) => {
                             serde_json::json!({
@@ -840,13 +837,12 @@ fn next_track() -> String {
                             }).to_string()
                         }
                     }
-                } else {
-                    serde_json::json!({
-                        "success": false,
-                        "error": "Player service not initialized"
-                    }).to_string()
-                }
-            })
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "error": "Player service not initialized"
+                }).to_string()
+            }
         }
         Err(e) => {
             serde_json::json!({
@@ -861,9 +857,9 @@ fn previous_track() -> String {
     // T029: Go to previous track
     match get_or_init_player() {
         Ok(()) => {
-            PLAYER_SERVICE.with(|player_cell| {
-                let player = player_cell.borrow();
-                if let Some(ref player_service) = *player {
+            let player = PLAYER_SERVICE.lock().unwrap();
+            if let Some(ref wrapped) = *player {
+                let player_service = &wrapped.0;
                     match player_service.previous() {
                         Ok(()) => {
                             serde_json::json!({
@@ -878,13 +874,12 @@ fn previous_track() -> String {
                             }).to_string()
                         }
                     }
-                } else {
-                    serde_json::json!({
-                        "success": false,
-                        "error": "Player service not initialized"
-                    }).to_string()
-                }
-            })
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "error": "Player service not initialized"
+                }).to_string()
+            }
         }
         Err(e) => {
             serde_json::json!({
@@ -899,9 +894,9 @@ fn get_player_state() -> String {
     // T030: Get current player state
     match get_or_init_player() {
         Ok(()) => {
-            PLAYER_SERVICE.with(|player_cell| {
-                let player = player_cell.borrow();
-                if let Some(ref player_service) = *player {
+            let player = PLAYER_SERVICE.lock().unwrap();
+            if let Some(ref wrapped) = *player {
+                let player_service = &wrapped.0;
                     use crate::services::events::PlaybackState;
 
                     let current_track = player_service.get_current_track();
@@ -933,13 +928,12 @@ fn get_player_state() -> String {
                     });
                     log::debug!("get_player_state JSON: {}", json_result);
                     json_result.to_string()
-                } else {
-                    serde_json::json!({
-                        "success": false,
-                        "error": "Player service not initialized"
-                    }).to_string()
-                }
-            })
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "error": "Player service not initialized"
+                }).to_string()
+            }
         }
         Err(e) => {
             serde_json::json!({
@@ -954,9 +948,9 @@ fn get_queue() -> String {
     // T031: Get current playback queue
     match get_or_init_player() {
         Ok(()) => {
-            PLAYER_SERVICE.with(|player_cell| {
-                let player = player_cell.borrow();
-                if let Some(ref player_service) = *player {
+            let player = PLAYER_SERVICE.lock().unwrap();
+            if let Some(ref wrapped) = *player {
+                let player_service = &wrapped.0;
                     let queue = player_service.get_queue();
                     let current_index = player_service.get_queue_index();
                     let shuffle = player_service.is_shuffle_enabled();
@@ -971,13 +965,12 @@ fn get_queue() -> String {
                             "repeat_mode": repeat_mode
                         }
                     }).to_string()
-                } else {
-                    serde_json::json!({
-                        "success": false,
-                        "error": "Player service not initialized"
-                    }).to_string()
-                }
-            })
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "error": "Player service not initialized"
+                }).to_string()
+            }
         }
         Err(e) => {
             serde_json::json!({
@@ -992,9 +985,9 @@ fn add_to_queue(track_id: i64) -> String {
     // T032: Add track to queue
     match get_or_init_player() {
         Ok(()) => {
-            PLAYER_SERVICE.with(|player_cell| {
-                let player = player_cell.borrow();
-                if let Some(ref player_service) = *player {
+            let player = PLAYER_SERVICE.lock().unwrap();
+            if let Some(ref wrapped) = *player {
+                let player_service = &wrapped.0;
                     match player_service.add_to_queue(vec![track_id]) {
                         Ok(()) => {
                             serde_json::json!({
@@ -1009,13 +1002,12 @@ fn add_to_queue(track_id: i64) -> String {
                             }).to_string()
                         }
                     }
-                } else {
-                    serde_json::json!({
-                        "success": false,
-                        "error": "Player service not initialized"
-                    }).to_string()
-                }
-            })
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "error": "Player service not initialized"
+                }).to_string()
+            }
         }
         Err(e) => {
             serde_json::json!({
@@ -1030,9 +1022,9 @@ fn clear_queue() -> String {
     // T033: Clear the playback queue
     match get_or_init_player() {
         Ok(()) => {
-            PLAYER_SERVICE.with(|player_cell| {
-                let player = player_cell.borrow();
-                if let Some(ref player_service) = *player {
+            let player = PLAYER_SERVICE.lock().unwrap();
+            if let Some(ref wrapped) = *player {
+                let player_service = &wrapped.0;
                     match player_service.clear_queue() {
                         Ok(()) => {
                             serde_json::json!({
@@ -1047,13 +1039,12 @@ fn clear_queue() -> String {
                             }).to_string()
                         }
                     }
-                } else {
-                    serde_json::json!({
-                        "success": false,
-                        "error": "Player service not initialized"
-                    }).to_string()
-                }
-            })
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "error": "Player service not initialized"
+                }).to_string()
+            }
         }
         Err(e) => {
             serde_json::json!({
@@ -1079,9 +1070,9 @@ fn reorder_queue(track_ids: &str) -> String {
                 }
             };
 
-            PLAYER_SERVICE.with(|player_cell| {
-                let player = player_cell.borrow();
-                if let Some(ref player_service) = *player {
+            let player = PLAYER_SERVICE.lock().unwrap();
+            if let Some(ref wrapped) = *player {
+                let player_service = &wrapped.0;
                     match player_service.set_queue(track_ids_vec) {
                         Ok(()) => {
                             serde_json::json!({
@@ -1096,13 +1087,12 @@ fn reorder_queue(track_ids: &str) -> String {
                             }).to_string()
                         }
                     }
-                } else {
-                    serde_json::json!({
-                        "success": false,
-                        "error": "Player service not initialized"
-                    }).to_string()
-                }
-            })
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "error": "Player service not initialized"
+                }).to_string()
+            }
         }
         Err(e) => {
             serde_json::json!({
@@ -1117,9 +1107,9 @@ fn set_volume(volume: f64) -> String {
     // T035: Set playback volume (0.0 - 1.0)
     match get_or_init_player() {
         Ok(()) => {
-            PLAYER_SERVICE.with(|player_cell| {
-                let player = player_cell.borrow();
-                if let Some(ref player_service) = *player {
+            let player = PLAYER_SERVICE.lock().unwrap();
+            if let Some(ref wrapped) = *player {
+                let player_service = &wrapped.0;
                     match player_service.set_volume(volume as f32) {
                         Ok(()) => {
                             serde_json::json!({
@@ -1134,13 +1124,12 @@ fn set_volume(volume: f64) -> String {
                             }).to_string()
                         }
                     }
-                } else {
-                    serde_json::json!({
-                        "success": false,
-                        "error": "Player service not initialized"
-                    }).to_string()
-                }
-            })
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "error": "Player service not initialized"
+                }).to_string()
+            }
         }
         Err(e) => {
             serde_json::json!({
@@ -1155,9 +1144,9 @@ fn seek_to_position(position: f64) -> String {
     // T036: Seek to specific position in track (in seconds)
     match get_or_init_player() {
         Ok(()) => {
-            PLAYER_SERVICE.with(|player_cell| {
-                let player = player_cell.borrow();
-                if let Some(ref player_service) = *player {
+            let player = PLAYER_SERVICE.lock().unwrap();
+            if let Some(ref wrapped) = *player {
+                let player_service = &wrapped.0;
                     use std::time::Duration;
                     let duration = Duration::from_secs_f64(position);
                     match player_service.seek(duration) {
@@ -1174,13 +1163,12 @@ fn seek_to_position(position: f64) -> String {
                             }).to_string()
                         }
                     }
-                } else {
-                    serde_json::json!({
-                        "success": false,
-                        "error": "Player service not initialized"
-                    }).to_string()
-                }
-            })
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "error": "Player service not initialized"
+                }).to_string()
+            }
         }
         Err(e) => {
             serde_json::json!({
