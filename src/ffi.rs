@@ -97,6 +97,7 @@ mod ffi {
         fn stop_playback() -> String;
         fn next_track() -> String;
         fn previous_track() -> String;
+        fn jump_to_queue_index(index: i64) -> String;
         fn get_player_state() -> String;
 
         // Queue Management Functions
@@ -1071,6 +1072,43 @@ fn previous_track() -> String {
                             serde_json::json!({
                                 "success": false,
                                 "error": format!("Failed to skip to previous: {}", e)
+                            }).to_string()
+                        }
+                    }
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "error": "Player service not initialized"
+                }).to_string()
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn jump_to_queue_index(index: i64) -> String {
+    // Jump to specific index in queue
+    match get_or_init_player() {
+        Ok(()) => {
+            let player = PLAYER_SERVICE.lock().unwrap();
+            if let Some(ref wrapped) = *player {
+                let player_service = &wrapped.0;
+                    match player_service.jump_to_index(index as usize) {
+                        Ok(()) => {
+                            serde_json::json!({
+                                "success": true,
+                                "data": "Jumped to queue index"
+                            }).to_string()
+                        }
+                        Err(e) => {
+                            serde_json::json!({
+                                "success": false,
+                                "error": format!("Failed to jump to index: {}", e)
                             }).to_string()
                         }
                     }

@@ -305,6 +305,31 @@ impl PlayerService {
         self.play(track_id)
     }
 
+    /// Jump to a specific index in the queue
+    pub fn jump_to_index(&self, index: usize) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+
+        if state.queue.is_empty() {
+            return Err(PlayerError::EmptyQueue);
+        }
+
+        if index >= state.queue.len() {
+            return Err(PlayerError::InvalidPosition);
+        }
+
+        // Update current index
+        state.queue.current_index = index;
+
+        // Get track ID at this index
+        let track_id = state.queue.current_track()
+            .ok_or(PlayerError::EmptyQueue)?;
+
+        drop(state);
+
+        // Play track at this index
+        self.play(track_id)
+    }
+
     // ========================================================================
     // Queue Management
     // ========================================================================
