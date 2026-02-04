@@ -606,6 +606,10 @@ impl PlayerService {
         self.state.lock().unwrap().queue.shuffle_enabled
     }
 
+    pub fn get_shuffle_order(&self) -> Vec<usize> {
+        self.state.lock().unwrap().queue.shuffle_order.clone()
+    }
+
     pub fn get_repeat_mode(&self) -> RepeatMode {
         self.state.lock().unwrap().queue.repeat_mode
     }

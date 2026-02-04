@@ -1244,6 +1244,7 @@ fn get_queue() -> String {
                     let queue = player_service.get_queue();
                     let current_index = player_service.get_queue_index();
                     let shuffle = player_service.is_shuffle_enabled();
+                    let shuffle_order = player_service.get_shuffle_order();
                     let repeat_mode = player_service.get_repeat_mode();
 
                     serde_json::json!({
@@ -1252,6 +1253,7 @@ fn get_queue() -> String {
                             "items": queue,  // Changed from "queue" to "items" to match Swift model
                             "current_index": current_index,
                             "shuffle": shuffle,
+                            "shuffle_order": shuffle_order,
                             "repeat_mode": repeat_mode
                         }
                     }).to_string()
