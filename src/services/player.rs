@@ -535,6 +535,22 @@ impl PlayerService {
 
     pub fn set_shuffle(&self, enabled: bool) -> Result<()> {
         let mut state = self.state.lock().unwrap();
+
+        // Remember which track is currently playing by finding its position in the queue
+        let current_track_position = if enabled {
+            // When enabling shuffle, current_index is an actual track position
+            // We need to find where this position will be in the new shuffle_order
+            Some(state.queue.current_index)
+        } else {
+            // When disabling shuffle, current_index is a shuffle_order position
+            // We need to convert it to the actual track position
+            if !state.queue.shuffle_order.is_empty() && state.queue.current_index < state.queue.shuffle_order.len() {
+                Some(state.queue.shuffle_order[state.queue.current_index])
+            } else {
+                None
+            }
+        };
+
         state.queue.shuffle_enabled = enabled;
 
         if enabled {
@@ -545,9 +561,24 @@ impl PlayerService {
             let mut indices: Vec<usize> = (0..state.queue.len()).collect();
             indices.shuffle(&mut thread_rng());
             state.queue.shuffle_order = indices;
+
+            // Update current_index to point to the same track in the new shuffle order
+            if let Some(track_pos) = current_track_position {
+                if let Some(shuffle_idx) = state.queue.shuffle_order.iter().position(|&idx| idx == track_pos) {
+                    state.queue.current_index = shuffle_idx;
+                }
+            }
+        } else {
+            // When disabling shuffle, set current_index to the actual track position
+            if let Some(track_pos) = current_track_position {
+                state.queue.current_index = track_pos;
+            }
         }
 
-        info!("Shuffle {}", if enabled { "enabled" } else { "disabled" });
+        info!("Shuffle {} (current_index: {})",
+            if enabled { "enabled" } else { "disabled" },
+            state.queue.current_index
+        );
         Ok(())
     }
 
