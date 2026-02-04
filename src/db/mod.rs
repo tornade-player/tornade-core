@@ -33,3 +33,34 @@ pub fn initialize_database(pool: &DbPool) -> Result<()> {
 
     Ok(())
 }
+
+/// Reset database by dropping all tables and recreating schema
+pub fn reset_database(pool: &DbPool) -> Result<()> {
+    let conn = pool.get().map_err(|e| {
+        rusqlite::Error::InvalidPath(PathBuf::from(format!("Pool error: {}", e)))
+    })?;
+
+    // Drop all tables in reverse order of dependencies
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS tracks_fts;
+         DROP TABLE IF EXISTS playlist_tracks;
+         DROP TABLE IF EXISTS playlists;
+         DROP TABLE IF EXISTS track_genres;
+         DROP TABLE IF EXISTS tracks;
+         DROP TABLE IF EXISTS albums;
+         DROP TABLE IF EXISTS genres;
+         DROP TABLE IF EXISTS artists;
+         DROP TABLE IF EXISTS sources;
+         DROP TABLE IF EXISTS app_state;
+         DROP TRIGGER IF EXISTS tracks_ai;
+         DROP TRIGGER IF EXISTS tracks_ad;
+         DROP TRIGGER IF EXISTS tracks_au;"
+    )?;
+
+    // Recreate schema
+    schema::initialize_schema(&conn)?;
+    schema::initialize_fts(&conn)?;
+    schema::initialize_fts_triggers(&conn)?;
+
+    Ok(())
+}

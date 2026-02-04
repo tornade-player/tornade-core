@@ -14,6 +14,7 @@ use walkdir::WalkDir;
 
 type Result<T> = std::result::Result<T, LibraryError>;
 
+#[derive(Clone)]
 pub struct LibraryService {
     pool: DbPool,
     metadata_service: MetadataService,
@@ -300,6 +301,12 @@ impl LibraryService {
             ))
         })?;
 
+        // Check if a source with this path already exists
+        if let Some(existing_source) = self.find_source_by_path(path)? {
+            info!("Source with path {:?} already exists (id: {}), returning existing source", path, existing_source.id);
+            return Ok(existing_source);
+        }
+
         use crate::models::source::SourceType;
         let source_id = queries::insert_source(
             &conn,
@@ -310,6 +317,23 @@ impl LibraryService {
 
         queries::get_source(&conn, source_id)?
             .ok_or(LibraryError::SourceNotFound(source_id))
+    }
+
+    /// Find a source by its path (to avoid duplicate sources)
+    pub fn find_source_by_path(&self, path: &Path) -> Result<Option<Source>> {
+        let sources = self.list_sources()?;
+        for source in sources {
+            if let Some(ref source_path) = source.path {
+                // Compare canonical paths to handle symlinks and relative paths
+                let source_canonical = source_path.canonicalize().unwrap_or_else(|_| source_path.clone());
+                let path_canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+
+                if source_canonical == path_canonical {
+                    return Ok(Some(source));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Validate all sources and detect moved/deleted folders (T135)

@@ -21,6 +21,9 @@ unsafe impl Sync for SendSyncPlayerService {}
 // Global player service (wrapped for thread safety)
 static PLAYER_SERVICE: Lazy<Mutex<Option<SendSyncPlayerService>>> = Lazy::new(|| Mutex::new(None));
 
+// Global library service (for accessing scan progress)
+static LIBRARY_SERVICE: Lazy<Mutex<Option<library::LibraryService>>> = Lazy::new(|| Mutex::new(None));
+
 fn get_or_init_pool() -> Result<db::DbPool, String> {
     let mut pool_opt = DB_POOL.lock().unwrap();
 
@@ -60,12 +63,33 @@ fn get_or_init_player() -> Result<(), String> {
     Ok(())
 }
 
+fn get_or_init_library() -> Result<library::LibraryService, String> {
+    let mut library_opt = LIBRARY_SERVICE.lock().unwrap();
+
+    if library_opt.is_none() {
+        // Get database pool first
+        let pool = get_or_init_pool()?;
+
+        // Initialize app paths
+        let app_paths = AppPaths::new()
+            .map_err(|e| format!("Failed to initialize app paths: {}", e))?;
+
+        // Create library service
+        let library = library::LibraryService::new(pool, app_paths);
+
+        *library_opt = Some(library);
+    }
+
+    Ok(library_opt.as_ref().unwrap().clone())
+}
+
 #[swift_bridge::bridge]
 mod ffi {
     extern "Rust" {
         // Library Management Functions
         fn get_library_stats() -> String;
         fn scan_library(folder_path: &str) -> String;
+        fn get_scan_progress() -> String;
 
         // Track Functions
         fn get_tracks_page(offset: u32, limit: u32) -> String;
@@ -184,20 +208,8 @@ fn get_library_stats() -> String {
 
 fn scan_library(folder_path: &str) -> String {
     // T013: Scan a folder for music files and add to library
-    match get_or_init_pool() {
-        Ok(pool) => {
-            // Initialize app paths for library service
-            let app_paths = match AppPaths::new() {
-                Ok(paths) => paths,
-                Err(e) => {
-                    return serde_json::json!({
-                        "success": false,
-                        "error": format!("Failed to initialize app paths: {}", e)
-                    }).to_string();
-                }
-            };
-
-            let library_service = LibraryService::new(pool.clone(), app_paths);
+    match get_or_init_library() {
+        Ok(library_service) => {
             let path = PathBuf::from(folder_path);
 
             // First, add the source
@@ -238,6 +250,39 @@ fn scan_library(folder_path: &str) -> String {
             serde_json::json!({
                 "success": false,
                 "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn get_scan_progress() -> String {
+    // Get the current scan progress from the global library service
+    match get_or_init_library() {
+        Ok(library_service) => {
+            match library_service.scan_progress() {
+                Some(progress) => {
+                    serde_json::json!({
+                        "success": true,
+                        "data": {
+                            "total_files": progress.total_files,
+                            "processed_files": progress.processed_files,
+                            "tracks_added": progress.tracks_added,
+                            "current_file": progress.current_file.as_ref().map(|p| p.to_string_lossy().to_string())
+                        }
+                    }).to_string()
+                }
+                None => {
+                    serde_json::json!({
+                        "success": true,
+                        "data": null
+                    }).to_string()
+                }
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("Failed to get scan progress: {}", e)
             }).to_string()
         }
     }
