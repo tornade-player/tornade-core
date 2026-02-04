@@ -275,6 +275,12 @@ impl PlayerService {
             return Err(PlayerError::EmptyQueue);
         }
 
+        info!("=== NEXT: Before increment - current_index={}, shuffle={}, shuffle_order={:?}",
+            state.queue.current_index,
+            state.queue.shuffle_enabled,
+            state.queue.shuffle_order
+        );
+
         // Move to next track in queue
         state.queue.current_index += 1;
 
@@ -290,9 +296,13 @@ impl PlayerService {
             }
         }
 
+        info!("=== NEXT: After increment - current_index={}", state.queue.current_index);
+
         // Get next track ID
         let track_id = state.queue.current_track()
             .ok_or(PlayerError::EmptyQueue)?;
+
+        info!("=== NEXT: Will play track_id={}", track_id);
 
         drop(state);
 
@@ -559,12 +569,15 @@ impl PlayerService {
             use rand::thread_rng;
 
             let mut indices: Vec<usize> = (0..state.queue.len()).collect();
+            info!("=== SHUFFLE: Before shuffle - indices={:?}", indices);
             indices.shuffle(&mut thread_rng());
+            info!("=== SHUFFLE: After shuffle - indices={:?}", indices);
             state.queue.shuffle_order = indices;
 
             // Update current_index to point to the same track in the new shuffle order
             if let Some(track_pos) = current_track_position {
                 if let Some(shuffle_idx) = state.queue.shuffle_order.iter().position(|&idx| idx == track_pos) {
+                    info!("=== SHUFFLE: track_pos={}, shuffle_idx={}", track_pos, shuffle_idx);
                     state.queue.current_index = shuffle_idx;
                 }
             }
@@ -575,9 +588,10 @@ impl PlayerService {
             }
         }
 
-        info!("Shuffle {} (current_index: {})",
+        info!("=== SHUFFLE: {} (current_index={}, shuffle_order={:?})",
             if enabled { "enabled" } else { "disabled" },
-            state.queue.current_index
+            state.queue.current_index,
+            state.queue.shuffle_order
         );
         Ok(())
     }
