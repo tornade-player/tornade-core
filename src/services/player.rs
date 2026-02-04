@@ -106,6 +106,19 @@ impl PlayerService {
             state.playback_state = PlaybackState::Playing;
             state.playback_start_time = Some(Instant::now());
             state.paused_at = None;
+
+            // Update current_index to match the track being played
+            if let Some(position) = state.queue.tracks.iter().position(|&id| id == track_id) {
+                // If shuffle is enabled, find position in shuffle_order
+                if state.queue.shuffle_enabled {
+                    // Find the index in shuffle_order that points to this track position
+                    if let Some(shuffle_idx) = state.queue.shuffle_order.iter().position(|&idx| idx == position) {
+                        state.queue.current_index = shuffle_idx;
+                    }
+                } else {
+                    state.queue.current_index = position;
+                }
+            }
         }
 
         // Store sink
