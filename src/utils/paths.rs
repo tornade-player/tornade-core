@@ -5,6 +5,7 @@ use std::fs;
 use std::env;
 
 /// Get application directories
+#[derive(Clone)]
 pub struct AppPaths {
     pub config_dir: PathBuf,
     pub data_dir: PathBuf,

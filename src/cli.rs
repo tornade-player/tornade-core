@@ -58,7 +58,8 @@ impl TornadeCli {
                 "12" => self.playlist_management()?,
                 "13" => self.show_stats()?,
                 "14" => self.find_duplicates()?,
-                "15" => {
+                "15" => self.reset_library()?,
+                "16" => {
                     println!("\n👋 Goodbye!");
                     break;
                 }
@@ -87,7 +88,8 @@ impl TornadeCli {
         println!(" 12. Playlist management");
         println!(" 13. Show statistics");
         println!(" 14. Find duplicates");
-        println!(" 15. Quit");
+        println!(" 15. Reset library (⚠️  deletes all data)");
+        println!(" 16. Quit");
         println!();
     }
 
@@ -1383,6 +1385,40 @@ impl TornadeCli {
             match self.duplicate.hide_duplicate(track_id, original_id) {
                 Ok(_) => println!("✅ Track {} marked as duplicate of {}", track_id, original_id),
                 Err(e) => println!("❌ Failed to mark duplicate: {}", e),
+            }
+        }
+
+        Ok(())
+    }
+
+    fn reset_library(&self) -> Result<(), Box<dyn std::error::Error>> {
+        println!("\n⚠️  Reset Library");
+        println!("================");
+        println!("⚠️  WARNING: This will delete ALL data:");
+        println!("   - All sources");
+        println!("   - All tracks");
+        println!("   - All albums and artists");
+        println!("   - All playlists");
+        println!("   - All statistics and ratings");
+        println!();
+
+        let confirm = self.read_input("Type 'DELETE' to confirm: ")?;
+
+        if confirm.trim() != "DELETE" {
+            println!("❌ Reset cancelled.");
+            return Ok(());
+        }
+
+        println!("\n🗑️  Resetting library...");
+
+        match crate::db::reset_database(&self.pool) {
+            Ok(_) => {
+                println!("✅ Library reset complete!");
+                println!("   Database is now empty and ready to use.");
+            }
+            Err(e) => {
+                println!("❌ Failed to reset library: {}", e);
+                return Err(Box::new(e));
             }
         }
 

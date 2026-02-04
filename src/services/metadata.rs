@@ -25,6 +25,7 @@ pub struct TrackMetadata {
     pub has_artwork: bool,
 }
 
+#[derive(Clone)]
 pub struct MetadataService {
     app_paths: AppPaths,
 }
