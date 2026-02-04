@@ -106,6 +106,12 @@ mod ffi {
         fn get_artists_page(offset: u32, limit: u32) -> String;
         fn get_artist_by_id(artist_id: i64) -> String;
 
+        // Genre Functions
+        fn get_genres() -> String;
+        fn get_genre_tracks(genre_id: i64) -> String;
+        fn get_genre_artists(genre_id: i64) -> String;
+        fn get_album_genres(album_id: i64) -> String;
+
         // Playlist Functions
         fn get_playlists() -> String;
         fn create_playlist(name: &str) -> String;
@@ -1716,6 +1722,171 @@ fn set_repeat_mode(mode: &str) -> String {
                     "success": false,
                     "error": "Player service not initialized"
                 }).to_string()
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn get_genres() -> String {
+    // Get all genres with track and album counts
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let conn = match pool.get() {
+                Ok(conn) => conn,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get database connection: {}", e)
+                    }).to_string();
+                }
+            };
+
+            match crate::db::queries::list_genres_with_count(&conn) {
+                Ok(genres_with_counts) => {
+                    let genres: Vec<_> = genres_with_counts.into_iter()
+                        .map(|(genre, track_count, album_count)| {
+                            serde_json::json!({
+                                "id": genre.id,
+                                "name": genre.name,
+                                "track_count": track_count,
+                                "album_count": album_count
+                            })
+                        })
+                        .collect();
+
+                    serde_json::json!({
+                        "success": true,
+                        "data": {
+                            "genres": genres
+                        }
+                    }).to_string()
+                }
+                Err(e) => {
+                    serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to list genres: {}", e)
+                    }).to_string()
+                }
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn get_genre_tracks(genre_id: i64) -> String {
+    // Get all tracks for a specific genre
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let conn = match pool.get() {
+                Ok(conn) => conn,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get database connection: {}", e)
+                    }).to_string();
+                }
+            };
+
+            match crate::db::queries::get_genre_tracks(&conn, genre_id) {
+                Ok(tracks) => {
+                    serde_json::json!({
+                        "success": true,
+                        "data": { "tracks": tracks }
+                    }).to_string()
+                }
+                Err(e) => {
+                    serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get genre tracks: {}", e)
+                    }).to_string()
+                }
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn get_genre_artists(genre_id: i64) -> String {
+    // Get all artists for a specific genre
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let conn = match pool.get() {
+                Ok(conn) => conn,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get database connection: {}", e)
+                    }).to_string();
+                }
+            };
+
+            match crate::db::queries::get_genre_artists(&conn, genre_id) {
+                Ok(artists) => {
+                    serde_json::json!({
+                        "success": true,
+                        "data": { "artists": artists }
+                    }).to_string()
+                }
+                Err(e) => {
+                    serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get genre artists: {}", e)
+                    }).to_string()
+                }
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn get_album_genres(album_id: i64) -> String {
+    // Get all genres for a specific album
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let conn = match pool.get() {
+                Ok(conn) => conn,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get database connection: {}", e)
+                    }).to_string();
+                }
+            };
+
+            match crate::db::queries::get_album_genres(&conn, album_id) {
+                Ok(genres) => {
+                    serde_json::json!({
+                        "success": true,
+                        "data": { "genres": genres }
+                    }).to_string()
+                }
+                Err(e) => {
+                    serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get album genres: {}", e)
+                    }).to_string()
+                }
             }
         }
         Err(e) => {

@@ -558,6 +558,26 @@ pub fn get_genre_tracks(conn: &Connection, genre_id: i64) -> Result<Vec<Track>> 
     tracks.collect()
 }
 
+pub fn get_album_genres(conn: &Connection, album_id: i64) -> Result<Vec<Genre>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT g.id, g.name
+         FROM genres g
+         JOIN track_genres tg ON g.id = tg.genre_id
+         JOIN tracks t ON tg.track_id = t.id
+         WHERE t.album_id = ?1
+         ORDER BY g.name"
+    )?;
+
+    let genres = stmt.query_map(params![album_id], |row| {
+        Ok(Genre {
+            id: row.get(0)?,
+            name: row.get(1)?,
+        })
+    })?;
+
+    genres.collect()
+}
+
 pub fn get_source_tracks(conn: &Connection, source_id: i64) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
         "SELECT id, title, album_id, artist_id, source_id, file_path,
