@@ -371,6 +371,16 @@ impl PlayerService {
         let mut state = self.state.lock().unwrap();
         state.queue.tracks = track_ids;
         state.queue.current_index = 0;
+
+        // Regenerate shuffle order if shuffle is enabled
+        if state.queue.shuffle_enabled {
+            use rand::seq::SliceRandom;
+            use rand::thread_rng;
+            let mut indices: Vec<usize> = (0..state.queue.len()).collect();
+            indices.shuffle(&mut thread_rng());
+            state.queue.shuffle_order = indices;
+        }
+
         info!("Queue set with {} tracks", state.queue.tracks.len());
         Ok(())
     }
@@ -380,6 +390,16 @@ impl PlayerService {
         let mut state = self.state.lock().unwrap();
         let count = track_ids.len();
         state.queue.tracks.extend(track_ids);
+
+        // Regenerate shuffle order if shuffle is enabled
+        if state.queue.shuffle_enabled {
+            use rand::seq::SliceRandom;
+            use rand::thread_rng;
+            let mut indices: Vec<usize> = (0..state.queue.len()).collect();
+            indices.shuffle(&mut thread_rng());
+            state.queue.shuffle_order = indices;
+        }
+
         info!("Added {} tracks to queue", count);
         Ok(())
     }
@@ -397,6 +417,15 @@ impl PlayerService {
         // Adjust current index if needed
         if state.queue.current_index >= position && state.queue.current_index > 0 {
             state.queue.current_index -= 1;
+        }
+
+        // Regenerate shuffle order if shuffle is enabled
+        if state.queue.shuffle_enabled {
+            use rand::seq::SliceRandom;
+            use rand::thread_rng;
+            let mut indices: Vec<usize> = (0..state.queue.len()).collect();
+            indices.shuffle(&mut thread_rng());
+            state.queue.shuffle_order = indices;
         }
 
         info!("Removed track at position {}", position);
@@ -423,6 +452,15 @@ impl PlayerService {
             state.queue.current_index += 1;
         }
 
+        // Regenerate shuffle order if shuffle is enabled
+        if state.queue.shuffle_enabled {
+            use rand::seq::SliceRandom;
+            use rand::thread_rng;
+            let mut indices: Vec<usize> = (0..state.queue.len()).collect();
+            indices.shuffle(&mut thread_rng());
+            state.queue.shuffle_order = indices;
+        }
+
         info!("Moved track from position {} to {}", from, to);
         Ok(())
     }
@@ -431,6 +469,7 @@ impl PlayerService {
     pub fn clear_queue(&self) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         state.queue.tracks.clear();
+        state.queue.shuffle_order.clear();
         state.queue.current_index = 0;
         info!("Queue cleared");
         Ok(())
