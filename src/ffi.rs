@@ -768,7 +768,7 @@ fn create_playlist(name: &str) -> String {
                 Ok(playlist) => {
                     serde_json::json!({
                         "success": true,
-                        "data": { "playlist": playlist }
+                        "data": playlist
                     }).to_string()
                 }
                 Err(e) => {
