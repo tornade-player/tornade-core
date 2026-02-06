@@ -36,6 +36,11 @@ impl AppPaths {
         // Create subdirectories
         fs::create_dir_all(cache_dir.join("artwork"))?;
 
+        // Create assets directory for online artwork
+        let assets_dir = base_dir.join("assets");
+        fs::create_dir_all(assets_dir.join("albums"))?;
+        fs::create_dir_all(assets_dir.join("artists"))?;
+
         Ok(AppPaths {
             config_dir,
             data_dir,
@@ -56,5 +61,20 @@ impl AppPaths {
     /// Get artwork cache directory
     pub fn artwork_cache_dir(&self) -> PathBuf {
         self.cache_dir.join("artwork")
+    }
+
+    /// Get assets directory (for online artwork)
+    pub fn assets_dir(&self) -> PathBuf {
+        self.config_dir.join("assets")
+    }
+
+    /// Get album artwork directory
+    pub fn album_artwork_dir(&self) -> PathBuf {
+        self.assets_dir().join("albums")
+    }
+
+    /// Get artist photo directory
+    pub fn artist_photo_dir(&self) -> PathBuf {
+        self.assets_dir().join("artists")
     }
 }

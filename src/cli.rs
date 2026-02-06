@@ -1,7 +1,7 @@
 // Interactive CLI for Tornade Music Player
 
 use crate::db::{self, DbPool};
-use crate::services::{LibraryService, PlayerService, PlaylistService, DuplicateService};
+use crate::services::{LibraryService, PlayerService, PlaylistService, DuplicateService, ArtworkService};
 use crate::utils::AppPaths;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -11,6 +11,7 @@ pub struct TornadeCli {
     player: PlayerService,
     playlist: PlaylistService,
     duplicate: DuplicateService,
+    artwork: ArtworkService,
     pool: DbPool,
 }
 
@@ -20,16 +21,18 @@ impl TornadeCli {
         let pool = db::create_pool(app_paths.database_path())?;
         db::initialize_database(&pool)?;
 
-        let library = LibraryService::new(pool.clone(), app_paths);
+        let library = LibraryService::new(pool.clone(), app_paths.clone());
         let player = PlayerService::new(pool.clone())?;
         let playlist = PlaylistService::new(pool.clone());
         let duplicate = DuplicateService::new(pool.clone());
+        let artwork = ArtworkService::new(pool.clone(), app_paths);
 
         Ok(TornadeCli {
             library,
             player,
             playlist,
             duplicate,
+            artwork,
             pool,
         })
     }
@@ -58,8 +61,9 @@ impl TornadeCli {
                 "12" => self.playlist_management()?,
                 "13" => self.show_stats()?,
                 "14" => self.find_duplicates()?,
-                "15" => self.reset_library()?,
-                "16" => {
+                "15" => self.fetch_artwork()?,
+                "16" => self.reset_library()?,
+                "17" => {
                     println!("\n👋 Goodbye!");
                     break;
                 }
@@ -88,8 +92,9 @@ impl TornadeCli {
         println!(" 12. Playlist management");
         println!(" 13. Show statistics");
         println!(" 14. Find duplicates");
-        println!(" 15. Reset library (⚠️  deletes all data)");
-        println!(" 16. Quit");
+        println!(" 15. Fetch artwork from online sources");
+        println!(" 16. Reset library (⚠️  deletes all data)");
+        println!(" 17. Quit");
         println!();
     }
 
@@ -1421,6 +1426,84 @@ impl TornadeCli {
                 return Err(Box::new(e));
             }
         }
+
+        Ok(())
+    }
+
+    fn fetch_artwork(&self) -> Result<(), Box<dyn std::error::Error>> {
+        println!("\n🎨 Fetch Artwork from Online Sources");
+        println!("====================================");
+        println!();
+        println!("Options:");
+        println!("  1. Albums only");
+        println!("  2. Albums + Artists");
+        println!("  3. Cancel");
+        println!();
+
+        let choice = self.read_input("Enter your choice: ")?;
+
+        let fetch_artists = match choice.trim() {
+            "1" => false,
+            "2" => true,
+            "3" => {
+                println!("Cancelled.");
+                return Ok(());
+            }
+            _ => {
+                println!("❌ Invalid choice");
+                return Ok(());
+            }
+        };
+
+        println!("\n⏳ Fetching artwork from MusicBrainz...");
+        println!("This may take a while depending on library size.");
+        println!("Rate limited to 1 request/second to respect API limits.\n");
+
+        // Create a tokio runtime to run async code
+        let runtime = tokio::runtime::Runtime::new()?;
+
+        // Clone the service for the async block
+        let artwork_service = self.artwork.clone();
+
+        runtime.block_on(async move {
+            match artwork_service.fetch_all_artwork(fetch_artists).await {
+                Ok(_) => {
+                    // Poll for progress until complete
+                    loop {
+                        if let Some(progress) = artwork_service.get_progress() {
+                            // Clear line and print progress
+                            print!("\r  Progress: {}/{} | ✓ {} | ✗ {} | Current: {}                    ",
+                                progress.processed_items,
+                                progress.total_items,
+                                progress.successful,
+                                progress.failed,
+                                truncate(&progress.current_item, 40)
+                            );
+                            std::io::stdout().flush().unwrap();
+
+                            if progress.processed_items >= progress.total_items {
+                                println!("\n");
+                                break;
+                            }
+
+                            tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    if let Some(final_progress) = artwork_service.get_progress() {
+                        println!("✅ Artwork fetch complete!");
+                        println!("   Total items: {}", final_progress.total_items);
+                        println!("   Successful: {}", final_progress.successful);
+                        println!("   Failed: {}", final_progress.failed);
+                    }
+                }
+                Err(e) => {
+                    println!("\n❌ Failed to fetch artwork: {}", e);
+                }
+            }
+        });
 
         Ok(())
     }

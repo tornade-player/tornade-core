@@ -24,6 +24,14 @@ static PLAYER_SERVICE: Lazy<Mutex<Option<SendSyncPlayerService>>> = Lazy::new(||
 // Global library service (for accessing scan progress)
 static LIBRARY_SERVICE: Lazy<Mutex<Option<library::LibraryService>>> = Lazy::new(|| Mutex::new(None));
 
+// Global artwork service
+static ARTWORK_SERVICE: Lazy<Mutex<Option<artwork::ArtworkService>>> = Lazy::new(|| Mutex::new(None));
+
+// Global tokio runtime for async operations
+static TOKIO_RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
+    tokio::runtime::Runtime::new().expect("Failed to create tokio runtime")
+});
+
 fn get_or_init_pool() -> Result<db::DbPool, String> {
     let mut pool_opt = DB_POOL.lock().unwrap();
 
@@ -81,6 +89,26 @@ fn get_or_init_library() -> Result<library::LibraryService, String> {
     }
 
     Ok(library_opt.as_ref().unwrap().clone())
+}
+
+fn get_or_init_artwork() -> Result<(), String> {
+    let mut artwork_opt = ARTWORK_SERVICE.lock().unwrap();
+
+    if artwork_opt.is_none() {
+        // Get database pool first
+        let pool = get_or_init_pool()?;
+
+        // Initialize app paths
+        let app_paths = AppPaths::new()
+            .map_err(|e| format!("Failed to initialize app paths: {}", e))?;
+
+        // Create artwork service
+        let artwork = artwork::ArtworkService::new(pool, app_paths);
+
+        *artwork_opt = Some(artwork);
+    }
+
+    Ok(())
 }
 
 #[swift_bridge::bridge]
@@ -148,6 +176,14 @@ mod ffi {
         fn set_shuffle(enabled: bool) -> String;
         fn toggle_repeat() -> String;
         fn set_repeat_mode(mode: &str) -> String;
+
+        // Artwork Fetching Functions
+        fn fetch_all_artwork(fetch_artists: bool) -> String;
+        fn fetch_album_artwork(album_id: i64) -> String;
+        fn get_artwork_fetch_progress() -> String;
+        fn cancel_artwork_fetch() -> String;
+        fn get_album_artwork_with_online(album_id: i64) -> Vec<u8>;
+        fn get_artist_photo(artist_id: i64) -> Vec<u8>;
     }
 }
 
@@ -1936,5 +1972,213 @@ fn get_artist_genres(artist_id: i64) -> String {
                 "error": format!("FFI initialization failed: {}", e)
             }).to_string()
         }
+    }
+}
+
+// Artwork Fetching Functions
+
+fn fetch_all_artwork(fetch_artists: bool) -> String {
+    // Fetch artwork for all albums and optionally artists
+    match get_or_init_artwork() {
+        Ok(_) => {
+            // Spawn async task in background
+            let artwork_opt = ARTWORK_SERVICE.lock().unwrap();
+            if let Some(artwork_service) = artwork_opt.as_ref() {
+                let service_clone = artwork_service.clone();
+                TOKIO_RUNTIME.spawn(async move {
+                    if let Err(e) = service_clone.fetch_all_artwork(fetch_artists).await {
+                        log::error!("Artwork fetch failed: {}", e);
+                    }
+                });
+
+                serde_json::json!({
+                    "success": true,
+                    "data": {
+                        "message": "Artwork fetch started"
+                    }
+                }).to_string()
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "error": "Artwork service not initialized"
+                }).to_string()
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("Failed to initialize artwork service: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn fetch_album_artwork(album_id: i64) -> String {
+    // Fetch artwork for a specific album
+    match get_or_init_artwork() {
+        Ok(_) => {
+            let artwork_opt = ARTWORK_SERVICE.lock().unwrap();
+            if let Some(artwork_service) = artwork_opt.as_ref() {
+                let service_clone = artwork_service.clone();
+                TOKIO_RUNTIME.spawn(async move {
+                    if let Err(e) = service_clone.fetch_album_artwork(album_id).await {
+                        log::error!("Failed to fetch artwork for album {}: {}", album_id, e);
+                    }
+                });
+
+                serde_json::json!({
+                    "success": true,
+                    "data": {
+                        "message": format!("Fetching artwork for album {}", album_id)
+                    }
+                }).to_string()
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "error": "Artwork service not initialized"
+                }).to_string()
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("Failed to initialize artwork service: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn get_artwork_fetch_progress() -> String {
+    // Get current artwork fetch progress
+    match get_or_init_artwork() {
+        Ok(_) => {
+            let artwork_opt = ARTWORK_SERVICE.lock().unwrap();
+            if let Some(artwork_service) = artwork_opt.as_ref() {
+                match artwork_service.get_progress() {
+                    Some(progress) => {
+                        serde_json::json!({
+                            "success": true,
+                            "data": {
+                                "totalItems": progress.total_items,
+                                "processedItems": progress.processed_items,
+                                "currentItem": progress.current_item,
+                                "successful": progress.successful,
+                                "failed": progress.failed
+                            }
+                        }).to_string()
+                    }
+                    None => {
+                        serde_json::json!({
+                            "success": true,
+                            "data": null
+                        }).to_string()
+                    }
+                }
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "error": "Artwork service not initialized"
+                }).to_string()
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("Failed to initialize artwork service: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn cancel_artwork_fetch() -> String {
+    // Cancel ongoing artwork fetch
+    match get_or_init_artwork() {
+        Ok(_) => {
+            let artwork_opt = ARTWORK_SERVICE.lock().unwrap();
+            if let Some(artwork_service) = artwork_opt.as_ref() {
+                artwork_service.cancel_fetch();
+                serde_json::json!({
+                    "success": true,
+                    "data": {
+                        "message": "Artwork fetch cancelled"
+                    }
+                }).to_string()
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "error": "Artwork service not initialized"
+                }).to_string()
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("Failed to initialize artwork service: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn get_album_artwork_with_online(album_id: i64) -> Vec<u8> {
+    // Get album artwork, preferring online artwork over embedded
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let conn = match pool.get() {
+                Ok(conn) => conn,
+                Err(_) => return Vec::new(),
+            };
+
+            match crate::db::queries::get_album(&conn, album_id) {
+                Ok(Some(album)) => {
+                    // Try online artwork first
+                    if let Some(online_path) = album.online_artwork_path {
+                        if let Ok(bytes) = std::fs::read(&online_path) {
+                            return bytes;
+                        }
+                    }
+
+                    // Fall back to embedded artwork
+                    if let Some(artwork_path) = album.artwork_path {
+                        if let Ok(bytes) = std::fs::read(&artwork_path) {
+                            return bytes;
+                        }
+                    }
+
+                    Vec::new()
+                }
+                _ => Vec::new(),
+            }
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+fn get_artist_photo(artist_id: i64) -> Vec<u8> {
+    // Get artist photo
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let conn = match pool.get() {
+                Ok(conn) => conn,
+                Err(_) => return Vec::new(),
+            };
+
+            // Query artist photo path
+            let result: Result<Option<String>, _> = conn.query_row(
+                "SELECT photo_path FROM artists WHERE id = ?1",
+                [artist_id],
+                |row| row.get(0),
+            );
+
+            match result {
+                Ok(Some(photo_path)) => {
+                    if let Ok(bytes) = std::fs::read(&photo_path) {
+                        return bytes;
+                    }
+                    Vec::new()
+                }
+                _ => Vec::new(),
+            }
+        }
+        Err(_) => Vec::new(),
     }
 }

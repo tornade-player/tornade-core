@@ -12,5 +12,6 @@ pub struct Album {
     pub year: Option<u16>,
     pub rating: u8,  // 0-5
     pub artwork_path: Option<PathBuf>,
+    pub online_artwork_path: Option<PathBuf>,
     pub description: Option<String>,
 }

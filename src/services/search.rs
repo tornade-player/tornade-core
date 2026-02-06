@@ -59,7 +59,7 @@ impl SearchService {
         // Search albums by title using pattern matching
         let album_pattern = format!("%{}%", query);
         let mut stmt = conn.prepare(
-            "SELECT a.id, a.title, a.artist_id, ar.name as artist_name, a.year, a.rating, a.artwork_path, a.description
+            "SELECT a.id, a.title, a.artist_id, ar.name as artist_name, a.year, a.rating, a.artwork_path, a.online_artwork_path, a.description
              FROM albums a
              JOIN artists ar ON ar.id = a.artist_id
              WHERE a.title LIKE ?1 LIMIT 20"
@@ -74,7 +74,8 @@ impl SearchService {
                 year: row.get(4)?,
                 rating: row.get(5)?,
                 artwork_path: row.get::<_, Option<String>>(6)?.map(PathBuf::from),
-                description: row.get(7)?,
+                online_artwork_path: row.get::<_, Option<String>>(7)?.map(PathBuf::from),
+                description: row.get(8)?,
             })
         })
         .map_err(LibraryError::Database)?

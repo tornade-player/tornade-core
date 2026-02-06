@@ -25,6 +25,9 @@ lofty = { workspace = true }
 image = { workspace = true }
 walkdir = { workspace = true }
 rand = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+urlencoding = { workspace = true }
 
 # FFI bridge for Swift/Rust interop
 swift-bridge = "0.1"

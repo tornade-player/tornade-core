@@ -8,6 +8,7 @@ pub mod player;
 pub mod playlist;
 pub mod duplicate;
 pub mod search;
+pub mod artwork;
 
 pub use error::{LibraryError, PlayerError, PlaylistError};
 pub use events::{
@@ -21,4 +22,5 @@ pub use player::PlayerService;
 pub use playlist::PlaylistService;
 pub use duplicate::{DuplicateService, DuplicateGroup};
 pub use search::{SearchService, SearchResults};
+pub use artwork::{ArtworkService, ArtworkFetchProgress};
 // RepeatMode is re-exported from crate::models

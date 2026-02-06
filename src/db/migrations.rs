@@ -30,5 +30,22 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    // Migration 2: Add online artwork support
+    if current_version < 2 {
+        conn.execute_batch(
+            "ALTER TABLE albums ADD COLUMN online_artwork_path TEXT;
+             ALTER TABLE albums ADD COLUMN artwork_source TEXT;
+             ALTER TABLE albums ADD COLUMN artwork_fetched_at DATETIME;
+
+             ALTER TABLE artists ADD COLUMN photo_path TEXT;
+             ALTER TABLE artists ADD COLUMN photo_source TEXT;
+             ALTER TABLE artists ADD COLUMN photo_fetched_at DATETIME;",
+        )?;
+        conn.execute(
+            "INSERT INTO schema_migrations (version) VALUES (?1)",
+            [2],
+        )?;
+    }
+
     Ok(())
 }
