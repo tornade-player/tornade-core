@@ -31,6 +31,9 @@ pub fn initialize_database(pool: &DbPool) -> Result<()> {
     schema::initialize_fts(&conn)?;
     schema::initialize_fts_triggers(&conn)?;
 
+    // Run database migrations
+    migrations::run_migrations(&conn)?;
+
     Ok(())
 }
 
