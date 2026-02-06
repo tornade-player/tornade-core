@@ -111,6 +111,7 @@ mod ffi {
         fn get_genre_tracks(genre_id: i64) -> String;
         fn get_genre_artists(genre_id: i64) -> String;
         fn get_album_genres(album_id: i64) -> String;
+        fn get_artist_genres(artist_id: i64) -> String;
 
         // Playlist Functions
         fn get_playlists() -> String;
@@ -1887,6 +1888,44 @@ fn get_album_genres(album_id: i64) -> String {
                     serde_json::json!({
                         "success": false,
                         "error": format!("Failed to get album genres: {}", e)
+                    }).to_string()
+                }
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn get_artist_genres(artist_id: i64) -> String {
+    // Get all genres for a specific artist (from all their tracks)
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let conn = match pool.get() {
+                Ok(conn) => conn,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get database connection: {}", e)
+                    }).to_string();
+                }
+            };
+
+            match crate::db::queries::get_artist_genres(&conn, artist_id) {
+                Ok(genres) => {
+                    serde_json::json!({
+                        "success": true,
+                        "data": { "genres": genres }
+                    }).to_string()
+                }
+                Err(e) => {
+                    serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get artist genres: {}", e)
                     }).to_string()
                 }
             }

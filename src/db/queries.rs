@@ -106,17 +106,21 @@ pub fn insert_album(conn: &Connection, title: &str, artist_id: i64, year: Option
 
 pub fn get_album(conn: &Connection, id: i64) -> Result<Option<Album>> {
     conn.query_row(
-        "SELECT id, title, artist_id, year, rating, artwork_path, description FROM albums WHERE id = ?1",
+        "SELECT a.id, a.title, a.artist_id, ar.name as artist_name, a.year, a.rating, a.artwork_path, a.description
+         FROM albums a
+         JOIN artists ar ON ar.id = a.artist_id
+         WHERE a.id = ?1",
         params![id],
         |row| {
             Ok(Album {
                 id: row.get(0)?,
                 title: row.get(1)?,
                 artist_id: row.get(2)?,
-                year: row.get(3)?,
-                rating: row.get(4)?,
-                artwork_path: row.get::<_, Option<String>>(5)?.map(PathBuf::from),
-                description: row.get(6)?,
+                artist_name: row.get(3)?,
+                year: row.get(4)?,
+                rating: row.get(5)?,
+                artwork_path: row.get::<_, Option<String>>(6)?.map(PathBuf::from),
+                description: row.get(7)?,
             })
         },
     ).optional()
@@ -358,8 +362,9 @@ pub fn list_albums(
     offset: Option<usize>,
 ) -> Result<Vec<Album>> {
     let mut sql = String::from(
-        "SELECT DISTINCT a.id, a.title, a.artist_id, a.year, a.rating, a.artwork_path, a.description
-         FROM albums a"
+        "SELECT DISTINCT a.id, a.title, a.artist_id, ar.name as artist_name, a.year, a.rating, a.artwork_path, a.description
+         FROM albums a
+         JOIN artists ar ON ar.id = a.artist_id"
     );
 
     let mut conditions = Vec::new();
@@ -413,10 +418,11 @@ pub fn list_albums(
             id: row.get(0)?,
             title: row.get(1)?,
             artist_id: row.get(2)?,
-            year: row.get(3)?,
-            rating: row.get(4)?,
-            artwork_path: row.get::<_, Option<String>>(5)?.map(PathBuf::from),
-            description: row.get(6)?,
+            artist_name: row.get(3)?,
+            year: row.get(4)?,
+            rating: row.get(5)?,
+            artwork_path: row.get::<_, Option<String>>(6)?.map(PathBuf::from),
+            description: row.get(7)?,
         })
     })?;
 
@@ -425,10 +431,11 @@ pub fn list_albums(
 
 pub fn get_artist_albums(conn: &Connection, artist_id: i64) -> Result<Vec<Album>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, artist_id, year, rating, artwork_path, description
-         FROM albums
-         WHERE artist_id = ?1
-         ORDER BY year DESC, title"
+        "SELECT a.id, a.title, a.artist_id, ar.name as artist_name, a.year, a.rating, a.artwork_path, a.description
+         FROM albums a
+         JOIN artists ar ON ar.id = a.artist_id
+         WHERE a.artist_id = ?1
+         ORDER BY a.year DESC, a.title"
     )?;
 
     let albums = stmt.query_map(params![artist_id], |row| {
@@ -436,10 +443,11 @@ pub fn get_artist_albums(conn: &Connection, artist_id: i64) -> Result<Vec<Album>
             id: row.get(0)?,
             title: row.get(1)?,
             artist_id: row.get(2)?,
-            year: row.get(3)?,
-            rating: row.get(4)?,
-            artwork_path: row.get::<_, Option<String>>(5)?.map(PathBuf::from),
-            description: row.get(6)?,
+            artist_name: row.get(3)?,
+            year: row.get(4)?,
+            rating: row.get(5)?,
+            artwork_path: row.get::<_, Option<String>>(6)?.map(PathBuf::from),
+            description: row.get(7)?,
         })
     })?;
 
@@ -578,6 +586,26 @@ pub fn get_album_genres(conn: &Connection, album_id: i64) -> Result<Vec<Genre>> 
     genres.collect()
 }
 
+pub fn get_artist_genres(conn: &Connection, artist_id: i64) -> Result<Vec<Genre>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT g.id, g.name
+         FROM genres g
+         JOIN track_genres tg ON g.id = tg.genre_id
+         JOIN tracks t ON tg.track_id = t.id
+         WHERE t.artist_id = ?1
+         ORDER BY g.name"
+    )?;
+
+    let genres = stmt.query_map(params![artist_id], |row| {
+        Ok(Genre {
+            id: row.get(0)?,
+            name: row.get(1)?,
+        })
+    })?;
+
+    genres.collect()
+}
+
 pub fn get_source_tracks(conn: &Connection, source_id: i64) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
         "SELECT id, title, album_id, artist_id, source_id, file_path,
@@ -665,8 +693,9 @@ pub fn search_library(conn: &Connection, query: &str, limit: usize) -> Result<(V
     // Search albums
     let mut albums = Vec::new();
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT a.id, a.title, a.artist_id, a.year, a.rating, a.artwork_path, a.description
+        "SELECT DISTINCT a.id, a.title, a.artist_id, ar.name as artist_name, a.year, a.rating, a.artwork_path, a.description
          FROM albums a
+         JOIN artists ar ON ar.id = a.artist_id
          WHERE a.title LIKE ?1
          LIMIT ?2"
     )?;
@@ -677,10 +706,11 @@ pub fn search_library(conn: &Connection, query: &str, limit: usize) -> Result<(V
             id: row.get(0)?,
             title: row.get(1)?,
             artist_id: row.get(2)?,
-            year: row.get(3)?,
-            rating: row.get(4)?,
-            artwork_path: row.get::<_, Option<String>>(5)?.map(PathBuf::from),
-            description: row.get(6)?,
+            artist_name: row.get(3)?,
+            year: row.get(4)?,
+            rating: row.get(5)?,
+            artwork_path: row.get::<_, Option<String>>(6)?.map(PathBuf::from),
+            description: row.get(7)?,
         })
     })?;
 
