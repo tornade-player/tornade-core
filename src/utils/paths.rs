@@ -41,6 +41,9 @@ impl AppPaths {
         fs::create_dir_all(assets_dir.join("albums"))?;
         fs::create_dir_all(assets_dir.join("artists"))?;
 
+        // Create reports directory
+        fs::create_dir_all(base_dir.join("reports"))?;
+
         Ok(AppPaths {
             config_dir,
             data_dir,
@@ -76,5 +79,10 @@ impl AppPaths {
     /// Get artist photo directory
     pub fn artist_photo_dir(&self) -> PathBuf {
         self.assets_dir().join("artists")
+    }
+
+    /// Get reports directory
+    pub fn reports_dir(&self) -> PathBuf {
+        self.config_dir.join("reports")
     }
 }

@@ -28,6 +28,7 @@ rand = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
 urlencoding = { workspace = true }
+chrono = { workspace = true }
 
 # FFI bridge for Swift/Rust interop
 swift-bridge = "0.1"
