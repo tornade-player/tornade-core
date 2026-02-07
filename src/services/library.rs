@@ -5,7 +5,9 @@ use crate::models::{Track, Album, Artist, Source, AudioFormat};
 use crate::services::error::LibraryError;
 use crate::services::events::{ScanProgress, ScanResult, ScanError};
 use crate::services::metadata::MetadataService;
+use crate::services::reports::ScanReport;
 use crate::utils::AppPaths;
+use chrono::Local;
 use log::{info, warn, error};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -17,6 +19,7 @@ type Result<T> = std::result::Result<T, LibraryError>;
 #[derive(Clone)]
 pub struct LibraryService {
     pool: DbPool,
+    app_paths: AppPaths,
     metadata_service: MetadataService,
     scan_progress: Arc<Mutex<Option<ScanProgress>>>,
     scan_cancelled: Arc<Mutex<bool>>,
@@ -25,7 +28,8 @@ pub struct LibraryService {
 impl LibraryService {
     pub fn new(pool: DbPool, app_paths: AppPaths) -> Self {
         LibraryService {
-            pool,
+            pool: pool.clone(),
+            app_paths: app_paths.clone(),
             metadata_service: MetadataService::new(app_paths),
             scan_progress: Arc::new(Mutex::new(None)),
             scan_cancelled: Arc::new(Mutex::new(false)),
@@ -40,6 +44,7 @@ impl LibraryService {
     pub fn scan_directory(&self, path: &Path, source_id: i64) -> Result<ScanResult> {
         info!("Starting library scan: {:?}", path);
         let start_time = Instant::now();
+        let scan_start_time = Local::now();
 
         // Validate directory exists and is accessible (T135)
         if !path.exists() {
@@ -167,6 +172,22 @@ impl LibraryService {
 
         if !errors.is_empty() {
             info!("Encountered {} errors during scan (see log for details)", errors.len());
+        }
+
+        // Generate scan report
+        let mut report = ScanReport::new(
+            path.to_string_lossy().to_string(),
+            scan_start_time
+        );
+        report.end_time = Local::now();
+        report.total_files = total_files as usize;
+        report.tracks_added = tracks_added as usize;
+        report.errors = errors.iter().map(|e| format!("{:?}", e)).collect();
+
+        // Try to save report (non-fatal if it fails)
+        match report.save(&self.app_paths.reports_dir()) {
+            Ok(path) => info!("Scan report saved to: {:?}", path),
+            Err(e) => warn!("Failed to save scan report: {}", e),
         }
 
         Ok(ScanResult {

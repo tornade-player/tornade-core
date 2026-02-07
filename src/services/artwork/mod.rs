@@ -8,6 +8,8 @@ pub use matching::fuzzy_match;
 
 use crate::db::DbPool;
 use crate::utils::paths::AppPaths;
+use crate::services::reports::ArtworkReport;
+use chrono::Local;
 use std::sync::{Arc, Mutex};
 use serde::{Serialize, Deserialize};
 
@@ -96,9 +98,11 @@ impl ArtworkService {
     /// Fetch artwork for all albums (and optionally artists)
     pub async fn fetch_all_artwork(&self, fetch_artists: bool) -> Result<(), String> {
         self.reset_cancel();
+        let start_time = Local::now();
 
         // Get albums without online artwork
         let albums = self.get_albums_without_artwork()?;
+        let total_albums = albums.len();
         let total_items = albums.len() as u32 + if fetch_artists {
             self.get_artists_without_photos()?.len() as u32
         } else {
@@ -110,6 +114,10 @@ impl ArtworkService {
             let mut progress = self.fetch_progress.lock().unwrap();
             *progress = Some(ArtworkFetchProgress::new(total_items));
         }
+
+        // Track failures
+        let mut albums_failed = Vec::new();
+        let mut albums_successful = 0;
 
         // Create MusicBrainz client
         let mb_client = MusicBrainzClient::new(
@@ -123,17 +131,31 @@ impl ArtworkService {
                 break;
             }
 
+            let album_name = format!("{} - {}", album.artist_name, album.title);
             let success = self.fetch_album_artwork_internal(&mb_client, album.id, &album.title, &album.artist_name).await;
+
+            if success {
+                albums_successful += 1;
+            } else {
+                albums_failed.push((album_name.clone(), "Not found or download failed".to_string()));
+            }
 
             let mut progress = self.fetch_progress.lock().unwrap();
             if let Some(ref mut p) = *progress {
-                p.update(format!("{} - {}", album.artist_name, album.title), success);
+                p.update(album_name, success);
             }
         }
+
+        // Track artist failures
+        let mut artists_failed = Vec::new();
+        let mut artists_successful = 0;
+        let mut total_artists = 0;
 
         // Fetch artist photos if requested
         if fetch_artists {
             let artists = self.get_artists_without_photos()?;
+            total_artists = artists.len();
+
             for artist in artists {
                 if self.is_cancelled() {
                     break;
@@ -141,11 +163,33 @@ impl ArtworkService {
 
                 let success = self.fetch_artist_photo_internal(&mb_client, artist.id, &artist.name).await;
 
+                if success {
+                    artists_successful += 1;
+                } else {
+                    artists_failed.push((artist.name.clone(), "Not found or download failed".to_string()));
+                }
+
                 let mut progress = self.fetch_progress.lock().unwrap();
                 if let Some(ref mut p) = *progress {
                     p.update(artist.name, success);
                 }
             }
+        }
+
+        // Generate report
+        let mut report = ArtworkReport::new(start_time);
+        report.end_time = Local::now();
+        report.total_albums = total_albums;
+        report.albums_successful = albums_successful;
+        report.albums_failed = albums_failed;
+        report.total_artists = total_artists;
+        report.artists_successful = artists_successful;
+        report.artists_failed = artists_failed;
+
+        // Try to save report (non-fatal if it fails)
+        match report.save(&self.app_paths.reports_dir()) {
+            Ok(path) => log::info!("Artwork scraping report saved to: {:?}", path),
+            Err(e) => log::warn!("Failed to save artwork report: {}", e),
         }
 
         Ok(())
