@@ -132,6 +132,17 @@ impl ArtworkService {
             }
 
             let album_name = format!("{} - {}", album.artist_name, album.title);
+
+            // Check if artwork already exists (skip if already downloaded during this session)
+            if self.has_album_artwork(album.id) {
+                albums_successful += 1;
+                let mut progress = self.fetch_progress.lock().unwrap();
+                if let Some(ref mut p) = *progress {
+                    p.update(album_name, true);
+                }
+                continue;
+            }
+
             let success = self.fetch_album_artwork_internal(&mb_client, album.id, &album.title, &album.artist_name).await;
 
             if success {
@@ -159,6 +170,16 @@ impl ArtworkService {
             for artist in artists {
                 if self.is_cancelled() {
                     break;
+                }
+
+                // Check if photo already exists (skip if already downloaded during this session)
+                if self.has_artist_photo(artist.id) {
+                    artists_successful += 1;
+                    let mut progress = self.fetch_progress.lock().unwrap();
+                    if let Some(ref mut p) = *progress {
+                        p.update(artist.name, true);
+                    }
+                    continue;
                 }
 
                 let success = self.fetch_artist_photo_internal(&mb_client, artist.id, &artist.name).await;
@@ -346,6 +367,38 @@ impl ArtworkService {
             .map_err(|e| e.to_string())?;
 
         Ok(artists)
+    }
+
+    /// Check if an album already has artwork
+    fn has_album_artwork(&self, album_id: i64) -> bool {
+        let conn = match self.pool.get() {
+            Ok(conn) => conn,
+            Err(_) => return false,
+        };
+
+        let result: Result<Option<String>, _> = conn.query_row(
+            "SELECT online_artwork_path FROM albums WHERE id = ?1",
+            [album_id],
+            |row| row.get(0),
+        );
+
+        matches!(result, Ok(Some(_)))
+    }
+
+    /// Check if an artist already has a photo
+    fn has_artist_photo(&self, artist_id: i64) -> bool {
+        let conn = match self.pool.get() {
+            Ok(conn) => conn,
+            Err(_) => return false,
+        };
+
+        let result: Result<Option<String>, _> = conn.query_row(
+            "SELECT photo_path FROM artists WHERE id = ?1",
+            [artist_id],
+            |row| row.get(0),
+        );
+
+        matches!(result, Ok(Some(_)))
     }
 
     /// Get album info
