@@ -204,31 +204,33 @@ fn get_library_stats() -> String {
                 }
             };
 
-            // Query counts directly
+            // Query counts and totals in one pass
             let album_count: Result<i64, _> = conn.query_row(
-                "SELECT COUNT(*) FROM albums",
-                [],
-                |row| row.get(0)
+                "SELECT COUNT(*) FROM albums", [], |row| row.get(0)
             );
             let artist_count: Result<i64, _> = conn.query_row(
-                "SELECT COUNT(*) FROM artists",
-                [],
-                |row| row.get(0)
+                "SELECT COUNT(*) FROM artists", [], |row| row.get(0)
             );
             let track_count: Result<i64, _> = conn.query_row(
-                "SELECT COUNT(*) FROM tracks",
-                [],
-                |row| row.get(0)
+                "SELECT COUNT(*) FROM tracks", [], |row| row.get(0)
+            );
+            let total_duration: Result<i64, _> = conn.query_row(
+                "SELECT COALESCE(SUM(duration_seconds), 0) FROM tracks", [], |row| row.get(0)
+            );
+            let artwork_count: Result<i64, _> = conn.query_row(
+                "SELECT COUNT(*) FROM albums WHERE online_artwork_path IS NOT NULL", [], |row| row.get(0)
             );
 
-            match (album_count, artist_count, track_count) {
-                (Ok(albums), Ok(artists), Ok(tracks)) => {
+            match (album_count, artist_count, track_count, total_duration, artwork_count) {
+                (Ok(albums), Ok(artists), Ok(tracks), Ok(duration), Ok(artworks)) => {
                     serde_json::json!({
                         "success": true,
                         "data": {
                             "album_count": albums,
                             "artist_count": artists,
                             "track_count": tracks,
+                            "total_duration_seconds": duration,
+                            "artwork_count": artworks,
                         }
                     }).to_string()
                 }
