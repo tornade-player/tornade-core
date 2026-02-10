@@ -103,7 +103,7 @@ impl MusicBrainzClient {
                 tokio::time::sleep(duration).await;
             }
 
-            let artwork_url = format!("https://coverartarchive.org/release/{}/front", release.id);
+            let artwork_url = format!("https://coverartarchive.org/release/{}/front-500", release.id);
 
             log::debug!("Trying Cover Art Archive: {}", artwork_url);
 
@@ -113,10 +113,18 @@ impl MusicBrainzClient {
                 .await
             {
                 Ok(resp) if resp.status().is_success() => {
+                    // Limit image size to 5 MB to prevent memory issues
+                    const MAX_IMAGE_SIZE: usize = 5 * 1024 * 1024;
+
                     match resp.bytes().await {
-                        Ok(bytes) => {
-                            log::info!("Found artwork for {} - {} (MBID: {})", artist_name, album_title, release.id);
+                        Ok(bytes) if bytes.len() <= MAX_IMAGE_SIZE => {
+                            log::info!("Found artwork for {} - {} ({} KB)", artist_name, album_title, bytes.len() / 1024);
                             return Ok(Some(bytes.to_vec()));
+                        }
+                        Ok(bytes) => {
+                            log::warn!("Artwork too large ({} MB) for {} - {}, skipping",
+                                bytes.len() / 1024 / 1024, artist_name, album_title);
+                            continue;
                         }
                         Err(e) => {
                             log::warn!("Failed to download artwork bytes: {}", e);

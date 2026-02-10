@@ -60,8 +60,10 @@ impl ArtworkService {
     /// Create a new artwork service
     pub fn new(pool: DbPool, app_paths: AppPaths) -> Self {
         let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .user_agent("Tornade-Music-Player/1.0")
+            .timeout(std::time::Duration::from_secs(15))         // Hard timeout per request
+            .connect_timeout(std::time::Duration::from_secs(5))  // Connection timeout
+            .pool_max_idle_per_host(2)                           // Limit connections per host
+            .user_agent("Tornade-Music-Player/1.0 ( contact@tornade.app )")
             .build()
             .expect("Failed to create HTTP client");
 
@@ -69,7 +71,7 @@ impl ArtworkService {
             pool,
             app_paths,
             http_client,
-            rate_limiter: Arc::new(Mutex::new(RateLimiter::new(1000))), // 1 req/sec
+            rate_limiter: Arc::new(Mutex::new(RateLimiter::new(1100))), // 1.1 req/sec (safe margin)
             fetch_progress: Arc::new(Mutex::new(None)),
             fetch_cancelled: Arc::new(Mutex::new(false)),
         }
