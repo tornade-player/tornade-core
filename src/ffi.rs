@@ -215,7 +215,7 @@ fn get_library_stats() -> String {
                 "SELECT COUNT(*) FROM tracks", [], |row| row.get(0)
             );
             let total_duration: Result<i64, _> = conn.query_row(
-                "SELECT COALESCE(SUM(duration_seconds), 0) FROM tracks", [], |row| row.get(0)
+                "SELECT COALESCE(SUM(duration), 0) / 1000 FROM tracks", [], |row| row.get(0)
             );
             let artwork_count: Result<i64, _> = conn.query_row(
                 "SELECT COUNT(*) FROM albums WHERE online_artwork_path IS NOT NULL", [], |row| row.get(0)
