@@ -214,3 +214,44 @@ struct MBArtist {
     name: String,
     score: Option<i32>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rate_limiter_first_call_no_wait() {
+        let mut limiter = RateLimiter::new(1000);
+        let wait = limiter.calculate_wait();
+        assert!(wait.is_none());
+    }
+
+    #[test]
+    fn test_rate_limiter_immediate_second_call_waits() {
+        let mut limiter = RateLimiter::new(1000);
+        limiter.calculate_wait(); // first call
+        let wait = limiter.calculate_wait(); // immediate second
+        assert!(wait.is_some());
+        let wait_ms = wait.unwrap().as_millis();
+        assert!(wait_ms > 0 && wait_ms <= 1000);
+    }
+
+    #[test]
+    fn test_rate_limiter_after_interval_no_wait() {
+        let mut limiter = RateLimiter::new(10); // 10ms interval
+        limiter.calculate_wait();
+        std::thread::sleep(Duration::from_millis(20));
+        let wait = limiter.calculate_wait();
+        assert!(wait.is_none());
+    }
+
+    #[test]
+    fn test_rate_limiter_custom_interval() {
+        let mut limiter = RateLimiter::new(500);
+        assert_eq!(limiter.min_interval_ms, 500);
+        limiter.calculate_wait();
+        let wait = limiter.calculate_wait();
+        assert!(wait.is_some());
+        assert!(wait.unwrap().as_millis() <= 500);
+    }
+}

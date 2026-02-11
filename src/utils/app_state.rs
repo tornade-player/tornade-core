@@ -79,19 +79,18 @@ pub fn clear_state(pool: &DbPool) -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
-    use std::path::PathBuf;
 
-    fn create_test_pool() -> DbPool {
+    fn create_test_pool() -> (tempfile::TempDir, DbPool) {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("test.db");
         let pool = crate::db::create_pool(db_path.clone()).unwrap();
         crate::db::initialize_database(&pool).unwrap();
-        pool
+        (dir, pool)
     }
 
     #[test]
     fn test_save_and_load_state() {
-        let pool = create_test_pool();
+        let (_dir, pool) = create_test_pool();
 
         let state = PersistedState {
             current_track_id: Some(42),
@@ -120,7 +119,7 @@ mod tests {
 
     #[test]
     fn test_load_default_state() {
-        let pool = create_test_pool();
+        let (_dir, pool) = create_test_pool();
 
         // Load state when nothing is saved
         let loaded = load_state(&pool).unwrap();
@@ -134,7 +133,7 @@ mod tests {
 
     #[test]
     fn test_clear_state() {
-        let pool = create_test_pool();
+        let (_dir, pool) = create_test_pool();
 
         let state = PersistedState {
             current_track_id: Some(99),

@@ -8,3 +8,6 @@ pub mod ffi;  // FFI bridge for Swift/Rust interop
 pub mod models;
 pub mod services;
 pub mod utils;
+
+#[cfg(test)]
+pub mod test_helpers;

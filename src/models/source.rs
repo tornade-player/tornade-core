@@ -38,3 +38,26 @@ pub struct Source {
     pub device_id: Option<String>,
     pub last_scanned_at: Option<String>,  // ISO 8601
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_source_type_from_str() {
+        assert_eq!(SourceType::from_str("disk"), Some(SourceType::Disk));
+        assert_eq!(SourceType::from_str("DISK"), Some(SourceType::Disk));
+        assert_eq!(SourceType::from_str("ipod"), Some(SourceType::Ipod));
+        assert_eq!(SourceType::from_str("iphone"), Some(SourceType::Iphone));
+        assert_eq!(SourceType::from_str("unknown"), None);
+    }
+
+    #[test]
+    fn test_source_type_as_str_roundtrip() {
+        for st in [SourceType::Disk, SourceType::Ipod, SourceType::Iphone] {
+            let s = st.as_str();
+            let back = SourceType::from_str(s).unwrap();
+            assert_eq!(back, st);
+        }
+    }
+}

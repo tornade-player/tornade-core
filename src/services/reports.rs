@@ -253,3 +253,151 @@ impl ArtworkReport {
         Ok(filepath)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration as ChronoDuration;
+
+    fn make_scan_report(seconds: i64) -> ScanReport {
+        let start = Local::now() - ChronoDuration::seconds(seconds);
+        let mut r = ScanReport::new("/music".to_string(), start);
+        r.end_time = start + ChronoDuration::seconds(seconds);
+        r.total_files = 100;
+        r.tracks_added = 90;
+        r.albums_created = 10;
+        r.artists_created = 5;
+        r
+    }
+
+    #[test]
+    fn test_scan_report_new() {
+        let start = Local::now();
+        let report = ScanReport::new("/test".to_string(), start);
+        assert_eq!(report.folder_path, "/test");
+        assert_eq!(report.total_files, 0);
+        assert_eq!(report.tracks_added, 0);
+        assert!(report.errors.is_empty());
+    }
+
+    #[test]
+    fn test_scan_report_duration() {
+        let report = make_scan_report(65);
+        assert_eq!(report.duration_seconds(), 65);
+    }
+
+    #[test]
+    fn test_scan_report_format_duration_seconds_only() {
+        let report = make_scan_report(42);
+        assert_eq!(report.format_duration(), "42s");
+    }
+
+    #[test]
+    fn test_scan_report_format_duration_with_minutes() {
+        let report = make_scan_report(125);
+        assert_eq!(report.format_duration(), "2m 5s");
+    }
+
+    #[test]
+    fn test_scan_report_to_text() {
+        let report = make_scan_report(10);
+        let text = report.to_text();
+        assert!(text.contains("LIBRARY SCAN REPORT"));
+        assert!(text.contains("/music"));
+        assert!(text.contains("100"));
+        assert!(text.contains("90"));
+    }
+
+    #[test]
+    fn test_scan_report_to_text_with_errors() {
+        let mut report = make_scan_report(10);
+        report.errors = vec!["Error 1".to_string(), "Error 2".to_string()];
+        let text = report.to_text();
+        assert!(text.contains("ERRORS (2 total)"));
+        assert!(text.contains("Error 1"));
+    }
+
+    #[test]
+    fn test_scan_report_save() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = make_scan_report(5);
+        let path = report.save(&tmp.path().to_path_buf()).unwrap();
+        assert!(path.exists());
+        assert!(path.to_string_lossy().contains("scan_"));
+    }
+
+    #[test]
+    fn test_scan_report_filename_format() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = make_scan_report(5);
+        let path = report.save(&tmp.path().to_path_buf()).unwrap();
+        let filename = path.file_name().unwrap().to_string_lossy();
+        assert!(filename.starts_with("scan_"));
+        assert!(filename.ends_with(".txt"));
+    }
+
+    fn make_artwork_report() -> ArtworkReport {
+        let start = Local::now() - ChronoDuration::seconds(30);
+        let mut r = ArtworkReport::new(start);
+        r.end_time = start + ChronoDuration::seconds(30);
+        r.total_albums = 10;
+        r.albums_successful = 7;
+        r.albums_failed = vec![
+            ("Album X".to_string(), "Not found".to_string()),
+            ("Album Y".to_string(), "Timeout".to_string()),
+            ("Album Z".to_string(), "Error".to_string()),
+        ];
+        r.total_artists = 5;
+        r.artists_successful = 3;
+        r.artists_failed = vec![
+            ("Artist A".to_string(), "Not found".to_string()),
+            ("Artist B".to_string(), "Error".to_string()),
+        ];
+        r
+    }
+
+    #[test]
+    fn test_artwork_report_new() {
+        let start = Local::now();
+        let report = ArtworkReport::new(start);
+        assert_eq!(report.total_albums, 0);
+        assert_eq!(report.albums_successful, 0);
+        assert!(report.albums_failed.is_empty());
+    }
+
+    #[test]
+    fn test_artwork_report_success_rate() {
+        let report = make_artwork_report();
+        let rate = report.success_rate();
+        assert!((rate - 66.666).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_artwork_report_success_rate_zero() {
+        let start = Local::now();
+        let report = ArtworkReport::new(start);
+        assert_eq!(report.success_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_artwork_report_to_text() {
+        let report = make_artwork_report();
+        let text = report.to_text();
+        assert!(text.contains("ARTWORK SCRAPING REPORT"));
+        assert!(text.contains("ALBUMS"));
+        assert!(text.contains("ARTISTS"));
+        assert!(text.contains("OVERALL"));
+        assert!(text.contains("Album X"));
+    }
+
+    #[test]
+    fn test_artwork_report_save() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = make_artwork_report();
+        let path = report.save(&tmp.path().to_path_buf()).unwrap();
+        assert!(path.exists());
+        let filename = path.file_name().unwrap().to_string_lossy();
+        assert!(filename.starts_with("artwork_"));
+        assert!(filename.ends_with(".txt"));
+    }
+}

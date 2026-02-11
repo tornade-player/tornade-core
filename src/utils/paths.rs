@@ -86,3 +86,47 @@ impl AppPaths {
         self.config_dir.join("reports")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_paths() -> AppPaths {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join(".config").join("tornade");
+        std::fs::create_dir_all(base.join("cache")).unwrap();
+        AppPaths {
+            config_dir: base.clone(),
+            data_dir: base.clone(),
+            cache_dir: base.join("cache"),
+        }
+    }
+
+    #[test]
+    fn test_database_path() {
+        let paths = test_paths();
+        assert!(paths.database_path().ends_with("library.db"));
+        assert_eq!(paths.database_path(), paths.data_dir.join("library.db"));
+    }
+
+    #[test]
+    fn test_artwork_dirs() {
+        let paths = test_paths();
+        assert!(paths.artwork_cache_dir().ends_with("artwork"));
+        assert!(paths.album_artwork_dir().ends_with("albums"));
+        assert!(paths.artist_photo_dir().ends_with("artists"));
+    }
+
+    #[test]
+    fn test_reports_dir() {
+        let paths = test_paths();
+        assert!(paths.reports_dir().ends_with("reports"));
+    }
+
+    #[test]
+    fn test_assets_dir() {
+        let paths = test_paths();
+        assert!(paths.assets_dir().ends_with("assets"));
+        assert!(paths.config_path().ends_with("config.json"));
+    }
+}

@@ -817,3 +817,414 @@ pub fn add_track_to_playlist(conn: &Connection, playlist_id: i64, track_id: i64)
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_helpers::TestEnv;
+
+    // ====================================================================
+    // Source tests
+    // ====================================================================
+
+    #[test]
+    fn test_insert_and_get_source() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let id = insert_source(&conn, "My Library", SourceType::Disk, Some(&PathBuf::from("/music"))).unwrap();
+        assert!(id > 0);
+        let source = get_source(&conn, id).unwrap().unwrap();
+        assert_eq!(source.name, "My Library");
+        assert_eq!(source.source_type, SourceType::Disk);
+        assert_eq!(source.path, Some(PathBuf::from("/music")));
+    }
+
+    #[test]
+    fn test_list_sources() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        insert_source(&conn, "B Library", SourceType::Disk, None).unwrap();
+        insert_source(&conn, "A Library", SourceType::Ipod, None).unwrap();
+        let sources = list_sources(&conn).unwrap();
+        assert_eq!(sources.len(), 2);
+        // Should be ordered by name
+        assert_eq!(sources[0].name, "A Library");
+        assert_eq!(sources[1].name, "B Library");
+    }
+
+    #[test]
+    fn test_source_without_path() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let id = insert_source(&conn, "iPod", SourceType::Ipod, None).unwrap();
+        let source = get_source(&conn, id).unwrap().unwrap();
+        assert_eq!(source.source_type, SourceType::Ipod);
+        assert!(source.path.is_none());
+    }
+
+    #[test]
+    fn test_get_source_not_found() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let result = get_source(&conn, 9999).unwrap();
+        assert!(result.is_none());
+    }
+
+    // ====================================================================
+    // Artist tests
+    // ====================================================================
+
+    #[test]
+    fn test_insert_and_get_artist() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let id = insert_artist(&conn, "The Beatles", Some("Beatles, The")).unwrap();
+        assert!(id > 0);
+        let artist = get_artist(&conn, id).unwrap().unwrap();
+        assert_eq!(artist.name, "The Beatles");
+        assert_eq!(artist.name_sort, Some("Beatles, The".to_string()));
+    }
+
+    #[test]
+    fn test_insert_artist_returns_existing() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let id1 = insert_artist(&conn, "Pink Floyd", None).unwrap();
+        let id2 = insert_artist(&conn, "Pink Floyd", Some("sort")).unwrap();
+        // Should return the same ID (ON CONFLICT DO NOTHING)
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn test_list_artists() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        insert_artist(&conn, "Zappa, Frank", Some("Zappa, Frank")).unwrap();
+        insert_artist(&conn, "Beatles, The", Some("Beatles, The")).unwrap();
+        insert_artist(&conn, "Miles Davis", Some("Davis, Miles")).unwrap();
+        let artists = list_artists(&conn).unwrap();
+        assert_eq!(artists.len(), 3);
+        // Ordered by COALESCE(name_sort, name)
+        assert_eq!(artists[0].name, "Beatles, The");
+        assert_eq!(artists[1].name, "Miles Davis");
+        assert_eq!(artists[2].name, "Zappa, Frank");
+    }
+
+    #[test]
+    fn test_get_artist_albums() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let artist_id = insert_artist(&conn, "Test Artist", None).unwrap();
+        insert_album(&conn, "Album A", artist_id, Some(2020)).unwrap();
+        insert_album(&conn, "Album B", artist_id, Some(2021)).unwrap();
+        let albums = get_artist_albums(&conn, artist_id).unwrap();
+        assert_eq!(albums.len(), 2);
+    }
+
+    // ====================================================================
+    // Album tests
+    // ====================================================================
+
+    #[test]
+    fn test_insert_and_get_album() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let artist_id = insert_artist(&conn, "Artist", None).unwrap();
+        let album_id = insert_album(&conn, "My Album", artist_id, Some(2023)).unwrap();
+        assert!(album_id > 0);
+        let album = get_album(&conn, album_id).unwrap().unwrap();
+        assert_eq!(album.title, "My Album");
+        assert_eq!(album.artist_id, artist_id);
+        assert_eq!(album.year, Some(2023));
+    }
+
+    #[test]
+    fn test_insert_album_returns_existing() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let artist_id = insert_artist(&conn, "Artist", None).unwrap();
+        let id1 = insert_album(&conn, "Same Album", artist_id, Some(2020)).unwrap();
+        let id2 = insert_album(&conn, "Same Album", artist_id, Some(2021)).unwrap();
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn test_list_albums() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let artist_id = insert_artist(&conn, "Artist", None).unwrap();
+        insert_album(&conn, "Zebra Album", artist_id, None).unwrap();
+        insert_album(&conn, "Alpha Album", artist_id, None).unwrap();
+        let albums = list_albums(&conn, None, None, None, None, None).unwrap();
+        assert_eq!(albums.len(), 2);
+        assert_eq!(albums[0].title, "Alpha Album");
+    }
+
+    #[test]
+    fn test_album_track_count() {
+        let env = TestEnv::new();
+        let (_, _artist_id, album_id, _, _, _) = env.seed_basic_library();
+        let conn = env.pool.get().unwrap();
+        let tracks = get_album_tracks(&conn, album_id).unwrap();
+        assert_eq!(tracks.len(), 2);
+    }
+
+    #[test]
+    fn test_update_album_rating() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let artist_id = insert_artist(&conn, "Artist", None).unwrap();
+        let album_id = insert_album(&conn, "Album", artist_id, None).unwrap();
+        update_album_rating(&conn, album_id, 4).unwrap();
+        let album = get_album(&conn, album_id).unwrap().unwrap();
+        assert_eq!(album.rating, 4);
+    }
+
+    // ====================================================================
+    // Genre tests
+    // ====================================================================
+
+    #[test]
+    fn test_insert_and_get_genre() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let id = insert_genre(&conn, "Jazz").unwrap();
+        assert!(id > 0);
+        let genre = get_genre(&conn, id).unwrap().unwrap();
+        assert_eq!(genre.name, "Jazz");
+    }
+
+    #[test]
+    fn test_insert_genre_returns_existing() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let id1 = insert_genre(&conn, "Rock").unwrap();
+        let id2 = insert_genre(&conn, "Rock").unwrap();
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn test_list_genres_with_count() {
+        let env = TestEnv::new();
+        env.seed_basic_library();
+        let conn = env.pool.get().unwrap();
+        let genres = list_genres_with_count(&conn).unwrap();
+        assert_eq!(genres.len(), 1);
+        assert_eq!(genres[0].0.name, "Rock");
+        assert_eq!(genres[0].1, 2); // 2 tracks
+    }
+
+    // ====================================================================
+    // Track tests
+    // ====================================================================
+
+    #[test]
+    fn test_insert_and_get_track() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source_id = insert_source(&conn, "Library", SourceType::Disk, None).unwrap();
+        let artist_id = insert_artist(&conn, "Artist", None).unwrap();
+        let album_id = insert_album(&conn, "Album", artist_id, None).unwrap();
+        let track_id = insert_track(
+            &conn, "My Track", Some(album_id), artist_id, source_id,
+            &PathBuf::from("/music/track.flac"), 200_000, Some(1),
+            Some(44100), Some(16), AudioFormat::Flac, 10_000_000,
+        ).unwrap();
+        assert!(track_id > 0);
+        let track = get_track(&conn, track_id).unwrap().unwrap();
+        assert_eq!(track.title, "My Track");
+        assert_eq!(track.file_type, AudioFormat::Flac);
+        assert_eq!(track.duration.as_millis(), 200_000);
+    }
+
+    #[test]
+    fn test_list_tracks_by_album() {
+        let env = TestEnv::new();
+        let (_, _, album_id, _, t1, t2) = env.seed_basic_library();
+        let conn = env.pool.get().unwrap();
+        let tracks = get_album_tracks(&conn, album_id).unwrap();
+        assert_eq!(tracks.len(), 2);
+        let ids: Vec<i64> = tracks.iter().map(|t| t.id).collect();
+        assert!(ids.contains(&t1));
+        assert!(ids.contains(&t2));
+    }
+
+    #[test]
+    fn test_insert_duplicate_track_path_updates() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source_id = insert_source(&conn, "Library", SourceType::Disk, None).unwrap();
+        let artist_id = insert_artist(&conn, "Artist", None).unwrap();
+        let path = PathBuf::from("/music/track.flac");
+
+        insert_track(&conn, "Old Title", None, artist_id, source_id, &path, 100_000, None, None, None, AudioFormat::Flac, 1_000).unwrap();
+        insert_track(&conn, "New Title", None, artist_id, source_id, &path, 200_000, None, None, None, AudioFormat::Flac, 2_000).unwrap();
+
+        let conn2 = env.pool.get().unwrap();
+        let count: i64 = conn2.query_row("SELECT COUNT(*) FROM tracks WHERE source_id = ?1", [source_id], |r| r.get(0)).unwrap();
+        assert_eq!(count, 1); // only one row (upserted)
+    }
+
+    #[test]
+    fn test_delete_tracks_by_source() {
+        let env = TestEnv::new();
+        let (source_id, _, _, _, _, _) = env.seed_basic_library();
+        let conn = env.pool.get().unwrap();
+
+        conn.execute("DELETE FROM tracks WHERE source_id = ?1", [source_id]).unwrap();
+        let tracks = get_source_tracks(&conn, source_id).unwrap();
+        assert!(tracks.is_empty());
+    }
+
+    #[test]
+    fn test_track_with_all_metadata() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source_id = insert_source(&conn, "Library", SourceType::Disk, None).unwrap();
+        let artist_id = insert_artist(&conn, "Artist", None).unwrap();
+        let album_id = insert_album(&conn, "Album", artist_id, Some(2020)).unwrap();
+        let track_id = insert_track(
+            &conn, "Full Track", Some(album_id), artist_id, source_id,
+            &PathBuf::from("/music/full.mp3"), 300_000, Some(5),
+            Some(48000), Some(24), AudioFormat::Mp3, 15_000_000,
+        ).unwrap();
+        let track = get_track(&conn, track_id).unwrap().unwrap();
+        assert_eq!(track.track_number, Some(5));
+        assert_eq!(track.sample_rate, Some(48000));
+        assert_eq!(track.bit_depth, Some(24));
+        assert_eq!(track.file_type, AudioFormat::Mp3);
+        assert_eq!(track.file_size, 15_000_000);
+    }
+
+    #[test]
+    fn test_update_track_rating() {
+        let env = TestEnv::new();
+        let (_, _, _, _, track_id, _) = env.seed_basic_library();
+        let conn = env.pool.get().unwrap();
+        update_track_rating(&conn, track_id, 5).unwrap();
+        let track = get_track(&conn, track_id).unwrap().unwrap();
+        assert_eq!(track.rating, 5);
+    }
+
+    #[test]
+    fn test_link_track_genre() {
+        let env = TestEnv::new();
+        let (_, _, _, genre_id, track_id, _) = env.seed_basic_library();
+        let conn = env.pool.get().unwrap();
+        // Genre already linked in seed, linking again should not error (ON CONFLICT DO NOTHING)
+        link_track_genre(&conn, track_id, genre_id).unwrap();
+        let genres = get_album_genres(&conn, 1).unwrap();
+        assert_eq!(genres.len(), 1);
+    }
+
+    // ====================================================================
+    // Playlist tests
+    // ====================================================================
+
+    #[test]
+    fn test_create_playlist() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let id = create_playlist(&conn, "My Playlist", Some("A test playlist")).unwrap();
+        assert!(id > 0);
+        let pl = get_playlist(&conn, id).unwrap().unwrap();
+        assert_eq!(pl.name, "My Playlist");
+        assert_eq!(pl.description, Some("A test playlist".to_string()));
+        assert!(pl.tracks.is_empty());
+    }
+
+    #[test]
+    fn test_add_tracks_to_playlist() {
+        let env = TestEnv::new();
+        let (_, _, _, _, t1, t2) = env.seed_basic_library();
+        let conn = env.pool.get().unwrap();
+        let pl_id = create_playlist(&conn, "Playlist", None).unwrap();
+        add_track_to_playlist(&conn, pl_id, t1).unwrap();
+        add_track_to_playlist(&conn, pl_id, t2).unwrap();
+        let pl = get_playlist(&conn, pl_id).unwrap().unwrap();
+        assert_eq!(pl.tracks, vec![t1, t2]);
+    }
+
+    #[test]
+    fn test_remove_track_from_playlist() {
+        let env = TestEnv::new();
+        let (_, _, _, _, t1, t2) = env.seed_basic_library();
+        let conn = env.pool.get().unwrap();
+        let pl_id = create_playlist(&conn, "Playlist", None).unwrap();
+        add_track_to_playlist(&conn, pl_id, t1).unwrap();
+        add_track_to_playlist(&conn, pl_id, t2).unwrap();
+
+        // Remove first track (position 0)
+        conn.execute("DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND position = 0", [pl_id]).unwrap();
+        let pl = get_playlist(&conn, pl_id).unwrap().unwrap();
+        assert_eq!(pl.tracks.len(), 1);
+        assert_eq!(pl.tracks[0], t2);
+    }
+
+    #[test]
+    fn test_delete_playlist() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let pl_id = create_playlist(&conn, "To Delete", None).unwrap();
+        conn.execute("DELETE FROM playlists WHERE id = ?1", [pl_id]).unwrap();
+        let result = get_playlist(&conn, pl_id).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_playlist_tracks_ordered_by_position() {
+        let env = TestEnv::new();
+        let (_, _, _, _, t1, t2) = env.seed_basic_library();
+        let conn = env.pool.get().unwrap();
+        let pl_id = create_playlist(&conn, "Ordered", None).unwrap();
+        add_track_to_playlist(&conn, pl_id, t1).unwrap();
+        add_track_to_playlist(&conn, pl_id, t2).unwrap();
+        let pl = get_playlist(&conn, pl_id).unwrap().unwrap();
+        // Should be in insertion order (positions 0, 1)
+        assert_eq!(pl.tracks[0], t1);
+        assert_eq!(pl.tracks[1], t2);
+    }
+
+    #[test]
+    fn test_create_playlist_no_description() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let id = create_playlist(&conn, "Simple", None).unwrap();
+        let pl = get_playlist(&conn, id).unwrap().unwrap();
+        assert_eq!(pl.description, None);
+    }
+
+    // ====================================================================
+    // Search FTS5 tests
+    // ====================================================================
+
+    #[test]
+    fn test_search_tracks_by_title() {
+        let env = TestEnv::new();
+        env.seed_basic_library();
+        let conn = env.pool.get().unwrap();
+        let (tracks, _, _) = search_library(&conn, "Track One", 10).unwrap();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].title, "Track One");
+    }
+
+    #[test]
+    fn test_search_tracks_by_artist() {
+        let env = TestEnv::new();
+        env.seed_basic_library();
+        let conn = env.pool.get().unwrap();
+        let (tracks, _, artists) = search_library(&conn, "Test Artist", 10).unwrap();
+        assert!(!tracks.is_empty() || !artists.is_empty());
+    }
+
+    #[test]
+    fn test_search_returns_empty_for_no_match() {
+        let env = TestEnv::new();
+        env.seed_basic_library();
+        let conn = env.pool.get().unwrap();
+        let (tracks, albums, artists) = search_library(&conn, "xyznotfoundxyz", 10).unwrap();
+        assert!(tracks.is_empty());
+        assert!(albums.is_empty());
+        assert!(artists.is_empty());
+    }
+}

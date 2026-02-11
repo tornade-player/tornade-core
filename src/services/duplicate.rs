@@ -152,4 +152,86 @@ mod tests {
 
         assert_eq!(duplicates.len(), 0);
     }
+
+    #[test]
+    fn test_find_duplicates_with_matches() {
+        use crate::test_helpers::TestEnv;
+        use crate::db::queries;
+        use crate::models::{AudioFormat, source::SourceType};
+
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source_id = queries::insert_source(&conn, "Lib", SourceType::Disk, None).unwrap();
+        let artist_id = queries::insert_artist(&conn, "Artist", None).unwrap();
+
+        // Two tracks with same title + artist + duration => duplicate
+        queries::insert_track(
+            &conn, "Same Song", None, artist_id, source_id,
+            &std::path::PathBuf::from("/a/1.flac"), 180_000, None, None, None, AudioFormat::Flac, 1000,
+        ).unwrap();
+        queries::insert_track(
+            &conn, "Same Song", None, artist_id, source_id,
+            &std::path::PathBuf::from("/b/2.flac"), 180_000, None, None, None, AudioFormat::Flac, 1000,
+        ).unwrap();
+        drop(conn);
+
+        let service = DuplicateService::new(env.pool.clone());
+        let duplicates = service.find_duplicates().unwrap();
+        assert_eq!(duplicates.len(), 1);
+        assert_eq!(duplicates[0].tracks.len(), 2);
+    }
+
+    #[test]
+    fn test_mark_duplicate() {
+        use crate::test_helpers::TestEnv;
+        let env = TestEnv::new();
+        let (_, _, _, _, t1, t2) = env.seed_basic_library();
+
+        let service = DuplicateService::new(env.pool.clone());
+        service.mark_duplicate(t1, true, Some(t2)).unwrap();
+
+        let conn = env.pool.get().unwrap();
+        let (is_dup, dup_of): (i32, Option<i64>) = conn
+            .query_row("SELECT is_duplicate, duplicate_of FROM tracks WHERE id = ?1", [t1], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(is_dup, 1);
+        assert_eq!(dup_of, Some(t2));
+    }
+
+    #[test]
+    fn test_hide_and_unhide_duplicate() {
+        use crate::test_helpers::TestEnv;
+        let env = TestEnv::new();
+        let (_, _, _, _, t1, t2) = env.seed_basic_library();
+
+        let service = DuplicateService::new(env.pool.clone());
+        service.hide_duplicate(t1, t2).unwrap();
+
+        let conn = env.pool.get().unwrap();
+        let is_dup: i32 = conn
+            .query_row("SELECT is_duplicate FROM tracks WHERE id = ?1", [t1], |r| r.get(0))
+            .unwrap();
+        assert_eq!(is_dup, 1);
+
+        service.unhide_duplicate(t1).unwrap();
+        let is_dup: i32 = conn
+            .query_row("SELECT is_duplicate FROM tracks WHERE id = ?1", [t1], |r| r.get(0))
+            .unwrap();
+        assert_eq!(is_dup, 0);
+    }
+
+    #[test]
+    fn test_get_duplicate_stats_empty() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let pool = db::create_pool(db_path.clone()).unwrap();
+        db::initialize_database(&pool).unwrap();
+
+        let service = DuplicateService::new(pool);
+        let (groups, tracks) = service.get_duplicate_stats().unwrap();
+        assert_eq!(groups, 0);
+        assert_eq!(tracks, 0);
+    }
 }

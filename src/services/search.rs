@@ -107,3 +107,59 @@ impl SearchService {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_helpers::TestEnv;
+
+    #[test]
+    fn test_search_empty_query_returns_empty() {
+        let env = TestEnv::new();
+        env.seed_basic_library();
+        let service = SearchService::new(env.pool.clone());
+        let results = service.search("").unwrap();
+        assert!(results.tracks.is_empty());
+        assert!(results.albums.is_empty());
+        assert!(results.artists.is_empty());
+    }
+
+    #[test]
+    fn test_search_whitespace_query_returns_empty() {
+        let env = TestEnv::new();
+        env.seed_basic_library();
+        let service = SearchService::new(env.pool.clone());
+        let results = service.search("   ").unwrap();
+        assert!(results.tracks.is_empty());
+    }
+
+    #[test]
+    fn test_search_album_by_title() {
+        let env = TestEnv::new();
+        env.seed_basic_library();
+        let service = SearchService::new(env.pool.clone());
+        let results = service.search("Test Album").unwrap();
+        assert!(!results.albums.is_empty());
+        assert_eq!(results.albums[0].title, "Test Album");
+    }
+
+    #[test]
+    fn test_search_artist_by_name() {
+        let env = TestEnv::new();
+        env.seed_basic_library();
+        let service = SearchService::new(env.pool.clone());
+        let results = service.search("Test Artist").unwrap();
+        assert!(!results.artists.is_empty());
+    }
+
+    #[test]
+    fn test_search_no_results() {
+        let env = TestEnv::new();
+        env.seed_basic_library();
+        let service = SearchService::new(env.pool.clone());
+        let results = service.search("xyzxyzxyznotfound").unwrap();
+        assert!(results.tracks.is_empty());
+        assert!(results.albums.is_empty());
+        assert!(results.artists.is_empty());
+    }
+}

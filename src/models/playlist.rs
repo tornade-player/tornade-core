@@ -62,3 +62,50 @@ pub enum RepeatMode {
     All,
     One,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_queue_new_empty() {
+        let queue = Queue::new();
+        assert!(queue.is_empty());
+        assert_eq!(queue.len(), 0);
+        assert_eq!(queue.current_track(), None);
+        assert!(!queue.shuffle_enabled);
+        assert_eq!(queue.repeat_mode, RepeatMode::Off);
+    }
+
+    #[test]
+    fn test_queue_current_track() {
+        let mut queue = Queue::new();
+        queue.tracks = vec![10, 20, 30];
+        queue.current_index = 1;
+
+        assert_eq!(queue.current_track(), Some(20));
+        assert_eq!(queue.len(), 3);
+        assert!(!queue.is_empty());
+    }
+
+    #[test]
+    fn test_queue_current_track_with_shuffle() {
+        let mut queue = Queue::new();
+        queue.tracks = vec![10, 20, 30];
+        queue.shuffle_enabled = true;
+        queue.shuffle_order = vec![2, 0, 1]; // shuffled order
+        queue.current_index = 0;
+
+        // current_index=0 -> shuffle_order[0]=2 -> tracks[2]=30
+        assert_eq!(queue.current_track(), Some(30));
+    }
+
+    #[test]
+    fn test_queue_current_track_out_of_bounds() {
+        let mut queue = Queue::new();
+        queue.tracks = vec![10, 20];
+        queue.current_index = 5; // out of bounds
+
+        assert_eq!(queue.current_track(), None);
+    }
+}

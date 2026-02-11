@@ -79,3 +79,34 @@ mod duration_serde {
         Ok(Duration::from_millis(millis))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_audio_format_from_str() {
+        assert_eq!(AudioFormat::from_str("flac"), Some(AudioFormat::Flac));
+        assert_eq!(AudioFormat::from_str("FLAC"), Some(AudioFormat::Flac));
+        assert_eq!(AudioFormat::from_str("mp3"), Some(AudioFormat::Mp3));
+        assert_eq!(AudioFormat::from_str("aac"), Some(AudioFormat::Aac));
+        assert_eq!(AudioFormat::from_str("alac"), Some(AudioFormat::Alac));
+        assert_eq!(AudioFormat::from_str("m4a"), Some(AudioFormat::Alac));
+    }
+
+    #[test]
+    fn test_audio_format_as_str_roundtrip() {
+        for format in [AudioFormat::Flac, AudioFormat::Mp3, AudioFormat::Aac, AudioFormat::Alac] {
+            let s = format.as_str();
+            let back = AudioFormat::from_str(s).unwrap();
+            assert_eq!(back, format);
+        }
+    }
+
+    #[test]
+    fn test_audio_format_unknown_extension() {
+        assert_eq!(AudioFormat::from_str("wav"), None);
+        assert_eq!(AudioFormat::from_str("ogg"), None);
+        assert_eq!(AudioFormat::from_str(""), None);
+    }
+}

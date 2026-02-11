@@ -220,3 +220,110 @@ pub fn initialize_fts_triggers(conn: &Connection) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::test_helpers::TestEnv;
+
+    #[test]
+    fn test_initialize_database() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert!(tables.contains(&"sources".to_string()));
+        assert!(tables.contains(&"artists".to_string()));
+        assert!(tables.contains(&"albums".to_string()));
+        assert!(tables.contains(&"genres".to_string()));
+        assert!(tables.contains(&"tracks".to_string()));
+        assert!(tables.contains(&"track_genres".to_string()));
+        assert!(tables.contains(&"playlists".to_string()));
+        assert!(tables.contains(&"playlist_tracks".to_string()));
+        assert!(tables.contains(&"app_state".to_string()));
+    }
+
+    #[test]
+    fn test_initialize_database_idempotent() {
+        let env = TestEnv::new();
+        // Initialize again — should not error
+        crate::db::initialize_database(&env.pool).unwrap();
+        // And a third time
+        crate::db::initialize_database(&env.pool).unwrap();
+
+        let conn = env.pool.get().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tracks'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_fts_tables_exist() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+
+        let fts_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='tracks_fts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(fts_exists);
+
+        // Check FTS triggers
+        let triggers: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='trigger' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert!(triggers.contains(&"tracks_ai".to_string()));
+        assert!(triggers.contains(&"tracks_ad".to_string()));
+        assert!(triggers.contains(&"tracks_au".to_string()));
+    }
+
+    #[test]
+    fn test_migrations_applied() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+
+        // Check migration version
+        let max_version: i32 = conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(max_version, 2);
+
+        // Verify migration 2 columns exist
+        let album_cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(albums)")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(album_cols.contains(&"online_artwork_path".to_string()));
+        assert!(album_cols.contains(&"artwork_source".to_string()));
+        assert!(album_cols.contains(&"artwork_fetched_at".to_string()));
+
+        let artist_cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(artists)")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(artist_cols.contains(&"photo_path".to_string()));
+        assert!(artist_cols.contains(&"photo_source".to_string()));
+        assert!(artist_cols.contains(&"photo_fetched_at".to_string()));
+    }
+}

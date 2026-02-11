@@ -275,3 +275,101 @@ impl PlaylistService {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_helpers::TestEnv;
+
+    fn setup() -> (TestEnv, PlaylistService) {
+        let env = TestEnv::new();
+        let service = PlaylistService::new(env.pool.clone());
+        (env, service)
+    }
+
+    #[test]
+    fn test_create_playlist() {
+        let (_env, service) = setup();
+        let pl = service.create_playlist("My Mix", Some("A great mix")).unwrap();
+        assert_eq!(pl.name, "My Mix");
+        assert_eq!(pl.description, Some("A great mix".to_string()));
+        assert!(pl.tracks.is_empty());
+    }
+
+    #[test]
+    fn test_get_playlist() {
+        let (_env, service) = setup();
+        let created = service.create_playlist("Test", None).unwrap();
+        let found = service.get_playlist(created.id).unwrap().unwrap();
+        assert_eq!(found.id, created.id);
+        assert_eq!(found.name, "Test");
+    }
+
+    #[test]
+    fn test_get_playlist_not_found() {
+        let (_env, service) = setup();
+        let result = service.get_playlist(9999).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_list_playlists() {
+        let (_env, service) = setup();
+        service.create_playlist("B Playlist", None).unwrap();
+        service.create_playlist("A Playlist", None).unwrap();
+        let playlists = service.list_playlists().unwrap();
+        assert_eq!(playlists.len(), 2);
+        assert_eq!(playlists[0].name, "A Playlist");
+    }
+
+    #[test]
+    fn test_add_tracks_to_playlist() {
+        let (env, service) = setup();
+        let (_, _, _, _, t1, t2) = env.seed_basic_library();
+        let pl = service.create_playlist("Queue", None).unwrap();
+        service.add_tracks(pl.id, vec![t1, t2]).unwrap();
+        let updated = service.get_playlist(pl.id).unwrap().unwrap();
+        assert_eq!(updated.tracks, vec![t1, t2]);
+    }
+
+    #[test]
+    fn test_remove_track_from_playlist() {
+        let (env, service) = setup();
+        let (_, _, _, _, t1, t2) = env.seed_basic_library();
+        let pl = service.create_playlist("Mix", None).unwrap();
+        service.add_tracks(pl.id, vec![t1, t2]).unwrap();
+        service.remove_track(pl.id, 0).unwrap();
+        let updated = service.get_playlist(pl.id).unwrap().unwrap();
+        assert_eq!(updated.tracks.len(), 1);
+    }
+
+    #[test]
+    fn test_rename_playlist() {
+        let (_env, service) = setup();
+        let pl = service.create_playlist("Old Name", None).unwrap();
+        service.rename_playlist(pl.id, "New Name").unwrap();
+        let updated = service.get_playlist(pl.id).unwrap().unwrap();
+        assert_eq!(updated.name, "New Name");
+    }
+
+    #[test]
+    fn test_delete_playlist() {
+        let (_env, service) = setup();
+        let pl = service.create_playlist("Temp", None).unwrap();
+        service.delete_playlist(pl.id).unwrap();
+        let result = service.get_playlist(pl.id).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_move_track_in_playlist() {
+        let (env, service) = setup();
+        let (_, _, _, _, t1, t2) = env.seed_basic_library();
+        let pl = service.create_playlist("Reorder", None).unwrap();
+        service.add_tracks(pl.id, vec![t1, t2]).unwrap();
+        service.move_track(pl.id, 0, 1).unwrap();
+        let updated = service.get_playlist(pl.id).unwrap().unwrap();
+        assert_eq!(updated.tracks[0], t2);
+        assert_eq!(updated.tracks[1], t1);
+    }
+}

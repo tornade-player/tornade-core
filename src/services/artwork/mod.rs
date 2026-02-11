@@ -480,3 +480,159 @@ struct ArtistInfo {
     id: i64,
     name: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_helpers::TestEnv;
+    use crate::db::queries;
+
+    // ArtworkFetchProgress tests
+
+    #[test]
+    fn test_progress_new() {
+        let p = ArtworkFetchProgress::new(10);
+        assert_eq!(p.total_items, 10);
+        assert_eq!(p.processed_items, 0);
+        assert_eq!(p.successful, 0);
+        assert_eq!(p.failed, 0);
+        assert!(p.current_item.is_empty());
+    }
+
+    #[test]
+    fn test_progress_update_success() {
+        let mut p = ArtworkFetchProgress::new(5);
+        p.update("Album A".to_string(), true);
+        assert_eq!(p.processed_items, 1);
+        assert_eq!(p.successful, 1);
+        assert_eq!(p.failed, 0);
+        assert_eq!(p.current_item, "Album A");
+    }
+
+    #[test]
+    fn test_progress_update_failure() {
+        let mut p = ArtworkFetchProgress::new(5);
+        p.update("Album B".to_string(), false);
+        assert_eq!(p.processed_items, 1);
+        assert_eq!(p.successful, 0);
+        assert_eq!(p.failed, 1);
+    }
+
+    #[test]
+    fn test_progress_multiple_updates() {
+        let mut p = ArtworkFetchProgress::new(3);
+        p.update("A".to_string(), true);
+        p.update("B".to_string(), false);
+        p.update("C".to_string(), true);
+        assert_eq!(p.processed_items, 3);
+        assert_eq!(p.successful, 2);
+        assert_eq!(p.failed, 1);
+        assert_eq!(p.current_item, "C");
+    }
+
+    // ArtworkService DB method tests
+
+    fn setup_artwork_env() -> (TestEnv, i64, i64) {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let artist_id = queries::insert_artist(&conn, "Pink Floyd", None).unwrap();
+        let album_id = queries::insert_album(&conn, "The Wall", artist_id, Some(1979)).unwrap();
+        (env, artist_id, album_id)
+    }
+
+    #[test]
+    fn test_get_albums_without_artwork() {
+        let (env, _artist_id, _album_id) = setup_artwork_env();
+        let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
+        let albums = service.get_albums_without_artwork().unwrap();
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].title, "The Wall");
+    }
+
+    #[test]
+    fn test_get_albums_excludes_fetched() {
+        let (env, _artist_id, album_id) = setup_artwork_env();
+        let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
+
+        // Set artwork
+        service.update_album_artwork(album_id, "/path/to/art.jpg".to_string()).unwrap();
+
+        let albums = service.get_albums_without_artwork().unwrap();
+        assert_eq!(albums.len(), 0);
+    }
+
+    #[test]
+    fn test_has_album_artwork_false() {
+        let (env, _artist_id, album_id) = setup_artwork_env();
+        let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
+        assert!(!service.has_album_artwork(album_id));
+    }
+
+    #[test]
+    fn test_has_album_artwork_true() {
+        let (env, _artist_id, album_id) = setup_artwork_env();
+        let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
+        service.update_album_artwork(album_id, "/art.jpg".to_string()).unwrap();
+        assert!(service.has_album_artwork(album_id));
+    }
+
+    #[test]
+    fn test_update_album_artwork() {
+        let (env, _artist_id, album_id) = setup_artwork_env();
+        let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
+        service.update_album_artwork(album_id, "/path/art.jpg".to_string()).unwrap();
+
+        let conn = env.pool.get().unwrap();
+        let path: String = conn
+            .query_row("SELECT online_artwork_path FROM albums WHERE id = ?1", [album_id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(path, "/path/art.jpg");
+
+        let source: String = conn
+            .query_row("SELECT artwork_source FROM albums WHERE id = ?1", [album_id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(source, "musicbrainz");
+    }
+
+    #[test]
+    fn test_get_artists_without_photos() {
+        let (env, _artist_id, _album_id) = setup_artwork_env();
+        let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
+        let artists = service.get_artists_without_photos().unwrap();
+        assert_eq!(artists.len(), 1);
+        assert_eq!(artists[0].name, "Pink Floyd");
+    }
+
+    #[test]
+    fn test_has_artist_photo_false() {
+        let (env, artist_id, _album_id) = setup_artwork_env();
+        let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
+        assert!(!service.has_artist_photo(artist_id));
+    }
+
+    #[test]
+    fn test_has_artist_photo_true() {
+        let (env, artist_id, _album_id) = setup_artwork_env();
+        let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
+        service.update_artist_photo(artist_id, "/photo.jpg".to_string()).unwrap();
+        assert!(service.has_artist_photo(artist_id));
+    }
+
+    #[test]
+    fn test_update_artist_photo() {
+        let (env, artist_id, _album_id) = setup_artwork_env();
+        let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
+        service.update_artist_photo(artist_id, "/path/photo.jpg".to_string()).unwrap();
+
+        let conn = env.pool.get().unwrap();
+        let path: String = conn
+            .query_row("SELECT photo_path FROM artists WHERE id = ?1", [artist_id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(path, "/path/photo.jpg");
+
+        let source: String = conn
+            .query_row("SELECT photo_source FROM artists WHERE id = ?1", [artist_id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(source, "musicbrainz");
+    }
+}

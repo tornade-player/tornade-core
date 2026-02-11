@@ -66,4 +66,22 @@ mod tests {
     fn test_normalize() {
         assert_eq!(normalize("  Abbey Road  "), "abbey road");
     }
+
+    #[test]
+    fn test_partial_match() {
+        // query contains target
+        let score = fuzzy_match("Abbey Road Deluxe", "Abbey Road");
+        assert!(score >= 0.7);
+    }
+
+    #[test]
+    fn test_no_match() {
+        let score = fuzzy_match("ZZZZZ", "Abbey Road");
+        assert!(score < 0.5);
+    }
+
+    #[test]
+    fn test_empty_strings() {
+        assert_eq!(fuzzy_match("", ""), 1.0); // both normalized to "" -> equal
+    }
 }
