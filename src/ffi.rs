@@ -92,7 +92,7 @@ fn get_or_init_library() -> Result<library::LibraryService, String> {
 }
 
 fn get_or_init_artwork() -> Result<(), String> {
-    let mut artwork_opt = ARTWORK_SERVICE.lock().unwrap();
+    let mut artwork_opt = ARTWORK_SERVICE.lock().unwrap_or_else(|e| e.into_inner());
 
     if artwork_opt.is_none() {
         // Get database pool first
@@ -1984,7 +1984,7 @@ fn fetch_all_artwork(fetch_artists: bool) -> String {
     match get_or_init_artwork() {
         Ok(_) => {
             // Spawn async task in background
-            let artwork_opt = ARTWORK_SERVICE.lock().unwrap();
+            let artwork_opt = ARTWORK_SERVICE.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(artwork_service) = artwork_opt.as_ref() {
                 let service_clone = artwork_service.clone();
                 TOKIO_RUNTIME.spawn(async move {
@@ -2019,7 +2019,7 @@ fn fetch_album_artwork(album_id: i64) -> String {
     // Fetch artwork for a specific album
     match get_or_init_artwork() {
         Ok(_) => {
-            let artwork_opt = ARTWORK_SERVICE.lock().unwrap();
+            let artwork_opt = ARTWORK_SERVICE.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(artwork_service) = artwork_opt.as_ref() {
                 let service_clone = artwork_service.clone();
                 TOKIO_RUNTIME.spawn(async move {
@@ -2054,7 +2054,7 @@ fn get_artwork_fetch_progress() -> String {
     // Get current artwork fetch progress
     match get_or_init_artwork() {
         Ok(_) => {
-            let artwork_opt = ARTWORK_SERVICE.lock().unwrap();
+            let artwork_opt = ARTWORK_SERVICE.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(artwork_service) = artwork_opt.as_ref() {
                 match artwork_service.get_progress() {
                     Some(progress) => {
@@ -2096,7 +2096,7 @@ fn cancel_artwork_fetch() -> String {
     // Cancel ongoing artwork fetch
     match get_or_init_artwork() {
         Ok(_) => {
-            let artwork_opt = ARTWORK_SERVICE.lock().unwrap();
+            let artwork_opt = ARTWORK_SERVICE.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(artwork_service) = artwork_opt.as_ref() {
                 artwork_service.cancel_fetch();
                 serde_json::json!({

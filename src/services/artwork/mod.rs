@@ -79,22 +79,22 @@ impl ArtworkService {
 
     /// Get current fetch progress
     pub fn get_progress(&self) -> Option<ArtworkFetchProgress> {
-        self.fetch_progress.lock().unwrap().clone()
+        self.fetch_progress.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Cancel ongoing fetch operation
     pub fn cancel_fetch(&self) {
-        *self.fetch_cancelled.lock().unwrap() = true;
+        *self.fetch_cancelled.lock().unwrap_or_else(|e| e.into_inner()) = true;
     }
 
     /// Check if fetch was cancelled
     fn is_cancelled(&self) -> bool {
-        *self.fetch_cancelled.lock().unwrap()
+        *self.fetch_cancelled.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Reset cancellation flag
     fn reset_cancel(&self) {
-        *self.fetch_cancelled.lock().unwrap() = false;
+        *self.fetch_cancelled.lock().unwrap_or_else(|e| e.into_inner()) = false;
     }
 
     /// Fetch artwork for all albums (and optionally artists)
@@ -113,7 +113,7 @@ impl ArtworkService {
 
         // Initialize progress
         {
-            let mut progress = self.fetch_progress.lock().unwrap();
+            let mut progress = self.fetch_progress.lock().unwrap_or_else(|e| e.into_inner());
             *progress = Some(ArtworkFetchProgress::new(total_items));
         }
 
@@ -138,7 +138,7 @@ impl ArtworkService {
             // Check if artwork already exists (skip if already downloaded during this session)
             if self.has_album_artwork(album.id) {
                 albums_successful += 1;
-                let mut progress = self.fetch_progress.lock().unwrap();
+                let mut progress = self.fetch_progress.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(ref mut p) = *progress {
                     p.update(album_name, true);
                 }
@@ -153,7 +153,7 @@ impl ArtworkService {
                 albums_failed.push((album_name.clone(), "Not found or download failed".to_string()));
             }
 
-            let mut progress = self.fetch_progress.lock().unwrap();
+            let mut progress = self.fetch_progress.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut p) = *progress {
                 p.update(album_name, success);
             }
@@ -177,7 +177,7 @@ impl ArtworkService {
                 // Check if photo already exists (skip if already downloaded during this session)
                 if self.has_artist_photo(artist.id) {
                     artists_successful += 1;
-                    let mut progress = self.fetch_progress.lock().unwrap();
+                    let mut progress = self.fetch_progress.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(ref mut p) = *progress {
                         p.update(artist.name, true);
                     }
@@ -192,7 +192,7 @@ impl ArtworkService {
                     artists_failed.push((artist.name.clone(), "Not found or download failed".to_string()));
                 }
 
-                let mut progress = self.fetch_progress.lock().unwrap();
+                let mut progress = self.fetch_progress.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(ref mut p) = *progress {
                     p.update(artist.name, success);
                 }
