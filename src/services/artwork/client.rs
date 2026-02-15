@@ -56,7 +56,7 @@ impl MusicBrainzClient {
     pub async fn search_album_artwork(&self, album_title: &str, artist_name: &str) -> Result<Option<Vec<u8>>, String> {
         // Wait for rate limit
         let wait_time = {
-            let mut limiter = self.rate_limiter.lock().unwrap();
+            let mut limiter = self.rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
             limiter.calculate_wait()
         };
         if let Some(duration) = wait_time {
@@ -96,7 +96,7 @@ impl MusicBrainzClient {
         for release in search_result.releases.iter().take(3) {
             // Wait for rate limit
             let wait_time = {
-                let mut limiter = self.rate_limiter.lock().unwrap();
+                let mut limiter = self.rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
                 limiter.calculate_wait()
             };
             if let Some(duration) = wait_time {
@@ -148,7 +148,7 @@ impl MusicBrainzClient {
     pub async fn search_artist_photo(&self, artist_name: &str) -> Result<Option<Vec<u8>>, String> {
         // Wait for rate limit
         let wait_time = {
-            let mut limiter = self.rate_limiter.lock().unwrap();
+            let mut limiter = self.rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
             limiter.calculate_wait()
         };
         if let Some(duration) = wait_time {
