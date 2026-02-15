@@ -1232,6 +1232,7 @@ fn get_player_state() -> String {
                     let volume = player_service.get_volume();
                     let shuffle = player_service.is_shuffle_enabled();
                     let repeat_mode = player_service.get_repeat_mode();
+                    let skipped_track_ids = player_service.get_skipped_track_ids();
 
                     // Convert PlaybackState to is_playing boolean
                     let is_playing = matches!(playback_state, PlaybackState::Playing);
@@ -1252,7 +1253,8 @@ fn get_player_state() -> String {
                             "duration": duration,
                             "volume": volume as f64,  // Cast f32 to f64 for JSON
                             "shuffle": shuffle,
-                            "repeat_mode": repeat_mode
+                            "repeat_mode": repeat_mode,
+                            "skipped_track_ids": skipped_track_ids
                         }
                     });
                     log::debug!("get_player_state JSON: {}", json_result);

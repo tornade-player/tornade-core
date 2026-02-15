@@ -8,6 +8,7 @@ use log::{info, warn};
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink};
 use std::fs::File;
 use std::io::BufReader;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -27,6 +28,7 @@ struct PlayerState {
     volume: f32,
     playback_start_time: Option<Instant>,
     paused_at: Option<Duration>,
+    skipped_track_ids: HashSet<i64>,
 }
 
 impl PlayerService {
@@ -40,6 +42,7 @@ impl PlayerService {
                 volume: 1.0,
                 playback_start_time: None,
                 paused_at: None,
+                skipped_track_ids: HashSet::new(),
             })),
             audio: Arc::new(Mutex::new(None)),
             sink: Arc::new(Mutex::new(None)),
@@ -277,47 +280,46 @@ impl PlayerService {
         Ok(())
     }
 
-    /// Skip to next track
+    /// Skip to next track, auto-skipping up to 3 consecutive missing files
     pub fn next(&self) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
+        let mut consecutive_misses = 0;
 
-        if state.queue.is_empty() {
-            return Err(PlayerError::EmptyQueue);
-        }
+        loop {
+            let track_id = {
+                let mut state = self.state.lock().unwrap();
 
-        eprintln!("🔀 NEXT: Before increment - current_index={}, shuffle={}, shuffle_order={:?}",
-            state.queue.current_index,
-            state.queue.shuffle_enabled,
-            state.queue.shuffle_order
-        );
-
-        // Move to next track in queue
-        state.queue.current_index += 1;
-
-        // Handle repeat mode
-        if state.queue.current_index >= state.queue.len() {
-            match state.queue.repeat_mode {
-                RepeatMode::All => state.queue.current_index = 0,
-                RepeatMode::One => state.queue.current_index -= 1,
-                RepeatMode::Off => {
-                    drop(state);
-                    return self.stop();
+                if state.queue.is_empty() {
+                    return Err(PlayerError::EmptyQueue);
                 }
+
+                // Advance one step
+                state.queue.current_index += 1;
+
+                // Handle end of queue
+                if state.queue.current_index >= state.queue.len() {
+                    match state.queue.repeat_mode {
+                        RepeatMode::All => state.queue.current_index = 0,
+                        RepeatMode::One => state.queue.current_index -= 1,
+                        RepeatMode::Off => {
+                            drop(state);
+                            return self.stop();
+                        }
+                    }
+                }
+
+                state.queue.current_track().ok_or(PlayerError::EmptyQueue)?
+            };
+
+            match self.play(track_id) {
+                Ok(()) => return Ok(()),
+                Err(PlayerError::FileNotFound(path)) if consecutive_misses < 3 => {
+                    warn!("Track {} file not found in next(), skipping", track_id);
+                    self.state.lock().unwrap().skipped_track_ids.insert(track_id);
+                    consecutive_misses += 1;
+                }
+                Err(e) => return Err(e),
             }
         }
-
-        eprintln!("🔀 NEXT: After increment - current_index={}", state.queue.current_index);
-
-        // Get next track ID
-        let track_id = state.queue.current_track()
-            .ok_or(PlayerError::EmptyQueue)?;
-
-        eprintln!("🔀 NEXT: Will play track_id={}", track_id);
-
-        drop(state);
-
-        // Play next track
-        self.play(track_id)
     }
 
     /// Skip to previous track (or restart if < 3s)
@@ -397,7 +399,8 @@ impl PlayerService {
             match self.play(track_id) {
                 Ok(()) => return Ok(()),
                 Err(PlayerError::FileNotFound(path)) => {
-                    warn!("Track file not found ({}), skipping", path);
+                    warn!("Track {} file not found ({}), skipping", track_id, path);
+                    self.state.lock().unwrap().skipped_track_ids.insert(track_id);
                     // Stop after 3 consecutive missing files — likely a disconnected volume
                     if current >= index + 3 {
                         return Err(PlayerError::FileNotFound(path));
@@ -421,6 +424,7 @@ impl PlayerService {
         let mut state = self.state.lock().unwrap();
         state.queue.tracks = track_ids;
         state.queue.current_index = 0;
+        state.skipped_track_ids.clear();
 
         // Regenerate shuffle order if shuffle is enabled
         if state.queue.shuffle_enabled {
@@ -521,6 +525,7 @@ impl PlayerService {
         state.queue.tracks.clear();
         state.queue.shuffle_order.clear();
         state.queue.current_index = 0;
+        state.skipped_track_ids.clear();
         info!("Queue cleared");
         Ok(())
     }
@@ -533,6 +538,11 @@ impl PlayerService {
     /// Get current queue index
     pub fn get_queue_index(&self) -> usize {
         self.state.lock().unwrap().queue.current_index
+    }
+
+    /// Get track IDs that failed to play due to missing files
+    pub fn get_skipped_track_ids(&self) -> Vec<i64> {
+        self.state.lock().unwrap().skipped_track_ids.iter().copied().collect()
     }
 
     // ========================================================================
