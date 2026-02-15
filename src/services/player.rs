@@ -370,7 +370,7 @@ impl PlayerService {
         self.play(track_id)
     }
 
-    /// Jump to a specific index in the queue, skipping missing files
+    /// Jump to a specific index in the queue, skipping up to 3 consecutive missing files
     pub fn jump_to_index(&self, index: usize) -> Result<()> {
         let queue_len = {
             let state = self.state.lock().unwrap();
@@ -384,25 +384,32 @@ impl PlayerService {
             return Err(PlayerError::InvalidPosition);
         }
 
-        let track_id = {
-            let mut state = self.state.lock().unwrap();
-            state.queue.current_index = index;
-            state.queue.current_track().ok_or(PlayerError::EmptyQueue)?
-        };
+        let mut current = index;
+        let mut last_missing: Option<String> = None;
 
-        match self.play(track_id) {
-            Ok(()) => Ok(()),
-            Err(PlayerError::FileNotFound(path)) => {
-                warn!("Track file not found ({}), skipping to next", path);
-                let next = index + 1;
-                if next < queue_len {
-                    self.jump_to_index(next)
-                } else {
-                    Err(PlayerError::FileNotFound(path))
+        while current < queue_len {
+            let track_id = {
+                let mut state = self.state.lock().unwrap();
+                state.queue.current_index = current;
+                state.queue.current_track().ok_or(PlayerError::EmptyQueue)?
+            };
+
+            match self.play(track_id) {
+                Ok(()) => return Ok(()),
+                Err(PlayerError::FileNotFound(path)) => {
+                    warn!("Track file not found ({}), skipping", path);
+                    // Stop after 3 consecutive missing files — likely a disconnected volume
+                    if current >= index + 3 {
+                        return Err(PlayerError::FileNotFound(path));
+                    }
+                    last_missing = Some(path);
+                    current += 1;
                 }
+                Err(e) => return Err(e),
             }
-            Err(e) => Err(e),
         }
+
+        Err(PlayerError::FileNotFound(last_missing.unwrap_or_default()))
     }
 
     // ========================================================================
