@@ -4,7 +4,7 @@ use crate::db::DbPool;
 use crate::models::{Track, Queue, RepeatMode};
 use crate::services::error::PlayerError;
 use crate::services::events::PlaybackState;
-use log::info;
+use log::{info, warn};
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink};
 use std::fs::File;
 use std::io::BufReader;
@@ -85,8 +85,13 @@ impl PlayerService {
             .map_err(|e| PlayerError::Audio(format!("Failed to create sink: {}", e)))?;
 
         // Open and decode file
-        let file = File::open(&track.file_path)
-            .map_err(|e| PlayerError::Audio(format!("Failed to open file: {}", e)))?;
+        let file = File::open(&track.file_path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                PlayerError::FileNotFound(track.file_path.to_string_lossy().into_owned())
+            } else {
+                PlayerError::Audio(format!("Failed to open file: {}", e))
+            }
+        })?;
 
         let source = Decoder::new(BufReader::new(file))
             .map_err(|e| PlayerError::Audio(format!("Failed to decode audio: {}", e)))?;
@@ -235,8 +240,13 @@ impl PlayerService {
         let stream_handle = self.ensure_audio_stream()?;
 
         // Open and decode file
-        let file = File::open(&track.file_path)
-            .map_err(|e| PlayerError::Audio(format!("Failed to open file: {}", e)))?;
+        let file = File::open(&track.file_path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                PlayerError::FileNotFound(track.file_path.to_string_lossy().into_owned())
+            } else {
+                PlayerError::Audio(format!("Failed to open file: {}", e))
+            }
+        })?;
 
         let source = Decoder::new(BufReader::new(file))
             .map_err(|e| PlayerError::Audio(format!("Failed to decode audio: {}", e)))?;
@@ -360,29 +370,39 @@ impl PlayerService {
         self.play(track_id)
     }
 
-    /// Jump to a specific index in the queue
+    /// Jump to a specific index in the queue, skipping missing files
     pub fn jump_to_index(&self, index: usize) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
+        let queue_len = {
+            let state = self.state.lock().unwrap();
+            if state.queue.is_empty() {
+                return Err(PlayerError::EmptyQueue);
+            }
+            state.queue.len()
+        };
 
-        if state.queue.is_empty() {
-            return Err(PlayerError::EmptyQueue);
-        }
-
-        if index >= state.queue.len() {
+        if index >= queue_len {
             return Err(PlayerError::InvalidPosition);
         }
 
-        // Update current index
-        state.queue.current_index = index;
+        let track_id = {
+            let mut state = self.state.lock().unwrap();
+            state.queue.current_index = index;
+            state.queue.current_track().ok_or(PlayerError::EmptyQueue)?
+        };
 
-        // Get track ID at this index
-        let track_id = state.queue.current_track()
-            .ok_or(PlayerError::EmptyQueue)?;
-
-        drop(state);
-
-        // Play track at this index
-        self.play(track_id)
+        match self.play(track_id) {
+            Ok(()) => Ok(()),
+            Err(PlayerError::FileNotFound(path)) => {
+                warn!("Track file not found ({}), skipping to next", path);
+                let next = index + 1;
+                if next < queue_len {
+                    self.jump_to_index(next)
+                } else {
+                    Err(PlayerError::FileNotFound(path))
+                }
+            }
+            Err(e) => Err(e),
+        }
     }
 
     // ========================================================================

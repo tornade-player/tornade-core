@@ -37,6 +37,9 @@ pub enum PlayerError {
     #[error("Track not found: {0}")]
     TrackNotFound(i64),
 
+    #[error("File not found: {0}")]
+    FileNotFound(String),
+
     #[error("Empty queue")]
     EmptyQueue,
 
