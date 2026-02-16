@@ -306,25 +306,31 @@ impl PlayerService {
                 let mut state = self.state.lock().unwrap();
 
                 if state.queue.is_empty() {
-                    return Err(PlayerError::EmptyQueue);
+                    drop(state);
+                    return self.stop();
                 }
 
-                // Advance one step
-                state.queue.current_index += 1;
+                // RepeatMode::One replays the current track — do not advance
+                if state.queue.repeat_mode == RepeatMode::One {
+                    state.queue.current_track().ok_or(PlayerError::EmptyQueue)?
+                } else {
+                    // Advance one step
+                    state.queue.current_index += 1;
 
-                // Handle end of queue
-                if state.queue.current_index >= state.queue.len() {
-                    match state.queue.repeat_mode {
-                        RepeatMode::All => state.queue.current_index = 0,
-                        RepeatMode::One => state.queue.current_index -= 1,
-                        RepeatMode::Off => {
-                            drop(state);
-                            return self.stop();
+                    // Handle end of queue
+                    if state.queue.current_index >= state.queue.len() {
+                        match state.queue.repeat_mode {
+                            RepeatMode::All => state.queue.current_index = 0,
+                            RepeatMode::Off => {
+                                drop(state);
+                                return self.stop();
+                            }
+                            RepeatMode::One => unreachable!(),
                         }
                     }
-                }
 
-                state.queue.current_track().ok_or(PlayerError::EmptyQueue)?
+                    state.queue.current_track().ok_or(PlayerError::EmptyQueue)?
+                }
             };
 
             match self.play(track_id) {
@@ -1160,6 +1166,24 @@ mod tests {
         assert!(!player.is_track_finished());
     }
 
+    #[test]
+    fn test_is_track_finished_is_true_after_short_track_plays() {
+        // Verify that is_track_finished() returns true once a short track is done.
+        // This is the core requirement for auto-advance to work.
+        let (dir, pool) = create_test_pool();
+        let wav = dir.path().join("test.wav");
+        create_test_wav(&wav); // 0.5 s
+        let track_id = insert_test_track(&pool, &wav, "Short Track");
+        let player = make_player(pool);
+        player.play(track_id).unwrap();
+        // Wait long enough for the 0.5 s track to finish
+        std::thread::sleep(Duration::from_millis(1000));
+        assert!(
+            player.is_track_finished(),
+            "is_track_finished() must return true after the track plays to completion"
+        );
+    }
+
     // =========================================================================
     // Error cases — no audio device needed
     // =========================================================================
@@ -1187,10 +1211,12 @@ mod tests {
     }
 
     #[test]
-    fn test_next_on_empty_queue_returns_error() {
+    fn test_next_on_empty_queue_stops_player() {
+        // next() on an empty queue stops playback (prevents stuck-in-playing loop)
         let (_dir, pool) = create_test_pool();
         let player = make_player(pool);
-        assert!(matches!(player.next(), Err(PlayerError::EmptyQueue)));
+        assert!(player.next().is_ok());
+        assert_eq!(player.get_state(), PlaybackState::Stopped);
     }
 
     #[test]
@@ -1535,5 +1561,66 @@ mod tests {
         player.play(id1).unwrap();
         assert_eq!(player.get_queue(), vec![id1, 20, 30]);
         assert_eq!(player.get_queue_index(), 0);
+    }
+
+    // =========================================================================
+    // Regression: RepeatMode::One must replay the *current* track immediately,
+    // not just loop the last track when the queue is exhausted.
+    // Bug: next() only activated RepeatMode::One at end-of-queue, so in a
+    // multi-track queue every track advanced normally until the last one, which
+    // then looped forever instead of staying on the current track throughout.
+    // =========================================================================
+
+    #[test]
+    fn test_next_with_repeat_one_replays_current_track() {
+        // With a single-track queue and RepeatMode::One, next() must replay
+        // the same track (index stays at 0).
+        let (dir, pool) = create_test_pool();
+        let wav = dir.path().join("test.wav");
+        create_test_wav(&wav);
+        let track_id = insert_test_track(&pool, &wav, "Test Track");
+        let player = make_player(pool);
+        player.set_queue(vec![track_id]).unwrap();
+        player.set_repeat(RepeatMode::One).unwrap();
+        player.next().unwrap();
+        assert_eq!(
+            player.get_queue_index(),
+            0,
+            "RepeatMode::One must keep index at 0"
+        );
+        assert_eq!(
+            player.get_current_track().unwrap().id,
+            track_id,
+            "RepeatMode::One must replay the same track"
+        );
+        assert_eq!(player.get_state(), PlaybackState::Playing);
+    }
+
+    #[test]
+    fn test_next_with_repeat_one_does_not_advance_mid_queue() {
+        // With a multi-track queue and RepeatMode::One, next() must NOT advance
+        // to the next track — it must replay the current track at the same index.
+        let (dir, pool) = create_test_pool();
+        let wav1 = dir.path().join("track1.wav");
+        let wav2 = dir.path().join("track2.wav");
+        create_test_wav(&wav1);
+        create_test_wav(&wav2);
+        let id1 = insert_test_track(&pool, &wav1, "Track 1");
+        let id2 = insert_test_track(&pool, &wav2, "Track 2");
+        let player = make_player(pool);
+        player.set_queue(vec![id1, id2]).unwrap();
+        player.set_repeat(RepeatMode::One).unwrap();
+        // Queue starts at index 0 (id1). next() must stay on id1, not jump to id2.
+        player.next().unwrap();
+        assert_eq!(
+            player.get_queue_index(),
+            0,
+            "RepeatMode::One must not advance the queue index"
+        );
+        assert_eq!(
+            player.get_current_track().unwrap().id,
+            id1,
+            "RepeatMode::One must replay track 1, not advance to track 2"
+        );
     }
 }
