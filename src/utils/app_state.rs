@@ -11,6 +11,8 @@ pub struct PersistedState {
     pub playback_position: f64,  // Position in seconds
     pub queue: Vec<i64>,
     pub queue_index: usize,
+    #[serde(default)]
+    pub shuffle_order: Vec<usize>,
     pub volume: f32,
     pub shuffle_enabled: bool,
     pub repeat_mode: RepeatMode,
@@ -23,6 +25,7 @@ impl Default for PersistedState {
             playback_position: 0.0,
             queue: Vec::new(),
             queue_index: 0,
+            shuffle_order: Vec::new(),
             volume: 1.0,
             shuffle_enabled: false,
             repeat_mode: RepeatMode::Off,

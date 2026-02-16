@@ -3,6 +3,7 @@
 use crate::db::DbPool;
 use crate::models::{Track, Queue, RepeatMode};
 use crate::services::error::PlayerError;
+use crate::utils::app_state::{self, PersistedState};
 use crate::services::events::PlaybackState;
 use log::{info, warn};
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink};
@@ -33,13 +34,26 @@ struct PlayerState {
 
 impl PlayerService {
     pub fn new(pool: DbPool) -> Result<Self> {
+        // Restore queue state from previous session
+        let persisted = app_state::load_state(&pool).unwrap_or_default();
+
+        let queue = Queue {
+            tracks: persisted.queue,
+            current_index: persisted.queue_index,
+            shuffle_enabled: persisted.shuffle_enabled,
+            repeat_mode: persisted.repeat_mode,
+            shuffle_order: persisted.shuffle_order,
+        };
+
+        info!("Restored queue with {} tracks (index {})", queue.tracks.len(), queue.current_index);
+
         Ok(PlayerService {
             pool,
             state: Arc::new(Mutex::new(PlayerState {
                 current_track: None,
-                queue: Queue::new(),
+                queue,
                 playback_state: PlaybackState::Stopped,
-                volume: 1.0,
+                volume: persisted.volume,
                 playback_start_time: None,
                 paused_at: None,
                 skipped_track_ids: HashSet::new(),
@@ -311,7 +325,10 @@ impl PlayerService {
             };
 
             match self.play(track_id) {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    self.save_queue_state();
+                    return Ok(());
+                }
                 Err(PlayerError::FileNotFound(path)) if consecutive_misses < 3 => {
                     warn!("Track {} file not found in next(), skipping", track_id);
                     self.state.lock().unwrap().skipped_track_ids.insert(track_id);
@@ -369,7 +386,9 @@ impl PlayerService {
 
         drop(state);
 
-        self.play(track_id)
+        self.play(track_id)?;
+        self.save_queue_state();
+        Ok(())
     }
 
     /// Jump to a specific index in the queue, skipping up to 3 consecutive missing files
@@ -397,7 +416,10 @@ impl PlayerService {
             };
 
             match self.play(track_id) {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    self.save_queue_state();
+                    return Ok(());
+                }
                 Err(PlayerError::FileNotFound(path)) => {
                     warn!("Track {} file not found ({}), skipping", track_id, path);
                     self.state.lock().unwrap().skipped_track_ids.insert(track_id);
@@ -419,6 +441,26 @@ impl PlayerService {
     // Queue Management
     // ========================================================================
 
+    /// Persist current queue state to the database (best-effort, logs on failure)
+    fn save_queue_state(&self) {
+        let persisted = {
+            let state = self.state.lock().unwrap();
+            PersistedState {
+                current_track_id: state.current_track.as_ref().map(|t| t.id),
+                playback_position: 0.0,
+                queue: state.queue.tracks.clone(),
+                queue_index: state.queue.current_index,
+                shuffle_order: state.queue.shuffle_order.clone(),
+                volume: state.volume,
+                shuffle_enabled: state.queue.shuffle_enabled,
+                repeat_mode: state.queue.repeat_mode,
+            }
+        };
+        if let Err(e) = app_state::save_state(&self.pool, &persisted) {
+            warn!("Failed to persist queue state: {}", e);
+        }
+    }
+
     /// Set the playback queue
     pub fn set_queue(&self, track_ids: Vec<i64>) -> Result<()> {
         let mut state = self.state.lock().unwrap();
@@ -436,25 +478,30 @@ impl PlayerService {
         }
 
         info!("Queue set with {} tracks", state.queue.tracks.len());
+        drop(state);
+        self.save_queue_state();
         Ok(())
     }
 
     /// Add tracks to queue
     pub fn add_to_queue(&self, track_ids: Vec<i64>) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
         let count = track_ids.len();
-        state.queue.tracks.extend(track_ids);
+        {
+            let mut state = self.state.lock().unwrap();
+            state.queue.tracks.extend(track_ids);
 
-        // Regenerate shuffle order if shuffle is enabled
-        if state.queue.shuffle_enabled {
-            use rand::seq::SliceRandom;
-            use rand::thread_rng;
-            let mut indices: Vec<usize> = (0..state.queue.len()).collect();
-            indices.shuffle(&mut thread_rng());
-            state.queue.shuffle_order = indices;
+            // Regenerate shuffle order if shuffle is enabled
+            if state.queue.shuffle_enabled {
+                use rand::seq::SliceRandom;
+                use rand::thread_rng;
+                let mut indices: Vec<usize> = (0..state.queue.len()).collect();
+                indices.shuffle(&mut thread_rng());
+                state.queue.shuffle_order = indices;
+            }
         }
 
         info!("Added {} tracks to queue", count);
+        self.save_queue_state();
         Ok(())
     }
 
@@ -483,50 +530,58 @@ impl PlayerService {
         }
 
         info!("Removed track at position {}", position);
+        drop(state);
+        self.save_queue_state();
         Ok(())
     }
 
     /// Move track in queue
     pub fn move_in_queue(&self, from: usize, to: usize) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
+        {
+            let mut state = self.state.lock().unwrap();
 
-        if from >= state.queue.tracks.len() || to >= state.queue.tracks.len() {
-            return Err(PlayerError::InvalidPosition);
-        }
+            if from >= state.queue.tracks.len() || to >= state.queue.tracks.len() {
+                return Err(PlayerError::InvalidPosition);
+            }
 
-        let track_id = state.queue.tracks.remove(from);
-        state.queue.tracks.insert(to, track_id);
+            let track_id = state.queue.tracks.remove(from);
+            state.queue.tracks.insert(to, track_id);
 
-        // Adjust current index if needed
-        if state.queue.current_index == from {
-            state.queue.current_index = to;
-        } else if from < state.queue.current_index && to >= state.queue.current_index {
-            state.queue.current_index -= 1;
-        } else if from > state.queue.current_index && to <= state.queue.current_index {
-            state.queue.current_index += 1;
-        }
+            // Adjust current index if needed
+            if state.queue.current_index == from {
+                state.queue.current_index = to;
+            } else if from < state.queue.current_index && to >= state.queue.current_index {
+                state.queue.current_index -= 1;
+            } else if from > state.queue.current_index && to <= state.queue.current_index {
+                state.queue.current_index += 1;
+            }
 
-        // Regenerate shuffle order if shuffle is enabled
-        if state.queue.shuffle_enabled {
-            use rand::seq::SliceRandom;
-            use rand::thread_rng;
-            let mut indices: Vec<usize> = (0..state.queue.len()).collect();
-            indices.shuffle(&mut thread_rng());
-            state.queue.shuffle_order = indices;
+            // Regenerate shuffle order if shuffle is enabled
+            if state.queue.shuffle_enabled {
+                use rand::seq::SliceRandom;
+                use rand::thread_rng;
+                let mut indices: Vec<usize> = (0..state.queue.len()).collect();
+                indices.shuffle(&mut thread_rng());
+                state.queue.shuffle_order = indices;
+            }
         }
 
         info!("Moved track from position {} to {}", from, to);
+        self.save_queue_state();
         Ok(())
     }
 
     /// Clear queue
     pub fn clear_queue(&self) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
-        state.queue.tracks.clear();
-        state.queue.shuffle_order.clear();
-        state.queue.current_index = 0;
-        state.skipped_track_ids.clear();
+        {
+            let mut state = self.state.lock().unwrap();
+            state.queue.tracks.clear();
+            state.queue.shuffle_order.clear();
+            state.queue.current_index = 0;
+            state.skipped_track_ids.clear();
+        }
         info!("Queue cleared");
+        self.save_queue_state();
         Ok(())
     }
 
@@ -630,12 +685,15 @@ impl PlayerService {
             state.queue.current_index,
             state.queue.shuffle_order
         );
+        drop(state);
+        self.save_queue_state();
         Ok(())
     }
 
     pub fn set_repeat(&self, mode: RepeatMode) -> Result<()> {
         self.state.lock().unwrap().queue.repeat_mode = mode;
         info!("Repeat mode set to {:?}", mode);
+        self.save_queue_state();
         Ok(())
     }
 
