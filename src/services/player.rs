@@ -734,4 +734,748 @@ impl PlayerService {
     pub fn get_volume(&self) -> f32 {
         self.state.lock().unwrap().volume
     }
+
+    /// Returns true if the current track has finished playing naturally
+    pub fn is_track_finished(&self) -> bool {
+        let is_playing = matches!(
+            self.state.lock().unwrap().playback_state,
+            PlaybackState::Playing
+        );
+        if !is_playing {
+            return false;
+        }
+        let sink_lock = self.sink.lock().unwrap();
+        sink_lock.as_ref().map(|s| s.empty()).unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db;
+    use crate::db::queries;
+    use crate::models::source::SourceType;
+    use crate::models::AudioFormat;
+    use std::io::Write;
+    use std::path::Path;
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    // =========================================================================
+    // Helpers
+    // =========================================================================
+
+    fn create_test_pool() -> (TempDir, DbPool) {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let pool = db::create_pool(db_path).unwrap();
+        db::initialize_database(&pool).unwrap();
+        (dir, pool)
+    }
+
+    /// Write a minimal valid WAV file (0.5 second, 44100 Hz, mono, 16-bit PCM).
+    fn create_test_wav(path: &Path) {
+        let sample_rate: u32 = 44100;
+        let num_samples: u32 = 22050; // 0.5 s
+        let num_channels: u16 = 1;
+        let bits_per_sample: u16 = 16;
+        let byte_rate = sample_rate * num_channels as u32 * bits_per_sample as u32 / 8;
+        let block_align = num_channels * bits_per_sample / 8;
+        let data_size = num_samples * num_channels as u32 * bits_per_sample as u32 / 8;
+        let file_size = 36 + data_size;
+
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(b"RIFF").unwrap();
+        f.write_all(&file_size.to_le_bytes()).unwrap();
+        f.write_all(b"WAVE").unwrap();
+        f.write_all(b"fmt ").unwrap();
+        f.write_all(&16u32.to_le_bytes()).unwrap();
+        f.write_all(&1u16.to_le_bytes()).unwrap(); // PCM
+        f.write_all(&num_channels.to_le_bytes()).unwrap();
+        f.write_all(&sample_rate.to_le_bytes()).unwrap();
+        f.write_all(&byte_rate.to_le_bytes()).unwrap();
+        f.write_all(&block_align.to_le_bytes()).unwrap();
+        f.write_all(&bits_per_sample.to_le_bytes()).unwrap();
+        f.write_all(b"data").unwrap();
+        f.write_all(&data_size.to_le_bytes()).unwrap();
+        for _ in 0..num_samples {
+            f.write_all(&0i16.to_le_bytes()).unwrap();
+        }
+    }
+
+    /// Insert a test track into the database and return its ID.
+    fn insert_test_track(pool: &DbPool, file_path: &Path, title: &str) -> i64 {
+        let conn = pool.get().unwrap();
+        let artist_id = queries::insert_artist(&conn, "Test Artist", None).unwrap();
+        let source_id = queries::insert_source(
+            &conn,
+            title, // use title as unique source name to avoid conflicts
+            SourceType::Disk,
+            Some(&file_path.parent().unwrap().to_path_buf()),
+        )
+        .unwrap();
+        queries::insert_track(
+            &conn,
+            title,
+            None,
+            artist_id,
+            source_id,
+            &file_path.to_path_buf(),
+            500,
+            None,
+            Some(44100),
+            Some(16),
+            AudioFormat::Flac,
+            0,
+        )
+        .unwrap()
+    }
+
+    fn make_player(pool: DbPool) -> PlayerService {
+        PlayerService::new(pool).unwrap()
+    }
+
+    // =========================================================================
+    // Queue management
+    // =========================================================================
+
+    #[test]
+    fn test_set_queue_empty() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_queue(vec![]).unwrap();
+        assert!(player.get_queue().is_empty());
+        assert_eq!(player.get_queue_index(), 0);
+    }
+
+    #[test]
+    fn test_set_queue_with_tracks() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_queue(vec![10, 20, 30]).unwrap();
+        assert_eq!(player.get_queue(), vec![10, 20, 30]);
+        assert_eq!(player.get_queue_index(), 0);
+    }
+
+    #[test]
+    fn test_add_to_queue() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_queue(vec![1, 2]).unwrap();
+        player.add_to_queue(vec![3, 4]).unwrap();
+        assert_eq!(player.get_queue(), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_add_to_empty_queue() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.add_to_queue(vec![5, 6]).unwrap();
+        assert_eq!(player.get_queue(), vec![5, 6]);
+    }
+
+    #[test]
+    fn test_remove_from_queue_middle() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_queue(vec![1, 2, 3]).unwrap();
+        player.remove_from_queue(1).unwrap();
+        assert_eq!(player.get_queue(), vec![1, 3]);
+    }
+
+    #[test]
+    fn test_remove_from_queue_last() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_queue(vec![1, 2, 3]).unwrap();
+        player.remove_from_queue(2).unwrap();
+        assert_eq!(player.get_queue(), vec![1, 2]);
+    }
+
+    #[test]
+    fn test_remove_from_queue_invalid_position() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_queue(vec![1, 2, 3]).unwrap();
+        assert!(matches!(
+            player.remove_from_queue(5),
+            Err(PlayerError::InvalidPosition)
+        ));
+    }
+
+    #[test]
+    fn test_remove_from_queue_adjusts_current_index() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_queue(vec![1, 2, 3, 4]).unwrap();
+        player.state.lock().unwrap().queue.current_index = 2;
+        // remove position 1 (before current) → current should shift down
+        player.remove_from_queue(1).unwrap();
+        assert_eq!(player.get_queue_index(), 1);
+        assert_eq!(player.get_queue(), vec![1, 3, 4]);
+    }
+
+    #[test]
+    fn test_remove_at_index_zero_keeps_index_zero() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_queue(vec![1, 2, 3]).unwrap();
+        player.remove_from_queue(0).unwrap();
+        assert_eq!(player.get_queue_index(), 0);
+        assert_eq!(player.get_queue(), vec![2, 3]);
+    }
+
+    #[test]
+    fn test_move_in_queue_forward() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_queue(vec![1, 2, 3, 4]).unwrap();
+        player.move_in_queue(0, 2).unwrap();
+        assert_eq!(player.get_queue(), vec![2, 3, 1, 4]);
+    }
+
+    #[test]
+    fn test_move_in_queue_backward() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_queue(vec![1, 2, 3, 4]).unwrap();
+        player.move_in_queue(3, 1).unwrap();
+        assert_eq!(player.get_queue(), vec![1, 4, 2, 3]);
+    }
+
+    #[test]
+    fn test_move_in_queue_invalid_from() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_queue(vec![1, 2, 3]).unwrap();
+        assert!(matches!(
+            player.move_in_queue(10, 0),
+            Err(PlayerError::InvalidPosition)
+        ));
+    }
+
+    #[test]
+    fn test_move_in_queue_invalid_to() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_queue(vec![1, 2, 3]).unwrap();
+        assert!(matches!(
+            player.move_in_queue(0, 10),
+            Err(PlayerError::InvalidPosition)
+        ));
+    }
+
+    #[test]
+    fn test_move_in_queue_updates_current_index_when_current_track_moves() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_queue(vec![1, 2, 3, 4]).unwrap();
+        player.state.lock().unwrap().queue.current_index = 0;
+        player.move_in_queue(0, 2).unwrap();
+        assert_eq!(player.get_queue_index(), 2);
+    }
+
+    #[test]
+    fn test_clear_queue() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_queue(vec![1, 2, 3]).unwrap();
+        player.clear_queue().unwrap();
+        assert!(player.get_queue().is_empty());
+        assert_eq!(player.get_queue_index(), 0);
+    }
+
+    #[test]
+    fn test_clear_queue_also_clears_skipped_set() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.state.lock().unwrap().skipped_track_ids.insert(42);
+        player.clear_queue().unwrap();
+        assert!(player.get_skipped_track_ids().is_empty());
+    }
+
+    // =========================================================================
+    // Volume
+    // =========================================================================
+
+    #[test]
+    fn test_initial_volume_is_one() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        assert_eq!(player.get_volume(), 1.0);
+    }
+
+    #[test]
+    fn test_set_volume() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_volume(0.5).unwrap();
+        assert_eq!(player.get_volume(), 0.5);
+    }
+
+    #[test]
+    fn test_set_volume_clamps_below_zero() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_volume(-1.0).unwrap();
+        assert_eq!(player.get_volume(), 0.0);
+    }
+
+    #[test]
+    fn test_set_volume_clamps_above_one() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_volume(2.0).unwrap();
+        assert_eq!(player.get_volume(), 1.0);
+    }
+
+    // =========================================================================
+    // Repeat mode
+    // =========================================================================
+
+    #[test]
+    fn test_initial_repeat_mode_is_off() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        assert_eq!(player.get_repeat_mode(), RepeatMode::Off);
+    }
+
+    #[test]
+    fn test_set_repeat_all() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_repeat(RepeatMode::All).unwrap();
+        assert_eq!(player.get_repeat_mode(), RepeatMode::All);
+    }
+
+    #[test]
+    fn test_set_repeat_one() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_repeat(RepeatMode::One).unwrap();
+        assert_eq!(player.get_repeat_mode(), RepeatMode::One);
+    }
+
+    #[test]
+    fn test_set_repeat_off_from_all() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_repeat(RepeatMode::All).unwrap();
+        player.set_repeat(RepeatMode::Off).unwrap();
+        assert_eq!(player.get_repeat_mode(), RepeatMode::Off);
+    }
+
+    // =========================================================================
+    // Shuffle
+    // =========================================================================
+
+    #[test]
+    fn test_shuffle_initially_disabled() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        assert!(!player.is_shuffle_enabled());
+    }
+
+    #[test]
+    fn test_enable_shuffle_generates_complete_order() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_queue(vec![10, 20, 30, 40]).unwrap();
+        player.set_shuffle(true).unwrap();
+        assert!(player.is_shuffle_enabled());
+        let mut order = player.get_shuffle_order();
+        assert_eq!(order.len(), 4);
+        order.sort();
+        assert_eq!(order, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn test_disable_shuffle() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_queue(vec![1, 2, 3]).unwrap();
+        player.set_shuffle(true).unwrap();
+        player.set_shuffle(false).unwrap();
+        assert!(!player.is_shuffle_enabled());
+    }
+
+    #[test]
+    fn test_set_queue_while_shuffle_enabled_regenerates_order() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_shuffle(true).unwrap();
+        player.set_queue(vec![1, 2, 3, 4, 5]).unwrap();
+        let mut order = player.get_shuffle_order();
+        assert_eq!(order.len(), 5);
+        order.sort();
+        assert_eq!(order, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_add_to_queue_while_shuffle_enabled_expands_order() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_queue(vec![1, 2, 3]).unwrap();
+        player.set_shuffle(true).unwrap();
+        player.add_to_queue(vec![4, 5]).unwrap();
+        assert_eq!(player.get_shuffle_order().len(), 5);
+    }
+
+    // =========================================================================
+    // Initial playback state
+    // =========================================================================
+
+    #[test]
+    fn test_initial_state_is_stopped() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        assert_eq!(player.get_state(), PlaybackState::Stopped);
+    }
+
+    #[test]
+    fn test_initial_position_is_zero() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        assert_eq!(player.get_position(), 0.0);
+    }
+
+    #[test]
+    fn test_initial_current_track_is_none() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        assert!(player.get_current_track().is_none());
+    }
+
+    #[test]
+    fn test_initial_skipped_track_ids_is_empty() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        assert!(player.get_skipped_track_ids().is_empty());
+    }
+
+    #[test]
+    fn test_is_track_finished_is_false_when_stopped() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        assert!(!player.is_track_finished());
+    }
+
+    // =========================================================================
+    // Error cases — no audio device needed
+    // =========================================================================
+
+    #[test]
+    fn test_pause_without_sink_returns_empty_queue_error() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        assert!(matches!(player.pause(), Err(PlayerError::EmptyQueue)));
+    }
+
+    #[test]
+    fn test_resume_without_sink_returns_empty_queue_error() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        assert!(matches!(player.resume(), Err(PlayerError::EmptyQueue)));
+    }
+
+    #[test]
+    fn test_stop_without_audio_is_ok() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        assert!(player.stop().is_ok());
+        assert_eq!(player.get_state(), PlaybackState::Stopped);
+    }
+
+    #[test]
+    fn test_next_on_empty_queue_returns_error() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        assert!(matches!(player.next(), Err(PlayerError::EmptyQueue)));
+    }
+
+    #[test]
+    fn test_previous_on_empty_queue_returns_error() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        assert!(matches!(player.previous(), Err(PlayerError::EmptyQueue)));
+    }
+
+    #[test]
+    fn test_jump_to_index_on_empty_queue_returns_error() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        assert!(matches!(
+            player.jump_to_index(0),
+            Err(PlayerError::EmptyQueue)
+        ));
+    }
+
+    #[test]
+    fn test_jump_to_index_out_of_bounds_returns_invalid_position() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_queue(vec![1, 2, 3]).unwrap();
+        assert!(matches!(
+            player.jump_to_index(10),
+            Err(PlayerError::InvalidPosition)
+        ));
+    }
+
+    #[test]
+    fn test_seek_without_current_track_returns_error() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        assert!(matches!(
+            player.seek(Duration::from_secs(1)),
+            Err(PlayerError::EmptyQueue)
+        ));
+    }
+
+    #[test]
+    fn test_previous_at_start_with_repeat_off_returns_invalid_position() {
+        // Uses fake IDs — previous() returns early before calling play()
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_queue(vec![1, 2, 3]).unwrap();
+        player.set_repeat(RepeatMode::Off).unwrap();
+        assert!(matches!(
+            player.previous(),
+            Err(PlayerError::InvalidPosition)
+        ));
+    }
+
+    #[test]
+    fn test_next_at_end_with_repeat_off_stops_playback() {
+        // Uses a fake ID — next() hits end-of-queue, calls stop() without playing
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_queue(vec![99]).unwrap();
+        player.set_repeat(RepeatMode::Off).unwrap();
+        player.next().unwrap();
+        assert_eq!(player.get_state(), PlaybackState::Stopped);
+    }
+
+    // =========================================================================
+    // Playback with real audio — requires CoreAudio (macOS)
+    // =========================================================================
+
+    #[test]
+    fn test_play_nonexistent_track_id_returns_track_not_found() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        assert!(matches!(
+            player.play(99999),
+            Err(PlayerError::TrackNotFound(99999))
+        ));
+    }
+
+    #[test]
+    fn test_play_missing_file_returns_file_not_found() {
+        let (dir, pool) = create_test_pool();
+        let missing = dir.path().join("does_not_exist.wav");
+        let track_id = insert_test_track(&pool, &missing, "Missing Track");
+        let player = make_player(pool);
+        assert!(matches!(
+            player.play(track_id),
+            Err(PlayerError::FileNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn test_play_valid_file_changes_state_to_playing() {
+        let (dir, pool) = create_test_pool();
+        let wav = dir.path().join("test.wav");
+        create_test_wav(&wav);
+        let track_id = insert_test_track(&pool, &wav, "Test Track");
+        let player = make_player(pool);
+        player.play(track_id).unwrap();
+        assert_eq!(player.get_state(), PlaybackState::Playing);
+        assert_eq!(player.get_current_track().unwrap().id, track_id);
+    }
+
+    #[test]
+    fn test_play_then_pause_changes_state_to_paused() {
+        let (dir, pool) = create_test_pool();
+        let wav = dir.path().join("test.wav");
+        create_test_wav(&wav);
+        let track_id = insert_test_track(&pool, &wav, "Test Track");
+        let player = make_player(pool);
+        player.play(track_id).unwrap();
+        player.pause().unwrap();
+        assert_eq!(player.get_state(), PlaybackState::Paused);
+    }
+
+    #[test]
+    fn test_play_pause_resume_restores_playing_state() {
+        let (dir, pool) = create_test_pool();
+        let wav = dir.path().join("test.wav");
+        create_test_wav(&wav);
+        let track_id = insert_test_track(&pool, &wav, "Test Track");
+        let player = make_player(pool);
+        player.play(track_id).unwrap();
+        player.pause().unwrap();
+        player.resume().unwrap();
+        assert_eq!(player.get_state(), PlaybackState::Playing);
+    }
+
+    #[test]
+    fn test_play_then_stop_clears_track_and_state() {
+        let (dir, pool) = create_test_pool();
+        let wav = dir.path().join("test.wav");
+        create_test_wav(&wav);
+        let track_id = insert_test_track(&pool, &wav, "Test Track");
+        let player = make_player(pool);
+        player.play(track_id).unwrap();
+        player.stop().unwrap();
+        assert_eq!(player.get_state(), PlaybackState::Stopped);
+        assert!(player.get_current_track().is_none());
+        assert_eq!(player.get_position(), 0.0);
+    }
+
+    #[test]
+    fn test_position_advances_while_playing() {
+        let (dir, pool) = create_test_pool();
+        let wav = dir.path().join("test.wav");
+        create_test_wav(&wav);
+        let track_id = insert_test_track(&pool, &wav, "Test Track");
+        let player = make_player(pool);
+        player.play(track_id).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            player.get_position() > 0.0,
+            "position should advance while playing"
+        );
+    }
+
+    #[test]
+    fn test_position_stable_while_paused() {
+        let (dir, pool) = create_test_pool();
+        let wav = dir.path().join("test.wav");
+        create_test_wav(&wav);
+        let track_id = insert_test_track(&pool, &wav, "Test Track");
+        let player = make_player(pool);
+        player.play(track_id).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        player.pause().unwrap();
+        let pos1 = player.get_position();
+        std::thread::sleep(Duration::from_millis(50));
+        let pos2 = player.get_position();
+        assert_eq!(pos1, pos2, "position should not change while paused");
+    }
+
+    #[test]
+    fn test_seek_while_paused_updates_position() {
+        let (dir, pool) = create_test_pool();
+        let wav = dir.path().join("test.wav");
+        create_test_wav(&wav);
+        let track_id = insert_test_track(&pool, &wav, "Test Track");
+        let player = make_player(pool);
+        player.play(track_id).unwrap();
+        player.pause().unwrap();
+        player.seek(Duration::from_millis(200)).unwrap();
+        let pos = player.get_position();
+        assert!(
+            (pos - 0.2).abs() < 0.05,
+            "expected ~0.2 s after seek, got {:.3} s",
+            pos
+        );
+    }
+
+    #[test]
+    fn test_play_updates_queue_current_index() {
+        let (dir, pool) = create_test_pool();
+        let wav = dir.path().join("test.wav");
+        create_test_wav(&wav);
+        let track_id = insert_test_track(&pool, &wav, "Test Track");
+        let player = make_player(pool);
+        player.set_queue(vec![999, 998, track_id, 997]).unwrap();
+        player.play(track_id).unwrap();
+        assert_eq!(player.get_queue_index(), 2);
+    }
+
+    #[test]
+    fn test_set_volume_while_playing_takes_effect() {
+        let (dir, pool) = create_test_pool();
+        let wav = dir.path().join("test.wav");
+        create_test_wav(&wav);
+        let track_id = insert_test_track(&pool, &wav, "Test Track");
+        let player = make_player(pool);
+        player.play(track_id).unwrap();
+        player.set_volume(0.3).unwrap();
+        assert_eq!(player.get_volume(), 0.3);
+    }
+
+    #[test]
+    fn test_next_skips_missing_file_and_plays_subsequent() {
+        let (dir, pool) = create_test_pool();
+        let wav1 = dir.path().join("track1.wav");
+        let wav2 = dir.path().join("track2.wav");
+        let missing = dir.path().join("missing.wav");
+        create_test_wav(&wav1);
+        create_test_wav(&wav2);
+        let id1 = insert_test_track(&pool, &wav1, "Track 1");
+        let missing_id = insert_test_track(&pool, &missing, "Missing");
+        let id2 = insert_test_track(&pool, &wav2, "Track 2");
+        let player = make_player(pool);
+        // Queue: [id1, missing_id, id2], current at index 0
+        player.set_queue(vec![id1, missing_id, id2]).unwrap();
+        // next() → advances to index 1 (missing), auto-skips, plays index 2
+        player.next().unwrap();
+        assert_eq!(player.get_state(), PlaybackState::Playing);
+        assert_eq!(player.get_current_track().unwrap().id, id2);
+        assert!(player.get_skipped_track_ids().contains(&missing_id));
+    }
+
+    #[test]
+    fn test_play_removes_track_from_skipped_set() {
+        let (dir, pool) = create_test_pool();
+        let wav1 = dir.path().join("track1.wav");
+        let wav2 = dir.path().join("track2.wav");
+        let missing = dir.path().join("missing.wav");
+        create_test_wav(&wav1);
+        create_test_wav(&wav2);
+        let id1 = insert_test_track(&pool, &wav1, "Track 1");
+        let missing_id = insert_test_track(&pool, &missing, "Missing");
+        let id2 = insert_test_track(&pool, &wav2, "Track 2");
+        let player = make_player(pool);
+        player.set_queue(vec![id1, missing_id, id2]).unwrap();
+        // Add missing_id to the skipped set via next()
+        player.next().unwrap();
+        assert!(player.get_skipped_track_ids().contains(&missing_id));
+        // File comes back — playing it should remove it from the skipped set
+        create_test_wav(&missing);
+        player.play(missing_id).unwrap();
+        assert!(!player.get_skipped_track_ids().contains(&missing_id));
+    }
+
+    #[test]
+    fn test_next_at_end_with_repeat_all_wraps_to_first() {
+        let (dir, pool) = create_test_pool();
+        let wav = dir.path().join("test.wav");
+        create_test_wav(&wav);
+        let track_id = insert_test_track(&pool, &wav, "Test Track");
+        let player = make_player(pool);
+        player.set_queue(vec![track_id]).unwrap();
+        player.set_repeat(RepeatMode::All).unwrap();
+        player.next().unwrap();
+        assert_eq!(player.get_queue_index(), 0);
+        assert_eq!(player.get_state(), PlaybackState::Playing);
+    }
+
+    #[test]
+    fn test_previous_at_start_with_repeat_all_wraps_to_last() {
+        let (dir, pool) = create_test_pool();
+        let wav1 = dir.path().join("track1.wav");
+        let wav2 = dir.path().join("track2.wav");
+        create_test_wav(&wav1);
+        create_test_wav(&wav2);
+        let id1 = insert_test_track(&pool, &wav1, "Track 1");
+        let id2 = insert_test_track(&pool, &wav2, "Track 2");
+        let player = make_player(pool);
+        player.set_queue(vec![id1, id2]).unwrap();
+        player.set_repeat(RepeatMode::All).unwrap();
+        // At index 0, previous() with RepeatAll should jump to last track (index 1)
+        player.previous().unwrap();
+        assert_eq!(player.get_queue_index(), 1);
+    }
 }

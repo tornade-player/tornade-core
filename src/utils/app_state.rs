@@ -100,6 +100,7 @@ mod tests {
             playback_position: 123.45,
             queue: vec![1, 2, 3, 4, 5],
             queue_index: 2,
+            shuffle_order: vec![],
             volume: 0.75,
             shuffle_enabled: true,
             repeat_mode: RepeatMode::All,
