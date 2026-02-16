@@ -1478,4 +1478,62 @@ mod tests {
         player.previous().unwrap();
         assert_eq!(player.get_queue_index(), 1);
     }
+
+    // =========================================================================
+    // Regression: play() must not discard a multi-track queue
+    // Bug: EventHandler::PlayTrack was calling set_queue([id]) after SetQueue,
+    // reducing a multi-track queue to a single track and breaking auto-advance.
+    // =========================================================================
+
+    #[test]
+    fn test_play_preserves_multitrack_queue() {
+        // After set_queue([t1,t2,t3]) + play(t1), the queue must still have 3 tracks.
+        let (dir, pool) = create_test_pool();
+        let wav = dir.path().join("test.wav");
+        create_test_wav(&wav);
+        let id1 = insert_test_track(&pool, &wav, "Track 1");
+        let player = make_player(pool);
+        player.set_queue(vec![id1, 20, 30]).unwrap();
+        player.play(id1).unwrap();
+        assert_eq!(
+            player.get_queue(),
+            vec![id1, 20, 30],
+            "play() must not discard the multi-track queue"
+        );
+    }
+
+    #[test]
+    fn test_set_queue_then_play_first_next_plays_second() {
+        // The full "play all" scenario: set_queue([t1,t2]) → play(t1) → next() → t2.
+        let (dir, pool) = create_test_pool();
+        let wav1 = dir.path().join("track1.wav");
+        let wav2 = dir.path().join("track2.wav");
+        create_test_wav(&wav1);
+        create_test_wav(&wav2);
+        let id1 = insert_test_track(&pool, &wav1, "Track 1");
+        let id2 = insert_test_track(&pool, &wav2, "Track 2");
+        let player = make_player(pool);
+        player.set_queue(vec![id1, id2]).unwrap();
+        player.play(id1).unwrap();
+        assert_eq!(player.get_queue_index(), 0);
+        player.next().unwrap();
+        assert_eq!(player.get_queue_index(), 1);
+        assert_eq!(player.get_current_track().unwrap().id, id2);
+    }
+
+    #[test]
+    fn test_play_track_already_in_queue_does_not_reset_queue() {
+        // Simulates the fixed EventHandler behaviour: when track is already in
+        // the queue, play() is called directly without set_queue().
+        let (dir, pool) = create_test_pool();
+        let wav = dir.path().join("test.wav");
+        create_test_wav(&wav);
+        let id1 = insert_test_track(&pool, &wav, "Track 1");
+        let player = make_player(pool);
+        player.set_queue(vec![id1, 20, 30]).unwrap();
+        // Calling play() directly (as EventHandler now does when track is in queue)
+        player.play(id1).unwrap();
+        assert_eq!(player.get_queue(), vec![id1, 20, 30]);
+        assert_eq!(player.get_queue_index(), 0);
+    }
 }
