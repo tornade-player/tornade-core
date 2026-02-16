@@ -741,17 +741,68 @@ impl PlayerService {
         self.state.lock().unwrap().volume
     }
 
-    /// Returns true if the current track has finished playing naturally
+    /// Returns true if the current track has finished playing naturally.
+    ///
+    /// Uses two independent checks:
+    /// 1. Primary: `sink.empty()` — works when the decoder signals exhaustion cleanly.
+    /// 2. Fallback: elapsed wall-clock time > track duration + 1 s — catches decoders
+    ///    (e.g. FLAC via symphonia) that do not return `None` at EOF and therefore
+    ///    never decrement rodio's internal `sound_count`.
     pub fn is_track_finished(&self) -> bool {
-        let is_playing = matches!(
-            self.state.lock().unwrap().playback_state,
-            PlaybackState::Playing
-        );
+        // Collect all state we need, then release the state lock before
+        // touching the sink lock to avoid a lock-ordering deadlock (pause()
+        // acquires sink then state).
+        let (is_playing, fallback_info) = {
+            let state = self.state.lock().unwrap();
+            let is_playing = matches!(state.playback_state, PlaybackState::Playing);
+            let fallback = if is_playing {
+                if let (Some(track), Some(start)) =
+                    (&state.current_track, state.playback_start_time)
+                {
+                    Some((track.duration, start.elapsed()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            (is_playing, fallback)
+        };
+
         if !is_playing {
             return false;
         }
-        let sink_lock = self.sink.lock().unwrap();
-        sink_lock.as_ref().map(|s| s.empty()).unwrap_or(false)
+
+        // Primary: rodio sink reports all samples consumed
+        let sink_empty = {
+            let sink_lock = self.sink.lock().unwrap();
+            sink_lock.as_ref().map(|s| s.empty()).unwrap_or(false)
+        };
+        if sink_empty {
+            return true;
+        }
+
+        // Fallback: wall-clock elapsed > track duration + 1 s
+        if let Some((duration, elapsed)) = fallback_info {
+            let duration_secs = duration.as_secs_f64();
+            if duration_secs > 0.0 && elapsed.as_secs_f64() > duration_secs + 1.0 {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Test-only helper: inject a "playing" state without real audio, so the
+    /// fallback path of `is_track_finished()` can be exercised in isolation.
+    /// The sink is left as `None`, which makes `sink.empty()` evaluate to `false`.
+    #[cfg(test)]
+    pub fn simulate_playing_for_test(&self, track: Track, start_time: std::time::Instant) {
+        let mut state = self.state.lock().unwrap();
+        state.current_track = Some(track);
+        state.playback_state = PlaybackState::Playing;
+        state.playback_start_time = Some(start_time);
+        state.paused_at = None;
     }
 }
 
@@ -763,7 +814,7 @@ mod tests {
     use crate::models::source::SourceType;
     use crate::models::AudioFormat;
     use std::io::Write;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
     use tempfile::TempDir;
 
@@ -1181,6 +1232,91 @@ mod tests {
         assert!(
             player.is_track_finished(),
             "is_track_finished() must return true after the track plays to completion"
+        );
+    }
+
+    #[test]
+    fn test_is_track_finished_fallback_when_elapsed_exceeds_duration() {
+        // Regression: decoders such as FLAC via symphonia may not signal EOF
+        // cleanly, leaving sink.empty() == false indefinitely.  The duration-
+        // based fallback must fire and return true when wall-clock elapsed time
+        // exceeds track duration + 1 s.
+        //
+        // simulate_playing_for_test() leaves the sink as None, so
+        // sink.empty() evaluates to false — isolating the fallback path.
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+
+        // Construct a Track with a 3-second duration.
+        let fake_track = Track {
+            id: 1,
+            title: "Fake FLAC".to_string(),
+            album_id: None,
+            artist_id: 1,
+            source_id: 1,
+            file_path: PathBuf::from("/fake/track.flac"),
+            duration: Duration::from_secs(3),
+            track_number: None,
+            disc_number: 0,
+            sample_rate: Some(44100),
+            bit_depth: Some(16),
+            file_type: crate::models::AudioFormat::Flac,
+            file_size: 0,
+            rating: 0,
+            fingerprint: None,
+            is_duplicate: false,
+            duplicate_of: None,
+            last_played_at: None,
+            play_count: 0,
+        };
+
+        // Simulate playback that started 5 seconds ago (3s duration + 1s buffer = 4s threshold).
+        let start_time = std::time::Instant::now() - Duration::from_secs(5);
+        player.simulate_playing_for_test(fake_track, start_time);
+
+        assert!(
+            player.is_track_finished(),
+            "is_track_finished() must return true via the duration fallback \
+             when elapsed > duration + 1 s even if sink.empty() is false"
+        );
+    }
+
+    #[test]
+    fn test_is_track_finished_fallback_does_not_fire_before_threshold() {
+        // The fallback must NOT fire while the track is still within its
+        // expected duration — this prevents premature auto-advance.
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+
+        let fake_track = Track {
+            id: 2,
+            title: "Fake FLAC 2".to_string(),
+            album_id: None,
+            artist_id: 1,
+            source_id: 1,
+            file_path: PathBuf::from("/fake/track2.flac"),
+            duration: Duration::from_secs(300), // 5-minute track
+            track_number: None,
+            disc_number: 0,
+            sample_rate: Some(44100),
+            bit_depth: Some(16),
+            file_type: crate::models::AudioFormat::Flac,
+            file_size: 0,
+            rating: 0,
+            fingerprint: None,
+            is_duplicate: false,
+            duplicate_of: None,
+            last_played_at: None,
+            play_count: 0,
+        };
+
+        // Simulate playback that started 10 seconds ago — well within 300 s duration.
+        let start_time = std::time::Instant::now() - Duration::from_secs(10);
+        player.simulate_playing_for_test(fake_track, start_time);
+
+        assert!(
+            !player.is_track_finished(),
+            "is_track_finished() must return false while the track is still playing"
         );
     }
 
