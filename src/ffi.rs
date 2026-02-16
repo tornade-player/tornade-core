@@ -1225,6 +1225,16 @@ fn get_player_state() -> String {
             let player = PLAYER_SERVICE.lock().unwrap();
             if let Some(ref wrapped) = *player {
                 let player_service = &wrapped.0;
+
+                    // Auto-advance: this is called every ~250 ms from Swift,
+                    // making it the heartbeat for detecting end-of-track.
+                    if player_service.is_track_finished() {
+                        log::info!("[auto-advance] track finished, advancing to next");
+                        if let Err(e) = player_service.next() {
+                            log::warn!("[auto-advance] next() failed: {}", e);
+                        }
+                    }
+
                     use crate::services::events::PlaybackState;
 
                     let current_track = player_service.get_current_track();
