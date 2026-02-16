@@ -129,6 +129,9 @@ impl PlayerService {
             state.playback_start_time = Some(Instant::now());
             state.paused_at = None;
 
+            // Track is now accessible — remove from unavailable set
+            state.skipped_track_ids.remove(&track_id);
+
             // Update current_index to match the track being played
             if let Some(position) = state.queue.tracks.iter().position(|&id| id == track_id) {
                 // If shuffle is enabled, find position in shuffle_order
