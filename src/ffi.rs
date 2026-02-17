@@ -124,6 +124,7 @@ mod ffi {
         fn get_track_by_id(track_id: i64) -> String;
         fn get_random_tracks(count: u32) -> String;
         fn search_tracks(query: &str, limit: u32) -> String;
+        fn delete_tracks(track_ids_json: &str) -> String;
 
         // Album Functions
         fn get_albums_page(offset: u32, limit: u32) -> String;
@@ -534,6 +535,56 @@ fn get_track_by_id(track_id: i64) -> String {
                     }).to_string()
                 }
             }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn delete_tracks(track_ids_json: &str) -> String {
+    let track_ids: Vec<i64> = match serde_json::from_str(track_ids_json) {
+        Ok(ids) => ids,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Invalid track IDs JSON: {}", e)
+            }).to_string();
+        }
+    };
+
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let conn = match pool.get() {
+                Ok(conn) => conn,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get database connection: {}", e)
+                    }).to_string();
+                }
+            };
+
+            let mut deleted = 0usize;
+            for track_id in &track_ids {
+                match crate::db::queries::delete_track(&conn, *track_id) {
+                    Ok(_) => deleted += 1,
+                    Err(e) => {
+                        return serde_json::json!({
+                            "success": false,
+                            "error": format!("Failed to delete track {}: {}", track_id, e)
+                        }).to_string();
+                    }
+                }
+            }
+
+            serde_json::json!({
+                "success": true,
+                "data": { "deleted": deleted }
+            }).to_string()
         }
         Err(e) => {
             serde_json::json!({

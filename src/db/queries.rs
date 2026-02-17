@@ -292,6 +292,11 @@ pub fn update_track_rating(conn: &Connection, track_id: i64, rating: u8) -> Resu
     Ok(())
 }
 
+pub fn delete_track(conn: &Connection, track_id: i64) -> Result<()> {
+    conn.execute("DELETE FROM tracks WHERE id = ?1", params![track_id])?;
+    Ok(())
+}
+
 pub fn link_track_genre(conn: &Connection, track_id: i64, genre_id: i64) -> Result<()> {
     conn.execute(
         "INSERT INTO track_genres (track_id, genre_id) VALUES (?1, ?2) ON CONFLICT DO NOTHING",
