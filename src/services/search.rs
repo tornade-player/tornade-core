@@ -162,4 +162,34 @@ mod tests {
         assert!(results.albums.is_empty());
         assert!(results.artists.is_empty());
     }
+
+    #[test]
+    fn test_search_track_by_title_via_fts() {
+        let env = TestEnv::new();
+        env.seed_basic_library();
+        let service = SearchService::new(env.pool.clone());
+        // FTS index is populated via trigger on INSERT; "Track" matches both seeded tracks
+        let results = service.search("Track").unwrap();
+        assert!(!results.tracks.is_empty(), "FTS5 search must find tracks by title token");
+    }
+
+    #[test]
+    fn test_search_track_by_exact_title_via_fts() {
+        let env = TestEnv::new();
+        env.seed_basic_library();
+        let service = SearchService::new(env.pool.clone());
+        let results = service.search("One").unwrap();
+        assert_eq!(results.tracks.len(), 1, "only 'Track One' contains the token 'One'");
+        assert_eq!(results.tracks[0].title, "Track One");
+    }
+
+    #[test]
+    fn test_search_track_by_artist_name_via_fts() {
+        let env = TestEnv::new();
+        env.seed_basic_library();
+        let service = SearchService::new(env.pool.clone());
+        // FTS artist_name column is populated from the artist table via trigger
+        let results = service.search("Artist").unwrap();
+        assert!(!results.tracks.is_empty(), "FTS5 must find tracks by artist name token");
+    }
 }

@@ -67,7 +67,7 @@ impl LibraryService {
         *self.scan_cancelled.lock().unwrap() = false;
 
         let mut tracks_added = 0u32;
-        let mut tracks_updated = 0u32;
+        let tracks_updated = 0u32;
         let mut tracks_skipped = 0u32;
         let mut errors = Vec::new();
 
@@ -139,8 +139,7 @@ impl LibraryService {
 
                 // T134: Process the file with proper error handling for corrupted files
                 match self.process_audio_file_with_conn(&tx, file_path, source_id) {
-                    Ok(true) => tracks_added += 1,
-                    Ok(false) => tracks_updated += 1,
+                    Ok(_track_id) => tracks_added += 1,
                     Err(e) => {
                         // Log corrupted/invalid files and continue processing
                         warn!("Skipping file {:?}: {}", file_path, e);
@@ -201,7 +200,7 @@ impl LibraryService {
 
     /// Process a single audio file (legacy method, uses pool connection)
     #[allow(dead_code)]
-    fn _process_audio_file(&self, path: &Path, source_id: i64) -> Result<bool> {
+    fn _process_audio_file(&self, path: &Path, source_id: i64) -> Result<i64> {
         let conn = self.pool.get().map_err(|e| {
             LibraryError::Database(rusqlite::Error::InvalidPath(
                 PathBuf::from(format!("Pool error: {}", e))
@@ -217,7 +216,7 @@ impl LibraryService {
         conn: &C,
         path: &Path,
         source_id: i64
-    ) -> Result<bool> {
+    ) -> Result<i64> {
         // T134: Validate file exists and is readable
         if !path.exists() {
             return Err(LibraryError::Io(std::io::Error::new(
@@ -290,7 +289,99 @@ impl LibraryService {
             queries::link_track_genre(conn, track_id, genre_id)?;
         }
 
-        Ok(true) // Track was added/updated
+        Ok(track_id)
+    }
+
+    /// Import a list of paths (files or directories) into the library.
+    /// Returns the track IDs of all successfully imported tracks.
+    pub fn import_paths(&self, paths: &[PathBuf]) -> Result<Vec<i64>> {
+        let mut all_audio_files: Vec<PathBuf> = Vec::new();
+
+        // Collect all audio files from the provided paths
+        for path in paths {
+            if path.is_file() {
+                if let Some(ext) = path.extension() {
+                    if matches!(
+                        ext.to_str().unwrap_or("").to_lowercase().as_str(),
+                        "flac" | "mp3" | "aac" | "m4a" | "alac"
+                    ) {
+                        all_audio_files.push(path.clone());
+                    }
+                }
+            } else if path.is_dir() {
+                let files: Vec<PathBuf> = WalkDir::new(path)
+                    .follow_links(true)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().is_file())
+                    .filter(|e| {
+                        if let Some(ext) = e.path().extension() {
+                            matches!(
+                                ext.to_str().unwrap_or("").to_lowercase().as_str(),
+                                "flac" | "mp3" | "aac" | "m4a" | "alac"
+                            )
+                        } else {
+                            false
+                        }
+                    })
+                    .map(|e| e.path().to_path_buf())
+                    .collect();
+                all_audio_files.extend(files);
+            }
+        }
+
+        if all_audio_files.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        info!("import_paths: found {} audio files", all_audio_files.len());
+
+        // Pre-create sources for all unique parent directories
+        use std::collections::HashMap;
+        let mut source_map: HashMap<PathBuf, i64> = HashMap::new();
+        for file_path in &all_audio_files {
+            let parent_dir = file_path.parent()
+                .unwrap_or(file_path.as_path())
+                .to_path_buf();
+            if !source_map.contains_key(&parent_dir) {
+                let source = self.add_source("Import", &parent_dir)?;
+                source_map.insert(parent_dir, source.id);
+            }
+        }
+
+        let mut track_ids: Vec<i64> = Vec::new();
+
+        // Process files in batches of 50
+        const BATCH_SIZE: usize = 50;
+
+        for batch in all_audio_files.chunks(BATCH_SIZE) {
+            let conn = self.pool.get().map_err(|e| {
+                LibraryError::Database(rusqlite::Error::InvalidPath(
+                    PathBuf::from(format!("Pool error: {}", e))
+                ))
+            })?;
+
+            let tx = conn.unchecked_transaction().map_err(LibraryError::Database)?;
+
+            for file_path in batch {
+                let parent_dir = file_path.parent()
+                    .unwrap_or(file_path.as_path())
+                    .to_path_buf();
+                let source_id = *source_map.get(&parent_dir).unwrap();
+
+                match self.process_audio_file_with_conn(&tx, file_path, source_id) {
+                    Ok(track_id) => track_ids.push(track_id),
+                    Err(e) => {
+                        warn!("import_paths: skipping {:?}: {}", file_path, e);
+                    }
+                }
+            }
+
+            tx.commit().map_err(LibraryError::Database)?;
+        }
+
+        info!("import_paths: imported {} tracks", track_ids.len());
+        Ok(track_ids)
     }
 
     pub fn scan_progress(&self) -> Option<ScanProgress> {
@@ -564,5 +655,499 @@ impl LibraryService {
 
         queries::search_library(&conn, query, limit)
             .map_err(LibraryError::Database)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_helpers::TestEnv;
+
+    // Minimal valid FLAC file with STREAMINFO + VORBIS_COMMENT (title/artist/album).
+    // Generated by make_fixture.py; verified parseable by lofty 0.21.
+    const MINIMAL_FLAC: &[u8] =
+        include_bytes!("../../tests/fixtures/minimal.flac");
+
+    fn setup() -> (TestEnv, LibraryService) {
+        let env = TestEnv::new();
+        let svc = LibraryService::new(env.pool.clone(), env.app_paths.clone());
+        (env, svc)
+    }
+
+    fn write_flac(dir: &std::path::Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, MINIMAL_FLAC).unwrap();
+        path
+    }
+
+    // ── File-collection logic ────────────────────────────────────────────────
+
+    #[test]
+    fn test_import_paths_empty_input() {
+        let (_env, svc) = setup();
+        let result = svc.import_paths(&[]).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_import_paths_nonexistent_path_returns_empty() {
+        let (_env, svc) = setup();
+        let bogus = PathBuf::from("/nonexistent/path/does/not/exist.flac");
+        let result = svc.import_paths(&[bogus]).unwrap();
+        assert!(result.is_empty(), "nonexistent paths must be skipped gracefully");
+    }
+
+    #[test]
+    fn test_import_paths_non_audio_extension_skipped() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("cover.jpg"), b"not audio").unwrap();
+        std::fs::write(tmp.path().join("readme.txt"), b"text").unwrap();
+
+        let (_env, svc) = setup();
+        let result = svc.import_paths(&[tmp.path().to_path_buf()]).unwrap();
+        assert!(result.is_empty(), "non-audio files must be skipped");
+    }
+
+    #[test]
+    fn test_import_paths_empty_directory_returns_empty() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (_env, svc) = setup();
+        let result = svc.import_paths(&[tmp.path().to_path_buf()]).unwrap();
+        assert!(result.is_empty());
+    }
+
+    // ── Single-file import ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_import_paths_single_flac_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = write_flac(tmp.path(), "track.flac");
+
+        let (_env, svc) = setup();
+        let ids = svc.import_paths(&[path]).unwrap();
+
+        assert_eq!(ids.len(), 1, "one file → one track id");
+        assert!(ids[0] > 0, "track id must be positive");
+    }
+
+    #[test]
+    fn test_import_paths_file_path_directly() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = write_flac(tmp.path(), "song.flac");
+
+        let (_env, svc) = setup();
+        let ids = svc.import_paths(&[path]).unwrap();
+        assert_eq!(ids.len(), 1);
+    }
+
+    // ── Directory recursion ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_import_paths_directory_with_multiple_flac() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        for i in 0..4 {
+            write_flac(tmp.path(), &format!("track{}.flac", i));
+        }
+        std::fs::write(tmp.path().join("cover.jpg"), b"image").unwrap();
+        std::fs::write(tmp.path().join("info.txt"), b"notes").unwrap();
+
+        let (_env, svc) = setup();
+        let ids = svc.import_paths(&[tmp.path().to_path_buf()]).unwrap();
+
+        assert_eq!(ids.len(), 4, "only .flac files counted; jpg/txt skipped");
+    }
+
+    #[test]
+    fn test_import_paths_recurses_into_subdirectories() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sub = tmp.path().join("album");
+        std::fs::create_dir(&sub).unwrap();
+        write_flac(tmp.path(), "root.flac");
+        write_flac(&sub, "sub.flac");
+
+        let (_env, svc) = setup();
+        let ids = svc.import_paths(&[tmp.path().to_path_buf()]).unwrap();
+
+        assert_eq!(ids.len(), 2, "should recurse into sub-directories");
+    }
+
+    // ── Upsert / idempotency ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_import_paths_same_file_twice_returns_same_track_id() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = write_flac(tmp.path(), "track.flac");
+
+        let (_env, svc) = setup();
+        let first = svc.import_paths(&[path.clone()]).unwrap();
+        let second = svc.import_paths(&[path]).unwrap();
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(first[0], second[0], "re-import must upsert → same track id");
+    }
+
+    // ── Mixed file + directory ───────────────────────────────────────────────
+
+    #[test]
+    fn test_import_paths_mix_of_files_and_directories() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("album");
+        std::fs::create_dir(&dir).unwrap();
+        let file = write_flac(tmp.path(), "single.flac");
+        write_flac(&dir, "album_track.flac");
+
+        let (_env, svc) = setup();
+        let ids = svc.import_paths(&[file, dir]).unwrap();
+
+        assert_eq!(ids.len(), 2);
+    }
+
+    // ── Source creation ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_import_paths_creates_source_for_parent_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_flac(tmp.path(), "t.flac");
+
+        let (env, svc) = setup();
+        svc.import_paths(&[tmp.path().to_path_buf()]).unwrap();
+
+        let sources = svc.list_sources().unwrap();
+        assert!(
+            sources.iter().any(|s| s.path.as_ref().map(|p| {
+                p.canonicalize().unwrap_or_else(|_| p.clone())
+                    == tmp.path().canonicalize().unwrap()
+            }).unwrap_or(false)),
+            "a source should have been created for the parent directory"
+        );
+        drop(env);
+    }
+
+    // ── rating validation ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_rate_track_valid_rating() {
+        let (env, svc) = setup();
+        let (_, _, _, _, t1, _) = env.seed_basic_library();
+        svc.rate_track(t1, 4).unwrap();
+        let track = svc.get_track(t1).unwrap().unwrap();
+        assert_eq!(track.rating, 4);
+    }
+
+    #[test]
+    fn test_rate_track_above_five_returns_error() {
+        let (env, svc) = setup();
+        let (_, _, _, _, t1, _) = env.seed_basic_library();
+        let result = svc.rate_track(t1, 6);
+        assert!(result.is_err(), "rating > 5 must be rejected");
+    }
+
+    #[test]
+    fn test_rate_track_zero_is_valid() {
+        let (env, svc) = setup();
+        let (_, _, _, _, t1, _) = env.seed_basic_library();
+        svc.rate_track(t1, 0).unwrap();
+        let track = svc.get_track(t1).unwrap().unwrap();
+        assert_eq!(track.rating, 0);
+    }
+
+    #[test]
+    fn test_rate_album_valid_rating() {
+        let (env, svc) = setup();
+        let (_, _, album_id, _, _, _) = env.seed_basic_library();
+        svc.rate_album(album_id, 5).unwrap();
+        let album = svc.get_album(album_id).unwrap().unwrap();
+        assert_eq!(album.rating, 5);
+    }
+
+    #[test]
+    fn test_rate_album_above_five_returns_error() {
+        let (env, svc) = setup();
+        let (_, _, album_id, _, _, _) = env.seed_basic_library();
+        let result = svc.rate_album(album_id, 7);
+        assert!(result.is_err(), "rating > 5 must be rejected");
+    }
+
+    // ── list_albums filters ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_list_albums_all() {
+        let (env, svc) = setup();
+        env.seed_basic_library();
+        let albums = svc.list_albums(None, None, None, None, None).unwrap();
+        assert_eq!(albums.len(), 1);
+    }
+
+    #[test]
+    fn test_list_albums_filtered_by_artist() {
+        let (env, svc) = setup();
+        let (_, artist_id, _, _, _, _) = env.seed_basic_library();
+        let albums = svc.list_albums(Some(artist_id), None, None, None, None).unwrap();
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].artist_id, artist_id);
+    }
+
+    #[test]
+    fn test_list_albums_filtered_by_min_rating() {
+        let (env, svc) = setup();
+        let (_, _, album_id, _, _, _) = env.seed_basic_library();
+        svc.rate_album(album_id, 4).unwrap();
+        let high = svc.list_albums(None, None, Some(3), None, None).unwrap();
+        let low = svc.list_albums(None, None, Some(5), None, None).unwrap();
+        assert_eq!(high.len(), 1);
+        assert!(low.is_empty());
+    }
+
+    // ── source / genre / track accessors ────────────────────────────────────
+
+    #[test]
+    fn test_get_source_tracks_returns_correct_tracks() {
+        let (env, svc) = setup();
+        let (source_id, _, _, _, t1, t2) = env.seed_basic_library();
+        let tracks = svc.get_source_tracks(source_id).unwrap();
+        assert_eq!(tracks.len(), 2);
+        let ids: Vec<i64> = tracks.iter().map(|t| t.id).collect();
+        assert!(ids.contains(&t1));
+        assert!(ids.contains(&t2));
+    }
+
+    #[test]
+    fn test_get_genre_tracks_returns_correct_tracks() {
+        let (env, svc) = setup();
+        let (_, _, _, genre_id, t1, t2) = env.seed_basic_library();
+        let tracks = svc.get_genre_tracks(genre_id).unwrap();
+        assert_eq!(tracks.len(), 2);
+        let ids: Vec<i64> = tracks.iter().map(|t| t.id).collect();
+        assert!(ids.contains(&t1));
+        assert!(ids.contains(&t2));
+    }
+
+    #[test]
+    fn test_get_album_tracks_returns_correct_tracks() {
+        let (env, svc) = setup();
+        let (_, _, album_id, _, t1, t2) = env.seed_basic_library();
+        let tracks = svc.get_album_tracks(album_id).unwrap();
+        assert_eq!(tracks.len(), 2);
+        let ids: Vec<i64> = tracks.iter().map(|t| t.id).collect();
+        assert!(ids.contains(&t1));
+        assert!(ids.contains(&t2));
+    }
+
+    #[test]
+    fn test_get_genre_artists_returns_correct_artists() {
+        let (env, svc) = setup();
+        let (_, artist_id, _, genre_id, _, _) = env.seed_basic_library();
+        let artists = svc.get_genre_artists(genre_id).unwrap();
+        assert_eq!(artists.len(), 1);
+        assert_eq!(artists[0].id, artist_id);
+    }
+
+    #[test]
+    fn test_list_genres_includes_counts() {
+        let (env, svc) = setup();
+        env.seed_basic_library();
+        let genres = svc.list_genres().unwrap();
+        assert_eq!(genres.len(), 1);
+        let (genre, track_count, _album_count) = &genres[0];
+        assert_eq!(genre.name, "Rock");
+        assert_eq!(*track_count, 2);
+    }
+
+    // ── scan_directory ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_scan_directory_nonexistent_path_returns_error() {
+        let (_env, svc) = setup();
+        let bogus = PathBuf::from("/nonexistent/library/path/does/not/exist");
+        let result = svc.scan_directory(&bogus, 1);
+        assert!(result.is_err(), "scanning nonexistent path must fail");
+    }
+
+    #[test]
+    fn test_scan_directory_path_is_file_returns_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let file_path = write_flac(tmp.path(), "track.flac");
+        let (_env, svc) = setup();
+        let result = svc.scan_directory(&file_path, 1);
+        assert!(result.is_err(), "scanning a file path (not a dir) must fail");
+    }
+
+    #[test]
+    fn test_scan_directory_empty_dir_returns_zero_tracks() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (_env, svc) = setup();
+        let source = svc.add_source("Test", tmp.path()).unwrap();
+
+        let result = svc.scan_directory(tmp.path(), source.id).unwrap();
+        assert_eq!(result.tracks_added, 0);
+        assert_eq!(result.tracks_skipped, 0);
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_scan_directory_adds_flac_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_flac(tmp.path(), "track1.flac");
+        write_flac(tmp.path(), "track2.flac");
+        write_flac(tmp.path(), "track3.flac");
+
+        let (_env, svc) = setup();
+        let source = svc.add_source("Test", tmp.path()).unwrap();
+        let result = svc.scan_directory(tmp.path(), source.id).unwrap();
+
+        assert_eq!(result.tracks_added, 3);
+        assert_eq!(result.tracks_skipped, 0);
+    }
+
+    #[test]
+    fn test_scan_directory_skips_non_audio_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_flac(tmp.path(), "track.flac");
+        std::fs::write(tmp.path().join("cover.jpg"), b"image").unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), b"text").unwrap();
+        std::fs::write(tmp.path().join("data.wav"), b"wav").unwrap();
+
+        let (_env, svc) = setup();
+        let source = svc.add_source("Test", tmp.path()).unwrap();
+        let result = svc.scan_directory(tmp.path(), source.id).unwrap();
+
+        assert_eq!(result.tracks_added, 1, "only .flac counted; wav/jpg/txt skipped");
+    }
+
+    #[test]
+    fn test_scan_directory_recurses_subdirectories() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sub = tmp.path().join("album");
+        std::fs::create_dir(&sub).unwrap();
+        let deep = tmp.path().join("artist").join("album2");
+        std::fs::create_dir_all(&deep).unwrap();
+
+        write_flac(tmp.path(), "root.flac");
+        write_flac(&sub, "sub.flac");
+        write_flac(&deep, "deep.flac");
+
+        let (_env, svc) = setup();
+        let source = svc.add_source("Test", tmp.path()).unwrap();
+        let result = svc.scan_directory(tmp.path(), source.id).unwrap();
+
+        assert_eq!(result.tracks_added, 3, "should recurse into all subdirectories");
+    }
+
+    #[test]
+    fn test_scan_directory_handles_corrupted_file_gracefully() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_flac(tmp.path(), "valid.flac");
+        std::fs::write(tmp.path().join("bad.flac"), b"NOT A VALID FLAC FILE").unwrap();
+
+        let (_env, svc) = setup();
+        let source = svc.add_source("Test", tmp.path()).unwrap();
+        let result = svc.scan_directory(tmp.path(), source.id).unwrap();
+
+        assert_eq!(result.tracks_added, 1, "valid file must be added");
+        assert_eq!(result.tracks_skipped, 1, "corrupted file must be skipped");
+        assert_eq!(result.errors.len(), 1);
+    }
+
+    #[test]
+    fn test_scan_directory_result_records_duration() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_flac(tmp.path(), "track.flac");
+
+        let (_env, svc) = setup();
+        let source = svc.add_source("Test", tmp.path()).unwrap();
+        let result = svc.scan_directory(tmp.path(), source.id).unwrap();
+
+        assert!(result.duration.as_nanos() > 0);
+    }
+
+    // ── validate_sources ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_sources_empty_returns_empty() {
+        let (_env, svc) = setup();
+        let results = svc.validate_sources().unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_validate_sources_existing_dir_is_valid() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (_env, svc) = setup();
+        svc.add_source("Valid Library", tmp.path()).unwrap();
+
+        let results = svc.validate_sources().unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].1, "existing directory must be valid");
+    }
+
+    #[test]
+    fn test_validate_sources_nonexistent_dir_is_invalid() {
+        let (_env, svc) = setup();
+        svc.add_source("Dead Library", &PathBuf::from("/nowhere/xyz123abc")).unwrap();
+
+        let results = svc.validate_sources().unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].1, "nonexistent path must be invalid");
+    }
+
+    #[test]
+    fn test_validate_sources_mixed_validity() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (_env, svc) = setup();
+        svc.add_source("Good", tmp.path()).unwrap();
+        svc.add_source("Bad", &PathBuf::from("/nowhere/xyz999abc")).unwrap();
+
+        let results = svc.validate_sources().unwrap();
+        assert_eq!(results.len(), 2);
+        let valid = results.iter().filter(|(_, ok)| *ok).count();
+        let invalid = results.iter().filter(|(_, ok)| !ok).count();
+        assert_eq!(valid, 1);
+        assert_eq!(invalid, 1);
+    }
+
+    // ── find_source_by_path ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_find_source_by_path_returns_none_when_not_found() {
+        let (_env, svc) = setup();
+        let result = svc.find_source_by_path(&PathBuf::from("/some/path/not/in/db")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_source_by_path_finds_existing_source() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (_env, svc) = setup();
+        let source = svc.add_source("Music", tmp.path()).unwrap();
+
+        let found = svc.find_source_by_path(tmp.path()).unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id, source.id);
+    }
+
+    #[test]
+    fn test_find_source_by_path_returns_none_for_different_path() {
+        let tmp1 = tempfile::TempDir::new().unwrap();
+        let tmp2 = tempfile::TempDir::new().unwrap();
+        let (_env, svc) = setup();
+        svc.add_source("Music", tmp1.path()).unwrap();
+
+        let result = svc.find_source_by_path(tmp2.path()).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_source_returns_correct_source_when_multiple_exist() {
+        let tmp1 = tempfile::TempDir::new().unwrap();
+        let tmp2 = tempfile::TempDir::new().unwrap();
+        let (_env, svc) = setup();
+        let s1 = svc.add_source("Library A", tmp1.path()).unwrap();
+        let s2 = svc.add_source("Library B", tmp2.path()).unwrap();
+
+        let found1 = svc.find_source_by_path(tmp1.path()).unwrap().unwrap();
+        let found2 = svc.find_source_by_path(tmp2.path()).unwrap().unwrap();
+        assert_eq!(found1.id, s1.id);
+        assert_eq!(found2.id, s2.id);
     }
 }

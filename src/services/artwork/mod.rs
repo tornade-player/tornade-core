@@ -635,4 +635,139 @@ mod tests {
             .unwrap();
         assert_eq!(source, "musicbrainz");
     }
+
+    // ── get_progress / cancel_fetch ──────────────────────────────────────────
+
+    #[test]
+    fn test_get_progress_returns_none_initially() {
+        let (env, _, _) = setup_artwork_env();
+        let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
+        assert!(service.get_progress().is_none());
+    }
+
+    #[test]
+    fn test_cancel_fetch_sets_cancelled_flag() {
+        let (env, _, _) = setup_artwork_env();
+        let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
+        assert!(!service.is_cancelled());
+        service.cancel_fetch();
+        assert!(service.is_cancelled());
+    }
+
+    #[test]
+    fn test_reset_cancel_clears_flag() {
+        let (env, _, _) = setup_artwork_env();
+        let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
+        service.cancel_fetch();
+        assert!(service.is_cancelled());
+        service.reset_cancel();
+        assert!(!service.is_cancelled());
+    }
+
+    // ── get_albums_without_artwork (multiple / sort) ─────────────────────────
+
+    #[test]
+    fn test_get_albums_without_artwork_multiple_sorted_by_artist() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let artist_z = queries::insert_artist(&conn, "Zappa, Frank", None).unwrap();
+        let artist_a = queries::insert_artist(&conn, "ABBA", None).unwrap();
+        queries::insert_album(&conn, "Apostrophe", artist_z, None).unwrap();
+        queries::insert_album(&conn, "The Album", artist_a, None).unwrap();
+        drop(conn);
+
+        let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
+        let albums = service.get_albums_without_artwork().unwrap();
+        assert_eq!(albums.len(), 2);
+        // Ordered by artist name: ABBA before Zappa
+        assert_eq!(albums[0].artist_name, "ABBA");
+        assert_eq!(albums[1].artist_name, "Zappa, Frank");
+    }
+
+    #[test]
+    fn test_get_albums_without_artwork_empty_library() {
+        let env = TestEnv::new();
+        let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
+        let albums = service.get_albums_without_artwork().unwrap();
+        assert!(albums.is_empty());
+    }
+
+    // ── get_artists_without_photos (multiple / sort) ─────────────────────────
+
+    #[test]
+    fn test_get_artists_without_photos_multiple_sorted_by_name() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        queries::insert_artist(&conn, "Miles Davis", None).unwrap();
+        queries::insert_artist(&conn, "Alice Coltrane", None).unwrap();
+        queries::insert_artist(&conn, "John Coltrane", None).unwrap();
+        drop(conn);
+
+        let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
+        let artists = service.get_artists_without_photos().unwrap();
+        assert_eq!(artists.len(), 3);
+        assert_eq!(artists[0].name, "Alice Coltrane");
+        assert_eq!(artists[1].name, "John Coltrane");
+        assert_eq!(artists[2].name, "Miles Davis");
+    }
+
+    #[test]
+    fn test_get_artists_without_photos_excludes_artists_with_photo() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let with_photo = queries::insert_artist(&conn, "Known Artist", None).unwrap();
+        queries::insert_artist(&conn, "Unknown Artist", None).unwrap();
+        drop(conn);
+
+        let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
+        service.update_artist_photo(with_photo, "/photo.jpg".to_string()).unwrap();
+
+        let artists = service.get_artists_without_photos().unwrap();
+        assert_eq!(artists.len(), 1);
+        assert_eq!(artists[0].name, "Unknown Artist");
+    }
+
+    // ── update_album_artwork sets artwork_fetched_at ─────────────────────────
+
+    #[test]
+    fn test_update_album_artwork_sets_fetched_at() {
+        let (env, _artist_id, album_id) = setup_artwork_env();
+        let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
+        service.update_album_artwork(album_id, "/art.jpg".to_string()).unwrap();
+
+        let conn = env.pool.get().unwrap();
+        let fetched_at: Option<String> = conn
+            .query_row("SELECT artwork_fetched_at FROM albums WHERE id = ?1", [album_id], |r| r.get(0))
+            .unwrap();
+        assert!(fetched_at.is_some(), "artwork_fetched_at should be set after update");
+    }
+
+    #[test]
+    fn test_update_artist_photo_sets_fetched_at() {
+        let (env, artist_id, _album_id) = setup_artwork_env();
+        let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
+        service.update_artist_photo(artist_id, "/photo.jpg".to_string()).unwrap();
+
+        let conn = env.pool.get().unwrap();
+        let fetched_at: Option<String> = conn
+            .query_row("SELECT photo_fetched_at FROM artists WHERE id = ?1", [artist_id], |r| r.get(0))
+            .unwrap();
+        assert!(fetched_at.is_some(), "photo_fetched_at should be set after update");
+    }
+
+    // ── has_album_artwork / has_artist_photo for unknown ids ─────────────────
+
+    #[test]
+    fn test_has_album_artwork_returns_false_for_unknown_id() {
+        let (env, _, _) = setup_artwork_env();
+        let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
+        assert!(!service.has_album_artwork(9999));
+    }
+
+    #[test]
+    fn test_has_artist_photo_returns_false_for_unknown_id() {
+        let (env, _, _) = setup_artwork_env();
+        let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
+        assert!(!service.has_artist_photo(9999));
+    }
 }

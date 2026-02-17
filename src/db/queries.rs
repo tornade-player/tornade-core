@@ -310,24 +310,25 @@ pub fn count_albums(
     genre_id: Option<i64>,
     min_rating: Option<u8>,
 ) -> Result<usize> {
-    let mut sql = String::from(
-        "SELECT COUNT(DISTINCT a.id) FROM albums a"
-    );
+    use rusqlite::types::Value;
 
+    let mut sql = String::from("SELECT COUNT(DISTINCT a.id) FROM albums a");
     let mut conditions = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
 
-    if genre_id.is_some() {
+    if let Some(gid) = genre_id {
         sql.push_str(" JOIN tracks t ON t.album_id = a.id
                        JOIN track_genres tg ON tg.track_id = t.id");
         conditions.push("tg.genre_id = ?");
+        params.push(Value::Integer(gid));
     }
-
-    if artist_id.is_some() {
+    if let Some(aid) = artist_id {
         conditions.push("a.artist_id = ?");
+        params.push(Value::Integer(aid));
     }
-
-    if min_rating.is_some() {
+    if let Some(rating) = min_rating {
         conditions.push("a.rating >= ?");
+        params.push(Value::Integer(rating as i64));
     }
 
     if !conditions.is_empty() {
@@ -336,21 +337,7 @@ pub fn count_albums(
     }
 
     let mut stmt = conn.prepare(&sql)?;
-
-    let mut idx = 1;
-    if let Some(gid) = genre_id {
-        stmt.raw_bind_parameter(idx, gid)?;
-        idx += 1;
-    }
-    if let Some(aid) = artist_id {
-        stmt.raw_bind_parameter(idx, aid)?;
-        idx += 1;
-    }
-    if let Some(rating) = min_rating {
-        stmt.raw_bind_parameter(idx, rating)?;
-    }
-
-    let count: i64 = stmt.query_row([], |row| row.get(0))?;
+    let count: i64 = stmt.query_row(rusqlite::params_from_iter(params.iter()), |row| row.get(0))?;
     Ok(count as usize)
 }
 
@@ -362,6 +349,8 @@ pub fn list_albums(
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> Result<Vec<Album>> {
+    use rusqlite::types::Value;
+
     let mut sql = String::from(
         "SELECT DISTINCT a.id, a.title, a.artist_id, ar.name as artist_name, a.year, a.rating, a.artwork_path, a.online_artwork_path, a.description
          FROM albums a
@@ -369,19 +358,21 @@ pub fn list_albums(
     );
 
     let mut conditions = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
 
-    if genre_id.is_some() {
+    if let Some(gid) = genre_id {
         sql.push_str(" JOIN tracks t ON t.album_id = a.id
                        JOIN track_genres tg ON tg.track_id = t.id");
         conditions.push("tg.genre_id = ?");
+        params.push(Value::Integer(gid));
     }
-
-    if artist_id.is_some() {
+    if let Some(aid) = artist_id {
         conditions.push("a.artist_id = ?");
+        params.push(Value::Integer(aid));
     }
-
-    if min_rating.is_some() {
+    if let Some(rating) = min_rating {
         conditions.push("a.rating >= ?");
+        params.push(Value::Integer(rating as i64));
     }
 
     if !conditions.is_empty() {
@@ -394,27 +385,12 @@ pub fn list_albums(
     if let Some(lim) = limit {
         sql.push_str(&format!(" LIMIT {}", lim));
     }
-
     if let Some(off) = offset {
         sql.push_str(&format!(" OFFSET {}", off));
     }
 
     let mut stmt = conn.prepare(&sql)?;
-
-    let mut idx = 1;
-    if let Some(gid) = genre_id {
-        stmt.raw_bind_parameter(idx, gid)?;
-        idx += 1;
-    }
-    if let Some(aid) = artist_id {
-        stmt.raw_bind_parameter(idx, aid)?;
-        idx += 1;
-    }
-    if let Some(rating) = min_rating {
-        stmt.raw_bind_parameter(idx, rating)?;
-    }
-
-    let albums = stmt.query_map([], |row| {
+    let albums = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
         Ok(Album {
             id: row.get(0)?,
             title: row.get(1)?,
@@ -1226,5 +1202,186 @@ mod tests {
         assert!(tracks.is_empty());
         assert!(albums.is_empty());
         assert!(artists.is_empty());
+    }
+
+    // ====================================================================
+    // list_albums with filters
+    // ====================================================================
+
+    #[test]
+    fn test_list_albums_filtered_by_artist() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let artist1 = insert_artist(&conn, "Artist One", None).unwrap();
+        let artist2 = insert_artist(&conn, "Artist Two", None).unwrap();
+        insert_album(&conn, "Album A1", artist1, None).unwrap();
+        insert_album(&conn, "Album A2", artist1, None).unwrap();
+        insert_album(&conn, "Album B1", artist2, None).unwrap();
+
+        let albums = list_albums(&conn, Some(artist1), None, None, None, None).unwrap();
+        assert_eq!(albums.len(), 2);
+        assert!(albums.iter().all(|a| a.artist_id == artist1));
+    }
+
+    #[test]
+    fn test_list_albums_filtered_by_min_rating() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let artist_id = insert_artist(&conn, "Artist", None).unwrap();
+        let low = insert_album(&conn, "Low Rated", artist_id, None).unwrap();
+        let high = insert_album(&conn, "High Rated", artist_id, None).unwrap();
+        update_album_rating(&conn, low, 1).unwrap();
+        update_album_rating(&conn, high, 4).unwrap();
+
+        let albums = list_albums(&conn, None, None, Some(3), None, None).unwrap();
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].id, high);
+    }
+
+    #[test]
+    fn test_list_albums_with_limit_and_offset() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let artist_id = insert_artist(&conn, "Artist", None).unwrap();
+        insert_album(&conn, "Album A", artist_id, None).unwrap();
+        insert_album(&conn, "Album B", artist_id, None).unwrap();
+        insert_album(&conn, "Album C", artist_id, None).unwrap();
+
+        let page1 = list_albums(&conn, None, None, None, Some(2), Some(0)).unwrap();
+        let page2 = list_albums(&conn, None, None, None, Some(2), Some(2)).unwrap();
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page2.len(), 1);
+        assert_ne!(page1[0].id, page2[0].id);
+    }
+
+    // ====================================================================
+    // count_albums
+    // ====================================================================
+
+    #[test]
+    fn test_count_albums_all() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let artist_id = insert_artist(&conn, "Artist", None).unwrap();
+        insert_album(&conn, "Album A", artist_id, None).unwrap();
+        insert_album(&conn, "Album B", artist_id, None).unwrap();
+
+        let count = count_albums(&conn, None, None, None).unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_count_albums_filtered_by_artist() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let a1 = insert_artist(&conn, "A1", None).unwrap();
+        let a2 = insert_artist(&conn, "A2", None).unwrap();
+        insert_album(&conn, "X", a1, None).unwrap();
+        insert_album(&conn, "Y", a1, None).unwrap();
+        insert_album(&conn, "Z", a2, None).unwrap();
+
+        assert_eq!(count_albums(&conn, Some(a1), None, None).unwrap(), 2);
+        assert_eq!(count_albums(&conn, Some(a2), None, None).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_count_albums_filtered_by_min_rating() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let artist_id = insert_artist(&conn, "Artist", None).unwrap();
+        let low = insert_album(&conn, "Low", artist_id, None).unwrap();
+        let high = insert_album(&conn, "High", artist_id, None).unwrap();
+        update_album_rating(&conn, low, 2).unwrap();
+        update_album_rating(&conn, high, 5).unwrap();
+
+        assert_eq!(count_albums(&conn, None, None, Some(4)).unwrap(), 1);
+        assert_eq!(count_albums(&conn, None, None, Some(1)).unwrap(), 2);
+    }
+
+    // ====================================================================
+    // get_genre_artists / get_album_genres / get_artist_genres
+    // ====================================================================
+
+    #[test]
+    fn test_get_genre_artists() {
+        let env = TestEnv::new();
+        let (_, artist_id, _, genre_id, _, _) = env.seed_basic_library();
+        let conn = env.pool.get().unwrap();
+
+        let artists = get_genre_artists(&conn, genre_id).unwrap();
+        assert_eq!(artists.len(), 1);
+        assert_eq!(artists[0].id, artist_id);
+    }
+
+    #[test]
+    fn test_get_genre_artists_empty_for_unknown_genre() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let artists = get_genre_artists(&conn, 9999).unwrap();
+        assert!(artists.is_empty());
+    }
+
+    #[test]
+    fn test_get_album_genres() {
+        let env = TestEnv::new();
+        let (_, _, album_id, genre_id, _, _) = env.seed_basic_library();
+        let conn = env.pool.get().unwrap();
+
+        let genres = get_album_genres(&conn, album_id).unwrap();
+        assert_eq!(genres.len(), 1);
+        assert_eq!(genres[0].id, genre_id);
+        assert_eq!(genres[0].name, "Rock");
+    }
+
+    #[test]
+    fn test_get_album_genres_empty_for_unknown_album() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let genres = get_album_genres(&conn, 9999).unwrap();
+        assert!(genres.is_empty());
+    }
+
+    #[test]
+    fn test_get_artist_genres() {
+        let env = TestEnv::new();
+        let (_, artist_id, _, genre_id, _, _) = env.seed_basic_library();
+        let conn = env.pool.get().unwrap();
+
+        let genres = get_artist_genres(&conn, artist_id).unwrap();
+        assert_eq!(genres.len(), 1);
+        assert_eq!(genres[0].id, genre_id);
+    }
+
+    #[test]
+    fn test_get_artist_genres_empty_for_unknown_artist() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let genres = get_artist_genres(&conn, 9999).unwrap();
+        assert!(genres.is_empty());
+    }
+
+    // ====================================================================
+    // get_source_tracks
+    // ====================================================================
+
+    #[test]
+    fn test_get_source_tracks() {
+        let env = TestEnv::new();
+        let (source_id, _, _, _, t1, t2) = env.seed_basic_library();
+        let conn = env.pool.get().unwrap();
+
+        let tracks = get_source_tracks(&conn, source_id).unwrap();
+        assert_eq!(tracks.len(), 2);
+        let ids: Vec<i64> = tracks.iter().map(|t| t.id).collect();
+        assert!(ids.contains(&t1));
+        assert!(ids.contains(&t2));
+    }
+
+    #[test]
+    fn test_get_source_tracks_empty_for_unknown_source() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let tracks = get_source_tracks(&conn, 9999).unwrap();
+        assert!(tracks.is_empty());
     }
 }

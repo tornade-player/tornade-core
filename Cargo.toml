@@ -38,6 +38,7 @@ swift-bridge-build = "0.1"
 
 [dev-dependencies]
 tempfile = "3.8"
+wiremock = "0.5"
 
 [features]
 default = []

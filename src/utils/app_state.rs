@@ -150,4 +150,97 @@ mod tests {
         let loaded = load_state(&pool).unwrap();
         assert_eq!(loaded.current_track_id, None);
     }
+
+    #[test]
+    fn test_corrupted_json_returns_default() {
+        let (_dir, pool) = create_test_pool();
+
+        // Manually insert corrupted JSON
+        let conn = pool.get().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO app_state (key, value) VALUES ('playback_state', ?1)",
+            ["{ not valid json !!!"],
+        ).unwrap();
+        drop(conn);
+
+        // Should silently fall back to default instead of panicking
+        let loaded = load_state(&pool).unwrap();
+        assert_eq!(loaded.current_track_id, None);
+        assert_eq!(loaded.volume, 1.0);
+    }
+
+    #[test]
+    fn test_save_overwrites_previous_state() {
+        let (_dir, pool) = create_test_pool();
+
+        let state1 = PersistedState { current_track_id: Some(10), volume: 0.5, ..Default::default() };
+        let state2 = PersistedState { current_track_id: Some(20), volume: 0.8, ..Default::default() };
+
+        save_state(&pool, &state1).unwrap();
+        save_state(&pool, &state2).unwrap();
+
+        let loaded = load_state(&pool).unwrap();
+        assert_eq!(loaded.current_track_id, Some(20));
+        assert_eq!(loaded.volume, 0.8);
+    }
+
+    #[test]
+    fn test_save_and_load_shuffle_order() {
+        let (_dir, pool) = create_test_pool();
+
+        let state = PersistedState {
+            shuffle_enabled: true,
+            shuffle_order: vec![2, 0, 4, 1, 3],
+            queue: vec![10, 11, 12, 13, 14],
+            ..Default::default()
+        };
+
+        save_state(&pool, &state).unwrap();
+        let loaded = load_state(&pool).unwrap();
+
+        assert!(loaded.shuffle_enabled);
+        assert_eq!(loaded.shuffle_order, vec![2, 0, 4, 1, 3]);
+        assert_eq!(loaded.queue, vec![10, 11, 12, 13, 14]);
+    }
+
+    #[test]
+    fn test_save_and_load_repeat_mode_one() {
+        let (_dir, pool) = create_test_pool();
+
+        let state = PersistedState { repeat_mode: RepeatMode::One, ..Default::default() };
+        save_state(&pool, &state).unwrap();
+
+        let loaded = load_state(&pool).unwrap();
+        assert_eq!(loaded.repeat_mode, RepeatMode::One);
+    }
+
+    #[test]
+    fn test_clear_state_then_load_returns_default() {
+        let (_dir, pool) = create_test_pool();
+
+        // Nothing saved: clear should be a no-op, load should return default
+        clear_state(&pool).unwrap();
+        let loaded = load_state(&pool).unwrap();
+        assert_eq!(loaded.current_track_id, None);
+        assert!(!loaded.shuffle_enabled);
+    }
+
+    #[test]
+    fn test_save_large_queue() {
+        let (_dir, pool) = create_test_pool();
+
+        let large_queue: Vec<i64> = (1..=1000).collect();
+        let state = PersistedState {
+            queue: large_queue.clone(),
+            queue_index: 500,
+            ..Default::default()
+        };
+
+        save_state(&pool, &state).unwrap();
+        let loaded = load_state(&pool).unwrap();
+
+        assert_eq!(loaded.queue.len(), 1000);
+        assert_eq!(loaded.queue_index, 500);
+        assert_eq!(loaded.queue, large_queue);
+    }
 }

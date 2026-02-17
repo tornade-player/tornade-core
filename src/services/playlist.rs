@@ -372,4 +372,113 @@ mod tests {
         assert_eq!(updated.tracks[0], t2);
         assert_eq!(updated.tracks[1], t1);
     }
+
+    // ── import_m3u ───────────────────────────────────────────────────────────
+
+    fn write_m3u_file(path: &std::path::Path, lines: &[&str]) {
+        use std::io::Write;
+        let mut f = std::fs::File::create(path).unwrap();
+        writeln!(f, "#EXTM3U").unwrap();
+        for line in lines {
+            writeln!(f, "{}", line).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_import_m3u_creates_playlist_named_from_filename() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let m3u_path = tmp.path().join("my_playlist.m3u");
+        write_m3u_file(&m3u_path, &["/nonexistent/track.flac"]);
+
+        let (_env, service) = setup();
+        let playlist = service.import_m3u(&m3u_path).unwrap();
+        assert_eq!(playlist.name, "my_playlist");
+    }
+
+    #[test]
+    fn test_import_m3u_sets_imported_description() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let m3u_path = tmp.path().join("test.m3u");
+        write_m3u_file(&m3u_path, &[]);
+
+        let (_env, service) = setup();
+        let playlist = service.import_m3u(&m3u_path).unwrap();
+        assert_eq!(playlist.description, Some("Imported from M3U".to_string()));
+    }
+
+    #[test]
+    fn test_import_m3u_skips_paths_not_in_db() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let m3u_path = tmp.path().join("pl.m3u");
+        write_m3u_file(&m3u_path, &["/not/in/db.flac", "/also/not/in/db.flac"]);
+
+        let (_env, service) = setup();
+        let playlist = service.import_m3u(&m3u_path).unwrap();
+        assert!(playlist.tracks.is_empty(), "paths not in DB must be skipped");
+    }
+
+    #[test]
+    fn test_import_m3u_matches_tracks_by_file_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let m3u_path = tmp.path().join("import.m3u");
+        write_m3u_file(&m3u_path, &["/music/track1.flac", "/music/track2.flac"]);
+
+        let (env, service) = setup();
+        env.seed_basic_library();
+
+        let playlist = service.import_m3u(&m3u_path).unwrap();
+        assert_eq!(playlist.tracks.len(), 2, "both seeded tracks must be matched");
+    }
+
+    // ── export_m3u ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_export_m3u_creates_file_with_header() {
+        let (env, service) = setup();
+        let (_, _, _, _, t1, t2) = env.seed_basic_library();
+        let pl = service.create_playlist("Export Test", None).unwrap();
+        service.add_tracks(pl.id, vec![t1, t2]).unwrap();
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        service.export_m3u(pl.id, tmp.path()).unwrap();
+
+        let contents = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(contents.starts_with("#EXTM3U"));
+    }
+
+    #[test]
+    fn test_export_m3u_includes_track_paths() {
+        let (env, service) = setup();
+        let (_, _, _, _, t1, t2) = env.seed_basic_library();
+        let pl = service.create_playlist("Export Test", None).unwrap();
+        service.add_tracks(pl.id, vec![t1, t2]).unwrap();
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        service.export_m3u(pl.id, tmp.path()).unwrap();
+
+        let contents = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(contents.contains("/music/track1.flac"));
+        assert!(contents.contains("/music/track2.flac"));
+    }
+
+    #[test]
+    fn test_export_m3u_nonexistent_playlist_returns_error() {
+        let (_env, service) = setup();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let result = service.export_m3u(9999, tmp.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_export_m3u_empty_playlist_produces_header_only() {
+        let (_env, service) = setup();
+        let pl = service.create_playlist("Empty", None).unwrap();
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        service.export_m3u(pl.id, tmp.path()).unwrap();
+
+        let contents = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(contents.contains("#EXTM3U"));
+        assert!(!contents.contains("#EXTINF"), "no track entries for empty playlist");
+    }
 }

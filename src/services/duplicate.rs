@@ -234,4 +234,129 @@ mod tests {
         assert_eq!(groups, 0);
         assert_eq!(tracks, 0);
     }
+
+    #[test]
+    fn test_get_duplicate_stats_with_one_group() {
+        use crate::test_helpers::TestEnv;
+        use crate::db::queries;
+        use crate::models::{AudioFormat, source::SourceType};
+
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source_id = queries::insert_source(&conn, "Lib", SourceType::Disk, None).unwrap();
+        let artist_id = queries::insert_artist(&conn, "Artist", None).unwrap();
+
+        queries::insert_track(&conn, "Same Song", None, artist_id, source_id,
+            &std::path::PathBuf::from("/a/1.flac"), 180_000, None, None, None, AudioFormat::Flac, 1000).unwrap();
+        queries::insert_track(&conn, "Same Song", None, artist_id, source_id,
+            &std::path::PathBuf::from("/b/2.flac"), 180_000, None, None, None, AudioFormat::Flac, 1000).unwrap();
+        drop(conn);
+
+        let service = DuplicateService::new(env.pool.clone());
+        let (groups, tracks) = service.get_duplicate_stats().unwrap();
+        assert_eq!(groups, 1);
+        assert_eq!(tracks, 2);
+    }
+
+    #[test]
+    fn test_get_duplicate_stats_with_multiple_groups() {
+        use crate::test_helpers::TestEnv;
+        use crate::db::queries;
+        use crate::models::{AudioFormat, source::SourceType};
+
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source_id = queries::insert_source(&conn, "Lib", SourceType::Disk, None).unwrap();
+        let artist_id = queries::insert_artist(&conn, "Artist", None).unwrap();
+
+        // Group 1: "Song A" duplicated twice
+        queries::insert_track(&conn, "Song A", None, artist_id, source_id,
+            &std::path::PathBuf::from("/a/1.flac"), 120_000, None, None, None, AudioFormat::Flac, 1000).unwrap();
+        queries::insert_track(&conn, "Song A", None, artist_id, source_id,
+            &std::path::PathBuf::from("/b/1.flac"), 120_000, None, None, None, AudioFormat::Flac, 1000).unwrap();
+
+        // Group 2: "Song B" duplicated three times
+        queries::insert_track(&conn, "Song B", None, artist_id, source_id,
+            &std::path::PathBuf::from("/a/2.flac"), 240_000, None, None, None, AudioFormat::Flac, 1000).unwrap();
+        queries::insert_track(&conn, "Song B", None, artist_id, source_id,
+            &std::path::PathBuf::from("/b/2.flac"), 240_000, None, None, None, AudioFormat::Flac, 1000).unwrap();
+        queries::insert_track(&conn, "Song B", None, artist_id, source_id,
+            &std::path::PathBuf::from("/c/2.flac"), 240_000, None, None, None, AudioFormat::Flac, 1000).unwrap();
+        drop(conn);
+
+        let service = DuplicateService::new(env.pool.clone());
+        let (groups, tracks) = service.get_duplicate_stats().unwrap();
+        assert_eq!(groups, 2);
+        assert_eq!(tracks, 5); // 2 + 3
+    }
+
+    #[test]
+    fn test_find_duplicates_same_title_different_artist_not_duplicate() {
+        use crate::test_helpers::TestEnv;
+        use crate::db::queries;
+        use crate::models::{AudioFormat, source::SourceType};
+
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source_id = queries::insert_source(&conn, "Lib", SourceType::Disk, None).unwrap();
+        let artist1 = queries::insert_artist(&conn, "Artist A", None).unwrap();
+        let artist2 = queries::insert_artist(&conn, "Artist B", None).unwrap();
+
+        // Same title + duration but different artist → not duplicates
+        queries::insert_track(&conn, "Same Title", None, artist1, source_id,
+            &std::path::PathBuf::from("/a/1.flac"), 180_000, None, None, None, AudioFormat::Flac, 1000).unwrap();
+        queries::insert_track(&conn, "Same Title", None, artist2, source_id,
+            &std::path::PathBuf::from("/b/1.flac"), 180_000, None, None, None, AudioFormat::Flac, 1000).unwrap();
+        drop(conn);
+
+        let service = DuplicateService::new(env.pool.clone());
+        let duplicates = service.find_duplicates().unwrap();
+        assert!(duplicates.is_empty(), "same title with different artists must not be flagged as duplicates");
+    }
+
+    #[test]
+    fn test_find_duplicates_same_title_different_duration_not_duplicate() {
+        use crate::test_helpers::TestEnv;
+        use crate::db::queries;
+        use crate::models::{AudioFormat, source::SourceType};
+
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source_id = queries::insert_source(&conn, "Lib", SourceType::Disk, None).unwrap();
+        let artist_id = queries::insert_artist(&conn, "Artist", None).unwrap();
+
+        // Same title + artist but different duration → not duplicates
+        queries::insert_track(&conn, "Same Song", None, artist_id, source_id,
+            &std::path::PathBuf::from("/a/1.flac"), 180_000, None, None, None, AudioFormat::Flac, 1000).unwrap();
+        queries::insert_track(&conn, "Same Song", None, artist_id, source_id,
+            &std::path::PathBuf::from("/b/1.flac"), 240_000, None, None, None, AudioFormat::Flac, 1000).unwrap();
+        drop(conn);
+
+        let service = DuplicateService::new(env.pool.clone());
+        let duplicates = service.find_duplicates().unwrap();
+        assert!(duplicates.is_empty(), "same title with different durations must not be duplicates");
+    }
+
+    #[test]
+    fn test_find_duplicates_title_case_insensitive() {
+        use crate::test_helpers::TestEnv;
+        use crate::db::queries;
+        use crate::models::{AudioFormat, source::SourceType};
+
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source_id = queries::insert_source(&conn, "Lib", SourceType::Disk, None).unwrap();
+        let artist_id = queries::insert_artist(&conn, "Artist", None).unwrap();
+
+        // Title differs only in case → should be detected as duplicate
+        queries::insert_track(&conn, "My Song", None, artist_id, source_id,
+            &std::path::PathBuf::from("/a/1.flac"), 180_000, None, None, None, AudioFormat::Flac, 1000).unwrap();
+        queries::insert_track(&conn, "MY SONG", None, artist_id, source_id,
+            &std::path::PathBuf::from("/b/1.flac"), 180_000, None, None, None, AudioFormat::Flac, 1000).unwrap();
+        drop(conn);
+
+        let service = DuplicateService::new(env.pool.clone());
+        let duplicates = service.find_duplicates().unwrap();
+        assert_eq!(duplicates.len(), 1, "title comparison must be case-insensitive");
+    }
 }

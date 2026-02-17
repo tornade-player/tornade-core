@@ -101,4 +101,94 @@ mod tests {
         let result = parse_m3u(temp_file.path()).unwrap();
         assert_eq!(result.tracks.len(), 2);
     }
+
+    // ── write_m3u ────────────────────────────────────────────────────────────
+
+    fn make_track(id: i64, title: &str, file_path: &str, duration_secs: u64) -> Track {
+        use crate::models::AudioFormat;
+        use std::time::Duration;
+        Track {
+            id,
+            title: title.to_string(),
+            album_id: None,
+            artist_id: 1,
+            source_id: 1,
+            file_path: PathBuf::from(file_path),
+            duration: Duration::from_secs(duration_secs),
+            track_number: None,
+            disc_number: 0,
+            sample_rate: None,
+            bit_depth: None,
+            file_type: AudioFormat::Flac,
+            file_size: 1000,
+            rating: 0,
+            fingerprint: None,
+            is_duplicate: false,
+            duplicate_of: None,
+            last_played_at: None,
+            play_count: 0,
+        }
+    }
+
+    #[test]
+    fn test_write_m3u_creates_extm3u_header() {
+        let tmp = NamedTempFile::new().unwrap();
+        write_m3u(tmp.path(), &[]).unwrap();
+
+        let contents = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(contents.starts_with("#EXTM3U"), "file must start with #EXTM3U header");
+    }
+
+    #[test]
+    fn test_write_m3u_empty_tracks_produces_header_only() {
+        let tmp = NamedTempFile::new().unwrap();
+        write_m3u(tmp.path(), &[]).unwrap();
+
+        let contents = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(!contents.contains("#EXTINF"), "no EXTINF lines for empty track list");
+    }
+
+    #[test]
+    fn test_write_m3u_single_track_includes_extinf_and_path() {
+        let tmp = NamedTempFile::new().unwrap();
+        let track = make_track(1, "Song Title", "/music/song.flac", 180);
+        write_m3u(tmp.path(), &[track]).unwrap();
+
+        let contents = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(contents.contains("#EXTINF:180,"), "EXTINF must include duration in seconds");
+        assert!(contents.contains("/music/song.flac"), "track path must be written");
+    }
+
+    #[test]
+    fn test_write_m3u_multiple_tracks() {
+        let tmp = NamedTempFile::new().unwrap();
+        let tracks = vec![
+            make_track(1, "Track 1", "/music/t1.flac", 120),
+            make_track(2, "Track 2", "/music/t2.flac", 240),
+            make_track(3, "Track 3", "/music/t3.flac", 300),
+        ];
+        write_m3u(tmp.path(), &tracks).unwrap();
+
+        let contents = std::fs::read_to_string(tmp.path()).unwrap();
+        let extinf_count = contents.lines().filter(|l| l.starts_with("#EXTINF")).count();
+        assert_eq!(extinf_count, 3);
+        assert!(contents.contains("/music/t1.flac"));
+        assert!(contents.contains("/music/t2.flac"));
+        assert!(contents.contains("/music/t3.flac"));
+    }
+
+    #[test]
+    fn test_write_m3u_roundtrip_absolute_paths() {
+        let tmp = NamedTempFile::new().unwrap();
+        let tracks = vec![
+            make_track(1, "A", "/music/a.flac", 100),
+            make_track(2, "B", "/music/b.flac", 200),
+        ];
+        write_m3u(tmp.path(), &tracks).unwrap();
+
+        let parsed = parse_m3u(tmp.path()).unwrap();
+        assert_eq!(parsed.tracks.len(), 2);
+        assert_eq!(parsed.tracks[0], PathBuf::from("/music/a.flac"));
+        assert_eq!(parsed.tracks[1], PathBuf::from("/music/b.flac"));
+    }
 }

@@ -230,6 +230,16 @@ impl MetadataService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helpers::TestEnv;
+
+    const MINIMAL_FLAC: &[u8] =
+        include_bytes!("../../tests/fixtures/minimal.flac");
+
+    fn make_service() -> (TestEnv, MetadataService) {
+        let env = TestEnv::new();
+        let svc = MetadataService::new(env.app_paths.clone());
+        (env, svc)
+    }
 
     #[test]
     fn test_file_format() {
@@ -238,9 +248,85 @@ mod tests {
     }
 
     #[test]
+    fn test_file_format_case_insensitive() {
+        assert_eq!(MetadataService::get_file_format(Path::new("/x.FLAC")), Some("flac".to_string()));
+        assert_eq!(MetadataService::get_file_format(Path::new("/x.MP3")), Some("mp3".to_string()));
+    }
+
+    #[test]
+    fn test_file_format_no_extension_returns_none() {
+        let path = Path::new("/music/tracknoextension");
+        assert_eq!(MetadataService::get_file_format(path), None);
+    }
+
+    #[test]
     fn test_artwork_hash() {
         let path = Path::new("/music/album/track.flac");
         let hash = MetadataService::generate_artwork_hash(path);
         assert!(!hash.is_empty());
+    }
+
+    #[test]
+    fn test_artwork_hash_is_deterministic() {
+        let path = Path::new("/music/album/track.flac");
+        let hash1 = MetadataService::generate_artwork_hash(path);
+        let hash2 = MetadataService::generate_artwork_hash(path);
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_artwork_hash_differs_for_different_paths() {
+        let h1 = MetadataService::generate_artwork_hash(Path::new("/music/a/track.flac"));
+        let h2 = MetadataService::generate_artwork_hash(Path::new("/music/b/track.flac"));
+        assert_ne!(h1, h2);
+    }
+
+    // ── read_metadata ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_read_metadata_from_minimal_flac() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let flac_path = tmp.path().join("test.flac");
+        std::fs::write(&flac_path, MINIMAL_FLAC).unwrap();
+
+        let (_env, svc) = make_service();
+        let meta = svc.read_metadata(&flac_path).unwrap();
+
+        assert!(!meta.title.is_empty(), "title must be non-empty");
+        assert!(!meta.artist.is_empty(), "artist must be non-empty");
+        assert!(meta.duration.as_millis() > 0, "duration must be positive");
+    }
+
+    #[test]
+    fn test_read_metadata_nonexistent_file_returns_error() {
+        let (_env, svc) = make_service();
+        let result = svc.read_metadata(Path::new("/does/not/exist.flac"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_read_metadata_corrupted_file_returns_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bad_path = tmp.path().join("bad.flac");
+        std::fs::write(&bad_path, b"NOT A VALID FLAC FILE").unwrap();
+
+        let (_env, svc) = make_service();
+        let result = svc.read_metadata(&bad_path);
+        assert!(result.is_err(), "corrupted file must return an error");
+    }
+
+    // ── get_thumbnail ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_get_thumbnail_returns_none_when_no_artwork_exists() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let flac_path = tmp.path().join("noart.flac");
+        std::fs::write(&flac_path, MINIMAL_FLAC).unwrap();
+
+        let (_env, svc) = make_service();
+        let hash = MetadataService::generate_artwork_hash(&flac_path);
+        // minimal.flac has no embedded artwork, so thumbnail generation must fail silently
+        let result = svc.get_thumbnail(&flac_path, &hash, 64);
+        assert!(result.is_none());
     }
 }
