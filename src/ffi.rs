@@ -122,6 +122,7 @@ mod ffi {
         // Track Functions
         fn get_tracks_page(offset: u32, limit: u32) -> String;
         fn get_track_by_id(track_id: i64) -> String;
+        fn get_random_tracks(count: u32) -> String;
         fn search_tracks(query: &str, limit: u32) -> String;
 
         // Album Functions
@@ -411,6 +412,70 @@ fn get_tracks_page(offset: u32, limit: u32) -> String {
                             serde_json::json!({
                                 "success": false,
                                 "error": format!("Failed to query tracks: {}", e)
+                            }).to_string()
+                        }
+                    }
+                }
+                Err(e) => {
+                    serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to prepare query: {}", e)
+                    }).to_string()
+                }
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn get_random_tracks(count: u32) -> String {
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let conn = match pool.get() {
+                Ok(conn) => conn,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get database connection: {}", e)
+                    }).to_string();
+                }
+            };
+
+            let count_capped = std::cmp::min(count, 200) as usize;
+
+            match conn.prepare(&format!(
+                "SELECT id FROM tracks ORDER BY RANDOM() LIMIT {}",
+                count_capped
+            )) {
+                Ok(mut stmt) => {
+                    let ids_iter = stmt.query_map([], |row| row.get::<_, i64>(0));
+                    match ids_iter {
+                        Ok(rows) => {
+                            let track_ids: Result<Vec<i64>, _> = rows.collect();
+                            match track_ids {
+                                Ok(ids) => {
+                                    serde_json::json!({
+                                        "success": true,
+                                        "data": ids
+                                    }).to_string()
+                                }
+                                Err(e) => {
+                                    serde_json::json!({
+                                        "success": false,
+                                        "error": format!("Failed to fetch random tracks: {}", e)
+                                    }).to_string()
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            serde_json::json!({
+                                "success": false,
+                                "error": format!("Failed to query random tracks: {}", e)
                             }).to_string()
                         }
                     }
