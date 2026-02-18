@@ -4,6 +4,86 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use serde::Deserialize;
 
+/// Audio format/quality keywords that appear in file-tagger bracket annotations
+/// but are not part of the actual album title in MusicBrainz.
+const FORMAT_KEYWORDS: &[&str] = &[
+    "flac", "mp3", "aac", "ogg", "opus", "wav", "aiff", "dsd", "sacd",
+    "web", "mqa", "hires", "hi-res", "hdtracks",
+    "tidal", "qobuz", "deezer",
+    "kbps", "khz",
+];
+
+/// Remove `[...]` bracket groups whose content is a format/quality tag.
+/// Examples: "[44.1-24 WEB]" → removed, "[Tidal MQA]" → removed.
+/// Brackets whose content does NOT match are kept intact.
+fn strip_format_brackets(title: &str) -> String {
+    let mut result = String::with_capacity(title.len());
+    let mut chars = title.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '[' {
+            let mut content = String::new();
+            let mut closed = false;
+            for bc in chars.by_ref() {
+                if bc == ']' {
+                    closed = true;
+                    break;
+                }
+                content.push(bc);
+            }
+            if closed {
+                let lower = content.to_lowercase();
+                let is_format = FORMAT_KEYWORDS.iter().any(|kw| lower.contains(kw));
+                if !is_format {
+                    result.push('[');
+                    result.push_str(&content);
+                    result.push(']');
+                }
+                // else: format tag, silently dropped
+            } else {
+                // Unclosed bracket — keep as-is
+                result.push('[');
+                result.push_str(&content);
+            }
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
+}
+
+/// Strip trailing disc annotations such as " (Disc 1)", " [Disc 2]", " - Disc 3", " (CD 1)".
+/// MusicBrainz stores each disc as a separate release without the disc suffix.
+fn strip_disc_suffix(title: &str) -> &str {
+    let lower = title.to_lowercase();
+
+    // Ordered from most to least specific to find the earliest match
+    for marker in &["(disc ", "[disc ", "- disc ", "(cd "] {
+        if let Some(pos) = lower.find(marker) {
+            let after = &lower[pos + marker.len()..];
+            if after.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+                return title[..pos].trim_end();
+            }
+        }
+    }
+
+    title
+}
+
+/// Return a clean album title suitable for MusicBrainz search:
+/// strips format bracket tags and disc-number suffixes.
+fn clean_album_title(title: &str) -> String {
+    let t = strip_format_brackets(title);
+    strip_disc_suffix(t.trim()).to_string()
+}
+
+/// Extract the primary artist name for a search query.
+/// Handles multi-artist strings like "50 Cent, Snoop Dogg" → "50 Cent".
+fn clean_artist_for_search(artist: &str) -> &str {
+    artist.split(',').next().unwrap_or(artist).trim()
+}
+
 /// Rate limiter to respect API rate limits
 pub struct RateLimiter {
     min_interval_ms: u64,
@@ -72,9 +152,43 @@ impl MusicBrainzClient {
         }
     }
 
-    /// Search for album artwork
+    /// Search for album artwork using a cascade of queries for better coverage.
+    ///
+    /// Strategy:
+    ///   1. `release:"clean_title" AND artist:"primary_artist"` — most precise
+    ///   2. `release:"clean_title"` — title-only (covers compilations / various-artist albums)
+    ///   3. `release:clean_title` — keyword search without quotes (most permissive)
+    ///
+    /// Title and artist are pre-cleaned: format tags stripped, disc numbers removed,
+    /// and only the first artist is used for multi-artist strings.
     pub async fn search_album_artwork(&self, album_title: &str, artist_name: &str) -> Result<Option<Vec<u8>>, String> {
-        // Wait for rate limit
+        let clean_title = clean_album_title(album_title);
+        let clean_artist = clean_artist_for_search(artist_name);
+
+        let queries = [
+            format!("release:\"{}\" AND artist:\"{}\"", clean_title, clean_artist),
+            format!("release:\"{}\"", clean_title),
+            format!("release:{}", clean_title),
+        ];
+
+        for query in &queries {
+            match self.try_search_query(query, artist_name, album_title).await? {
+                Some(bytes) => return Ok(Some(bytes)),
+                None => continue,
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Execute a single MusicBrainz query and attempt to download artwork from
+    /// Cover Art Archive for the returned releases (up to 5).
+    async fn try_search_query(
+        &self,
+        query: &str,
+        artist_name: &str,
+        album_title: &str,
+    ) -> Result<Option<Vec<u8>>, String> {
         let wait_time = {
             let mut limiter = self.rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
             limiter.calculate_wait()
@@ -83,12 +197,10 @@ impl MusicBrainzClient {
             tokio::time::sleep(duration).await;
         }
 
-        // Search for release
-        let query = format!("release:\"{}\" AND artist:\"{}\"", album_title, artist_name);
         let url = format!(
             "{}/ws/2/release/?query={}&fmt=json&limit=5",
             self.musicbrainz_base_url,
-            urlencoding::encode(&query)
+            urlencoding::encode(query)
         );
 
         log::debug!("Searching MusicBrainz: {}", url);
@@ -113,9 +225,13 @@ impl MusicBrainzClient {
             return Ok(None);
         }
 
-        // Try to download artwork from Cover Art Archive
-        for release in search_result.releases.iter().take(3) {
-            // Wait for rate limit
+        // Try all returned releases (up to 5), skipping low-confidence ones
+        for release in search_result.releases.iter().take(5) {
+            if release.score.unwrap_or(100) < 50 {
+                log::debug!("Skipping low-score release {} (score {:?})", release.id, release.score);
+                continue;
+            }
+
             let wait_time = {
                 let mut limiter = self.rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
                 limiter.calculate_wait()
@@ -128,33 +244,38 @@ impl MusicBrainzClient {
 
             log::debug!("Trying Cover Art Archive: {}", artwork_url);
 
-            match self.http_client
-                .get(&artwork_url)
-                .send()
-                .await
-            {
+            match self.http_client.get(&artwork_url).send().await {
                 Ok(resp) if resp.status().is_success() => {
-                    // Limit image size to 5 MB to prevent memory issues
                     const MAX_IMAGE_SIZE: usize = 5 * 1024 * 1024;
-
                     match resp.bytes().await {
                         Ok(bytes) if bytes.len() <= MAX_IMAGE_SIZE => {
-                            log::info!("Found artwork for {} - {} ({} KB)", artist_name, album_title, bytes.len() / 1024);
+                            log::info!(
+                                "Found artwork for {} - {} ({} KB)",
+                                artist_name,
+                                album_title,
+                                bytes.len() / 1024
+                            );
                             return Ok(Some(bytes.to_vec()));
                         }
                         Ok(bytes) => {
-                            log::warn!("Artwork too large ({} MB) for {} - {}, skipping",
-                                bytes.len() / 1024 / 1024, artist_name, album_title);
-                            continue;
+                            log::warn!(
+                                "Artwork too large ({} MB) for {} - {}, skipping",
+                                bytes.len() / 1024 / 1024,
+                                artist_name,
+                                album_title
+                            );
                         }
                         Err(e) => {
                             log::warn!("Failed to download artwork bytes: {}", e);
-                            continue;
                         }
                     }
                 }
                 Ok(resp) => {
-                    log::debug!("Cover Art Archive returned status {} for {}", resp.status(), release.id);
+                    log::debug!(
+                        "Cover Art Archive returned status {} for {}",
+                        resp.status(),
+                        release.id
+                    );
                 }
                 Err(e) => {
                     log::debug!("Cover Art Archive request failed for {}: {}", release.id, e);
@@ -242,6 +363,98 @@ mod tests {
     use super::*;
     use wiremock::{MockServer, Mock, ResponseTemplate};
     use wiremock::matchers::{method, path};
+
+    // ── clean_album_title ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_clean_title_strips_web_format_tag() {
+        assert_eq!(
+            clean_album_title("Awesome Mix Vol. 1 [44.1-24 WEB]"),
+            "Awesome Mix Vol. 1"
+        );
+    }
+
+    #[test]
+    fn test_clean_title_strips_tidal_mqa_tag() {
+        assert_eq!(
+            clean_album_title("Ralph Breaks the Internet [44.1-24 Tidal MQA]"),
+            "Ralph Breaks the Internet"
+        );
+    }
+
+    #[test]
+    fn test_clean_title_strips_disc_suffix_parentheses() {
+        assert_eq!(
+            clean_album_title("Ministry of Sound: The Score (Disc 3)"),
+            "Ministry of Sound: The Score"
+        );
+    }
+
+    #[test]
+    fn test_clean_title_strips_disc_suffix_dash() {
+        assert_eq!(clean_album_title("Ultimate 80s - Disc 4"), "Ultimate 80s");
+    }
+
+    #[test]
+    fn test_clean_title_strips_disc_suffix_bracket() {
+        // [Disc 2] is not a format keyword so strip_format_brackets keeps it,
+        // then strip_disc_suffix catches the "[disc " pattern.
+        assert_eq!(clean_album_title("The Score [Disc 2]"), "The Score");
+    }
+
+    #[test]
+    fn test_clean_title_strips_cd_suffix() {
+        assert_eq!(clean_album_title("Anthology (CD 1)"), "Anthology");
+    }
+
+    #[test]
+    fn test_clean_title_preserves_regular_brackets() {
+        // A bracket that is NOT a format tag should be kept
+        assert_eq!(
+            clean_album_title("Guardians of the Galaxy (Deluxe)"),
+            "Guardians of the Galaxy (Deluxe)"
+        );
+    }
+
+    #[test]
+    fn test_clean_title_no_change_for_plain_title() {
+        assert_eq!(clean_album_title("The Dark Side of the Moon"), "The Dark Side of the Moon");
+    }
+
+    #[test]
+    fn test_clean_title_strips_flac_tag() {
+        assert_eq!(clean_album_title("Rumours [FLAC]"), "Rumours");
+    }
+
+    // ── clean_artist_for_search ──────────────────────────────────────────────
+
+    #[test]
+    fn test_clean_artist_single() {
+        assert_eq!(clean_artist_for_search("Pink Floyd"), "Pink Floyd");
+    }
+
+    #[test]
+    fn test_clean_artist_multi_comma() {
+        assert_eq!(clean_artist_for_search("50 Cent, Snoop Dogg"), "50 Cent");
+    }
+
+    #[test]
+    fn test_clean_artist_multi_with_spaces() {
+        assert_eq!(
+            clean_artist_for_search("Al Green, Anthony Hamilton"),
+            "Al Green"
+        );
+    }
+
+    #[test]
+    fn test_clean_artist_long_list() {
+        assert_eq!(
+            clean_artist_for_search(
+                "Akhenaton, Disiz la Peste, Kool Shen, Lino, Soprano, Taïro, Nessbeal"
+            ),
+            "Akhenaton"
+        );
+    }
 
     // ── RateLimiter ──────────────────────────────────────────────────────────
 
