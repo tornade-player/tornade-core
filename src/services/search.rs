@@ -93,15 +93,27 @@ impl SearchService {
         // Search artists by name using pattern matching
         let artist_pattern = format!("%{}%", query);
         let mut stmt = conn.prepare(
-            "SELECT * FROM artists WHERE name LIKE ?1 LIMIT 20"
+            "SELECT id, name, name_sort, bio, country, genre, style, mood,
+                    formed_year, born_year, died_year, disbanded, musicbrainz_id, theaudiodb_id
+             FROM artists WHERE name LIKE ?1 LIMIT 20"
         ).map_err(LibraryError::Database)?;
 
         let artists: Vec<Artist> = stmt.query_map([&artist_pattern], |row| {
             Ok(Artist {
                 id: row.get(0)?,
                 name: row.get(1)?,
-                bio: row.get(2)?,
-                name_sort: row.get(3)?,
+                name_sort: row.get(2)?,
+                bio: row.get(3)?,
+                country: row.get(4)?,
+                genre: row.get(5)?,
+                style: row.get(6)?,
+                mood: row.get(7)?,
+                formed_year: row.get(8)?,
+                born_year: row.get(9)?,
+                died_year: row.get(10)?,
+                disbanded: row.get(11)?,
+                musicbrainz_id: row.get(12)?,
+                theaudiodb_id: row.get(13)?,
             })
         })
         .map_err(LibraryError::Database)?

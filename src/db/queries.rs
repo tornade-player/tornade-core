@@ -73,7 +73,9 @@ pub fn insert_artist(conn: &Connection, name: &str, name_sort: Option<&str>) -> 
 
 pub fn get_artist(conn: &Connection, id: i64) -> Result<Option<Artist>> {
     conn.query_row(
-        "SELECT id, name, name_sort, bio FROM artists WHERE id = ?1",
+        "SELECT id, name, name_sort, bio, country, genre, style, mood,
+                formed_year, born_year, died_year, disbanded, musicbrainz_id, theaudiodb_id
+         FROM artists WHERE id = ?1",
         params![id],
         |row| {
             Ok(Artist {
@@ -81,6 +83,16 @@ pub fn get_artist(conn: &Connection, id: i64) -> Result<Option<Artist>> {
                 name: row.get(1)?,
                 name_sort: row.get(2)?,
                 bio: row.get(3)?,
+                country: row.get(4)?,
+                genre: row.get(5)?,
+                style: row.get(6)?,
+                mood: row.get(7)?,
+                formed_year: row.get(8)?,
+                born_year: row.get(9)?,
+                died_year: row.get(10)?,
+                disbanded: row.get(11)?,
+                musicbrainz_id: row.get(12)?,
+                theaudiodb_id: row.get(13)?,
             })
         },
     ).optional()
@@ -489,7 +501,9 @@ pub fn get_artist_albums(conn: &Connection, artist_id: i64) -> Result<Vec<Album>
 
 pub fn list_artists(conn: &Connection) -> Result<Vec<Artist>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, name_sort, bio FROM artists ORDER BY COALESCE(name_sort, name)"
+        "SELECT id, name, name_sort, bio, country, genre, style, mood,
+                formed_year, born_year, died_year, disbanded, musicbrainz_id, theaudiodb_id
+         FROM artists ORDER BY COALESCE(name_sort, name)"
     )?;
 
     let artists = stmt.query_map([], |row| {
@@ -498,6 +512,16 @@ pub fn list_artists(conn: &Connection) -> Result<Vec<Artist>> {
             name: row.get(1)?,
             name_sort: row.get(2)?,
             bio: row.get(3)?,
+            country: row.get(4)?,
+            genre: row.get(5)?,
+            style: row.get(6)?,
+            mood: row.get(7)?,
+            formed_year: row.get(8)?,
+            born_year: row.get(9)?,
+            died_year: row.get(10)?,
+            disbanded: row.get(11)?,
+            musicbrainz_id: row.get(12)?,
+            theaudiodb_id: row.get(13)?,
         })
     })?;
 
@@ -542,7 +566,8 @@ pub fn get_genre_albums(conn: &Connection, genre_id: i64) -> Result<Vec<Album>> 
 
 pub fn get_genre_artists(conn: &Connection, genre_id: i64) -> Result<Vec<Artist>> {
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT a.id, a.name, a.name_sort, a.bio
+        "SELECT DISTINCT a.id, a.name, a.name_sort, a.bio, a.country, a.genre, a.style, a.mood,
+                a.formed_year, a.born_year, a.died_year, a.disbanded, a.musicbrainz_id, a.theaudiodb_id
          FROM artists a
          JOIN tracks t ON t.artist_id = a.id
          JOIN track_genres tg ON tg.track_id = t.id
@@ -556,6 +581,16 @@ pub fn get_genre_artists(conn: &Connection, genre_id: i64) -> Result<Vec<Artist>
             name: row.get(1)?,
             name_sort: row.get(2)?,
             bio: row.get(3)?,
+            country: row.get(4)?,
+            genre: row.get(5)?,
+            style: row.get(6)?,
+            mood: row.get(7)?,
+            formed_year: row.get(8)?,
+            born_year: row.get(9)?,
+            died_year: row.get(10)?,
+            disbanded: row.get(11)?,
+            musicbrainz_id: row.get(12)?,
+            theaudiodb_id: row.get(13)?,
         })
     })?;
 
@@ -795,7 +830,8 @@ pub fn search_library(conn: &Connection, query: &str, limit: usize) -> Result<(V
     // Search artists
     let mut artists = Vec::new();
     let mut stmt = conn.prepare(
-        "SELECT id, name, name_sort, bio
+        "SELECT id, name, name_sort, bio, country, genre, style, mood,
+                formed_year, born_year, died_year, disbanded, musicbrainz_id, theaudiodb_id
          FROM artists
          WHERE name LIKE ?1
          LIMIT ?2"
@@ -807,6 +843,16 @@ pub fn search_library(conn: &Connection, query: &str, limit: usize) -> Result<(V
             name: row.get(1)?,
             name_sort: row.get(2)?,
             bio: row.get(3)?,
+            country: row.get(4)?,
+            genre: row.get(5)?,
+            style: row.get(6)?,
+            mood: row.get(7)?,
+            formed_year: row.get(8)?,
+            born_year: row.get(9)?,
+            died_year: row.get(10)?,
+            disbanded: row.get(11)?,
+            musicbrainz_id: row.get(12)?,
+            theaudiodb_id: row.get(13)?,
         })
     })?;
 
