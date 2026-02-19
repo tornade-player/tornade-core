@@ -84,6 +84,24 @@ fn clean_artist_for_search(artist: &str) -> &str {
     artist.split(',').next().unwrap_or(artist).trim()
 }
 
+/// Strip Lucene special characters for an unquoted keyword search.
+///
+/// MusicBrainz uses Apache Lucene syntax. Characters like `:`, `(`, `)`, `[`, `]`,
+/// `+`, `-`, `!`, `~`, `^`, `*`, `?` have special meaning and break unquoted queries.
+/// For example `release:Ministry of Sound: The Score` is invalid syntax.
+///
+/// This function replaces all non-alphanumeric, non-space characters with spaces
+/// and collapses whitespace, producing a safe keyword-only query.
+fn sanitize_for_keyword_search(title: &str) -> String {
+    title
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '\'' { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// All data returned when artwork is found: the image bytes plus release metadata
 /// scraped from MusicBrainz at the same time.
 #[derive(Debug)]
@@ -188,7 +206,9 @@ impl MusicBrainzClient {
         let queries = [
             format!("release:\"{}\" AND artist:\"{}\"", clean_title, clean_artist),
             format!("release:\"{}\"", clean_title),
-            format!("release:{}", clean_title),
+            // Unquoted keyword search: must sanitize Lucene special chars (colons, parens, etc.)
+            // e.g. "Ministry of Sound: The Score" → "Ministry of Sound The Score"
+            format!("release:{}", sanitize_for_keyword_search(&clean_title)),
         ];
 
         for query in &queries {
@@ -520,6 +540,40 @@ mod tests {
                 "Akhenaton, Disiz la Peste, Kool Shen, Lino, Soprano, Taïro, Nessbeal"
             ),
             "Akhenaton"
+        );
+    }
+
+    // ── sanitize_for_keyword_search ──────────────────────────────────────────
+
+    #[test]
+    fn test_sanitize_strips_colon() {
+        assert_eq!(
+            sanitize_for_keyword_search("Ministry of Sound: The Score"),
+            "Ministry of Sound The Score"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_strips_parens_and_colon() {
+        assert_eq!(
+            sanitize_for_keyword_search("Guardians of the Galaxy: Awesome Mix Vol. 2"),
+            "Guardians of the Galaxy Awesome Mix Vol 2"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_collapses_whitespace() {
+        assert_eq!(
+            sanitize_for_keyword_search("The Dark Side of the Moon"),
+            "The Dark Side of the Moon"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_preserves_apostrophe() {
+        assert_eq!(
+            sanitize_for_keyword_search("Guns N' Roses"),
+            "Guns N' Roses"
         );
     }
 
