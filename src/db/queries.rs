@@ -135,6 +135,17 @@ pub fn get_album(conn: &Connection, id: i64) -> Result<Option<Album>> {
     ).optional()
 }
 
+/// Find any existing album with this exact title, regardless of artist.
+/// Used when no ALBUMARTIST tag is present to avoid creating a separate album
+/// entry for every featured artist in a compilation.
+pub fn find_album_by_title(conn: &Connection, title: &str) -> Result<Option<i64>> {
+    conn.query_row(
+        "SELECT id FROM albums WHERE title = ?1 LIMIT 1",
+        params![title],
+        |row| row.get(0),
+    ).optional()
+}
+
 pub fn update_album_rating(conn: &Connection, album_id: i64, rating: u8) -> Result<()> {
     conn.execute(
         "UPDATE albums SET rating = ?1 WHERE id = ?2",

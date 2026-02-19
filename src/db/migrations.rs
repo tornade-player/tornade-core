@@ -80,5 +80,48 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    // Migration 4: Merge duplicate album entries caused by missing ALBUMARTIST tags.
+    //
+    // Before the ALBUMARTIST fix, compilation/mixtape tracks without an ALBUMARTIST
+    // tag created one album row per unique track artist (e.g. "70s Mixtape / The Who"
+    // and "70s Mixtape / Stevie Wonder" as separate albums).
+    //
+    // This migration:
+    //   1. For each group of albums sharing the same title, picks the one with the
+    //      most tracks as the canonical album (winner).
+    //   2. Re-points all tracks from the other duplicates to the winner.
+    //   3. Deletes the now-empty duplicate album rows.
+    if current_version < 4 {
+        conn.execute_batch(
+            "
+            -- For every duplicate title group, find the album_id with the most tracks (winner).
+            -- Then reparent all tracks from other albums with the same title to the winner.
+            UPDATE tracks
+               SET album_id = (
+                       SELECT a2.id
+                         FROM albums a2
+                        WHERE a2.title = (SELECT title FROM albums WHERE id = tracks.album_id)
+                        ORDER BY (SELECT COUNT(*) FROM tracks t2 WHERE t2.album_id = a2.id) DESC,
+                                 a2.id ASC
+                        LIMIT 1
+                   )
+             WHERE album_id IS NOT NULL;
+
+            -- Delete albums that now have no tracks and are duplicates of another album
+            -- with the same title (i.e. they lost the winner election above).
+            DELETE FROM albums
+             WHERE id NOT IN (SELECT DISTINCT album_id FROM tracks WHERE album_id IS NOT NULL)
+               AND title IN (
+                       SELECT title FROM albums
+                       GROUP BY title HAVING COUNT(*) > 1
+                   );
+            ",
+        )?;
+        conn.execute(
+            "INSERT INTO schema_migrations (version) VALUES (?1)",
+            [4],
+        )?;
+    }
+
     Ok(())
 }

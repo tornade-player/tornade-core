@@ -253,14 +253,23 @@ impl LibraryService {
             artist_id
         };
 
-        // Get or create album if present
+        // Get or create album if present.
+        //
+        // When ALBUMARTIST is set, trust it and create/find the album by (title, artist).
+        // When ALBUMARTIST is absent (common in compilations/mixtapes), first look for any
+        // existing album with the same title and reuse it — this prevents creating a separate
+        // album entry for every featured artist on a "70s Mixtape" or "80's Greatest Hits".
         let album_id = if let Some(ref album_title) = metadata.album {
-            Some(queries::insert_album(
-                conn,
-                album_title,
-                album_artist_id,
-                metadata.year,
-            )?)
+            if metadata.album_artist.is_some() {
+                // ALBUMARTIST is set: use it, create per (title, artist) as normal
+                Some(queries::insert_album(conn, album_title, album_artist_id, metadata.year)?)
+            } else {
+                // No ALBUMARTIST: reuse any existing album with this title to avoid duplicates
+                match queries::find_album_by_title(conn, album_title) {
+                    Ok(Some(existing_id)) => Some(existing_id),
+                    _ => Some(queries::insert_album(conn, album_title, album_artist_id, metadata.year)?),
+                }
+            }
         } else {
             None
         };
