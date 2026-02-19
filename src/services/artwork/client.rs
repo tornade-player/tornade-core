@@ -84,6 +84,24 @@ fn clean_artist_for_search(artist: &str) -> &str {
     artist.split(',').next().unwrap_or(artist).trim()
 }
 
+/// All data returned when artwork is found: the image bytes plus release metadata
+/// scraped from MusicBrainz at the same time.
+#[derive(Debug)]
+pub struct ArtworkSearchResult {
+    pub image_data: Vec<u8>,
+    /// MusicBrainz release UUID — used as the artwork filename (`{mbid}.jpg`).
+    pub musicbrainz_id: String,
+    pub label: Option<String>,
+    pub country: Option<String>,
+    pub barcode: Option<String>,
+    /// Primary release-group type: "Album", "Single", "EP", "Compilation", etc.
+    pub album_type: Option<String>,
+    /// Release status: "Official", "Promotion", "Bootleg", etc.
+    pub release_status: Option<String>,
+    /// Release year as reported by MusicBrainz (may be more accurate than file tag).
+    pub mb_year: Option<u16>,
+}
+
 /// Rate limiter to respect API rate limits
 pub struct RateLimiter {
     min_interval_ms: u64,
@@ -154,6 +172,8 @@ impl MusicBrainzClient {
 
     /// Search for album artwork using a cascade of queries for better coverage.
     ///
+    /// Returns the image bytes **and** the MusicBrainz release metadata when found.
+    ///
     /// Strategy:
     ///   1. `release:"clean_title" AND artist:"primary_artist"` — most precise
     ///   2. `release:"clean_title"` — title-only (covers compilations / various-artist albums)
@@ -161,7 +181,7 @@ impl MusicBrainzClient {
     ///
     /// Title and artist are pre-cleaned: format tags stripped, disc numbers removed,
     /// and only the first artist is used for multi-artist strings.
-    pub async fn search_album_artwork(&self, album_title: &str, artist_name: &str) -> Result<Option<Vec<u8>>, String> {
+    pub async fn search_album_artwork(&self, album_title: &str, artist_name: &str) -> Result<Option<ArtworkSearchResult>, String> {
         let clean_title = clean_album_title(album_title);
         let clean_artist = clean_artist_for_search(artist_name);
 
@@ -173,7 +193,7 @@ impl MusicBrainzClient {
 
         for query in &queries {
             match self.try_search_query(query, artist_name, album_title).await? {
-                Some(bytes) => return Ok(Some(bytes)),
+                Some(result) => return Ok(Some(result)),
                 None => continue,
             }
         }
@@ -188,7 +208,7 @@ impl MusicBrainzClient {
         query: &str,
         artist_name: &str,
         album_title: &str,
-    ) -> Result<Option<Vec<u8>>, String> {
+    ) -> Result<Option<ArtworkSearchResult>, String> {
         let wait_time = {
             let mut limiter = self.rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
             limiter.calculate_wait()
@@ -255,7 +275,23 @@ impl MusicBrainzClient {
                                 album_title,
                                 bytes.len() / 1024
                             );
-                            return Ok(Some(bytes.to_vec()));
+                            // Extract label name from first label-info entry
+                            let label = release.label_info.as_ref()
+                                .and_then(|info| info.first())
+                                .and_then(|li| li.label.as_ref())
+                                .map(|l| l.name.clone());
+
+                            return Ok(Some(ArtworkSearchResult {
+                                image_data: bytes.to_vec(),
+                                musicbrainz_id: release.id.clone(),
+                                label,
+                                country: release.country.clone(),
+                                barcode: release.barcode.clone(),
+                                album_type: release.release_group.as_ref()
+                                    .and_then(|rg| rg.primary_type.clone()),
+                                release_status: release.status.clone(),
+                                mb_year: release.date.as_deref().and_then(year_from_mb_date),
+                            }));
                         }
                         Ok(bytes) => {
                             log::warn!(
@@ -342,8 +378,39 @@ struct MBSearchResult {
 #[derive(Debug, Deserialize)]
 struct MBRelease {
     id: String,
+    #[allow(dead_code)]
     title: String,
     score: Option<i32>,
+    /// Release date, e.g. "1999-11-16" or "1999"
+    date: Option<String>,
+    country: Option<String>,
+    barcode: Option<String>,
+    status: Option<String>,
+    #[serde(rename = "release-group")]
+    release_group: Option<MBReleaseGroup>,
+    #[serde(rename = "label-info")]
+    label_info: Option<Vec<MBLabelInfo>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MBReleaseGroup {
+    #[serde(rename = "primary-type")]
+    primary_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MBLabelInfo {
+    label: Option<MBLabel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MBLabel {
+    name: String,
+}
+
+/// Extract a 4-digit year from a MusicBrainz date string ("1999-11-16" → Some(1999)).
+fn year_from_mb_date(date: &str) -> Option<u16> {
+    date.get(..4)?.parse().ok()
 }
 
 #[derive(Debug, Deserialize)]
@@ -557,7 +624,10 @@ mod tests {
 
         let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri());
         let result = client.search_album_artwork("The Wall", "Pink Floyd").await.unwrap();
-        assert_eq!(result, Some(fake_image));
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert_eq!(r.image_data, fake_image);
+        assert_eq!(r.musicbrainz_id, "release-abc");
     }
 
     #[tokio::test]
@@ -639,7 +709,10 @@ mod tests {
 
         let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri());
         let result = client.search_album_artwork("Animals", "Pink Floyd").await.unwrap();
-        assert_eq!(result, Some(good_image));
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert_eq!(r.image_data, good_image);
+        assert_eq!(r.musicbrainz_id, "release-good");
     }
 
     // ── search_artist_photo ──────────────────────────────────────────────────

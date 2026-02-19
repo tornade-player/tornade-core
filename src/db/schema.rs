@@ -301,7 +301,7 @@ mod tests {
         let max_version: i32 = conn
             .query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(max_version, 2);
+        assert_eq!(max_version, 3);
 
         // Verify migration 2 columns exist
         let album_cols: Vec<String> = conn
@@ -314,6 +314,13 @@ mod tests {
         assert!(album_cols.contains(&"online_artwork_path".to_string()));
         assert!(album_cols.contains(&"artwork_source".to_string()));
         assert!(album_cols.contains(&"artwork_fetched_at".to_string()));
+        // Migration 3
+        assert!(album_cols.contains(&"musicbrainz_id".to_string()));
+        assert!(album_cols.contains(&"label".to_string()));
+        assert!(album_cols.contains(&"country".to_string()));
+        assert!(album_cols.contains(&"barcode".to_string()));
+        assert!(album_cols.contains(&"album_type".to_string()));
+        assert!(album_cols.contains(&"release_status".to_string()));
 
         let artist_cols: Vec<String> = conn
             .prepare("PRAGMA table_info(artists)")

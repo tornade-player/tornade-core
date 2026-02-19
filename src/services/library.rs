@@ -238,19 +238,27 @@ impl LibraryService {
             }
         };
 
-        // Get or create artist
+        // Get or create track artist
         let artist_id = queries::insert_artist(
             conn,
             &metadata.artist,
             None, // name_sort can be computed later
         )?;
 
+        // For album grouping, prefer ALBUMARTIST tag over track artist.
+        // This keeps multi-artist albums (e.g. "Dr. Dre feat. Snoop Dogg") together.
+        let album_artist_id = if let Some(ref album_artist) = metadata.album_artist {
+            queries::insert_artist(conn, album_artist, None)?
+        } else {
+            artist_id
+        };
+
         // Get or create album if present
         let album_id = if let Some(ref album_title) = metadata.album {
             Some(queries::insert_album(
                 conn,
                 album_title,
-                artist_id,
+                album_artist_id,
                 metadata.year,
             )?)
         } else {

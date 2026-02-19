@@ -47,5 +47,38 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    // Migration 3: Add MusicBrainz metadata fields + rename artwork files to MBID-based names.
+    //
+    // Artwork files previously used {album_db_id}.jpg naming which breaks across
+    // rescans and DB resets. New naming is {musicbrainz_release_id}.jpg.
+    //
+    // This migration:
+    //   1. Adds MB metadata columns to albums
+    //   2. Clears online_artwork_path so albums are re-scraped with correct naming
+    //   3. Sets a flag so ArtworkService deletes the old {integer}.jpg files on next run
+    if current_version < 3 {
+        conn.execute_batch(
+            "ALTER TABLE albums ADD COLUMN musicbrainz_id TEXT;
+             ALTER TABLE albums ADD COLUMN label TEXT;
+             ALTER TABLE albums ADD COLUMN country TEXT;
+             ALTER TABLE albums ADD COLUMN barcode TEXT;
+             ALTER TABLE albums ADD COLUMN album_type TEXT;
+             ALTER TABLE albums ADD COLUMN release_status TEXT;
+
+             UPDATE albums
+                SET online_artwork_path = NULL,
+                    artwork_source = NULL,
+                    artwork_fetched_at = NULL
+              WHERE online_artwork_path IS NOT NULL;
+
+             INSERT OR IGNORE INTO app_state (key, value)
+             VALUES ('pending_legacy_artwork_cleanup', 'true');",
+        )?;
+        conn.execute(
+            "INSERT INTO schema_migrations (version) VALUES (?1)",
+            [3],
+        )?;
+    }
+
     Ok(())
 }

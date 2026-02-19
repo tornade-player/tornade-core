@@ -106,7 +106,9 @@ pub fn insert_album(conn: &Connection, title: &str, artist_id: i64, year: Option
 
 pub fn get_album(conn: &Connection, id: i64) -> Result<Option<Album>> {
     conn.query_row(
-        "SELECT a.id, a.title, a.artist_id, ar.name as artist_name, a.year, a.rating, a.artwork_path, a.online_artwork_path, a.description
+        "SELECT a.id, a.title, a.artist_id, ar.name as artist_name, a.year, a.rating,
+                a.artwork_path, a.online_artwork_path, a.description,
+                a.musicbrainz_id, a.label, a.country, a.barcode, a.album_type, a.release_status
          FROM albums a
          JOIN artists ar ON ar.id = a.artist_id
          WHERE a.id = ?1",
@@ -122,6 +124,12 @@ pub fn get_album(conn: &Connection, id: i64) -> Result<Option<Album>> {
                 artwork_path: row.get::<_, Option<String>>(6)?.map(PathBuf::from),
                 online_artwork_path: row.get::<_, Option<String>>(7)?.map(PathBuf::from),
                 description: row.get(8)?,
+                musicbrainz_id: row.get(9)?,
+                label: row.get(10)?,
+                country: row.get(11)?,
+                barcode: row.get(12)?,
+                album_type: row.get(13)?,
+                release_status: row.get(14)?,
             })
         },
     ).optional()
@@ -357,7 +365,9 @@ pub fn list_albums(
     use rusqlite::types::Value;
 
     let mut sql = String::from(
-        "SELECT DISTINCT a.id, a.title, a.artist_id, ar.name as artist_name, a.year, a.rating, a.artwork_path, a.online_artwork_path, a.description
+        "SELECT DISTINCT a.id, a.title, a.artist_id, ar.name as artist_name, a.year, a.rating,
+                a.artwork_path, a.online_artwork_path, a.description,
+                a.musicbrainz_id, a.label, a.country, a.barcode, a.album_type, a.release_status
          FROM albums a
          JOIN artists ar ON ar.id = a.artist_id"
     );
@@ -406,6 +416,12 @@ pub fn list_albums(
             artwork_path: row.get::<_, Option<String>>(6)?.map(PathBuf::from),
             online_artwork_path: row.get::<_, Option<String>>(7)?.map(PathBuf::from),
             description: row.get(8)?,
+            musicbrainz_id: row.get(9)?,
+            label: row.get(10)?,
+            country: row.get(11)?,
+            barcode: row.get(12)?,
+            album_type: row.get(13)?,
+            release_status: row.get(14)?,
         })
     })?;
 
@@ -414,7 +430,9 @@ pub fn list_albums(
 
 pub fn get_artist_albums(conn: &Connection, artist_id: i64) -> Result<Vec<Album>> {
     let mut stmt = conn.prepare(
-        "SELECT a.id, a.title, a.artist_id, ar.name as artist_name, a.year, a.rating, a.artwork_path, a.online_artwork_path, a.description
+        "SELECT a.id, a.title, a.artist_id, ar.name as artist_name, a.year, a.rating,
+                a.artwork_path, a.online_artwork_path, a.description,
+                a.musicbrainz_id, a.label, a.country, a.barcode, a.album_type, a.release_status
          FROM albums a
          JOIN artists ar ON ar.id = a.artist_id
          WHERE a.artist_id = ?1
@@ -432,6 +450,12 @@ pub fn get_artist_albums(conn: &Connection, artist_id: i64) -> Result<Vec<Album>
             artwork_path: row.get::<_, Option<String>>(6)?.map(PathBuf::from),
             online_artwork_path: row.get::<_, Option<String>>(7)?.map(PathBuf::from),
             description: row.get(8)?,
+            musicbrainz_id: row.get(9)?,
+            label: row.get(10)?,
+            country: row.get(11)?,
+            barcode: row.get(12)?,
+            album_type: row.get(13)?,
+            release_status: row.get(14)?,
         })
     })?;
 
@@ -677,7 +701,9 @@ pub fn search_library(conn: &Connection, query: &str, limit: usize) -> Result<(V
     // Search albums
     let mut albums = Vec::new();
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT a.id, a.title, a.artist_id, ar.name as artist_name, a.year, a.rating, a.artwork_path, a.online_artwork_path, a.description
+        "SELECT DISTINCT a.id, a.title, a.artist_id, ar.name as artist_name, a.year, a.rating,
+                a.artwork_path, a.online_artwork_path, a.description,
+                a.musicbrainz_id, a.label, a.country, a.barcode, a.album_type, a.release_status
          FROM albums a
          JOIN artists ar ON ar.id = a.artist_id
          WHERE a.title LIKE ?1
@@ -696,6 +722,12 @@ pub fn search_library(conn: &Connection, query: &str, limit: usize) -> Result<(V
             artwork_path: row.get::<_, Option<String>>(6)?.map(PathBuf::from),
             online_artwork_path: row.get::<_, Option<String>>(7)?.map(PathBuf::from),
             description: row.get(8)?,
+            musicbrainz_id: row.get(9)?,
+            label: row.get(10)?,
+            country: row.get(11)?,
+            barcode: row.get(12)?,
+            album_type: row.get(13)?,
+            release_status: row.get(14)?,
         })
     })?;
 

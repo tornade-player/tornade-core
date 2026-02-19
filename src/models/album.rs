@@ -14,4 +14,11 @@ pub struct Album {
     pub artwork_path: Option<PathBuf>,
     pub online_artwork_path: Option<PathBuf>,
     pub description: Option<String>,
+    // MusicBrainz metadata (populated by artwork scraper)
+    pub musicbrainz_id: Option<String>,
+    pub label: Option<String>,
+    pub country: Option<String>,
+    pub barcode: Option<String>,
+    pub album_type: Option<String>,
+    pub release_status: Option<String>,
 }

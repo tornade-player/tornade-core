@@ -3,7 +3,7 @@
 mod client;
 mod matching;
 
-pub use client::{MusicBrainzClient, RateLimiter};
+pub use client::{MusicBrainzClient, RateLimiter, ArtworkSearchResult};
 pub use matching::fuzzy_match;
 
 use crate::db::DbPool;
@@ -100,6 +100,8 @@ impl ArtworkService {
     /// Fetch artwork for all albums (and optionally artists)
     pub async fn fetch_all_artwork(&self, fetch_artists: bool) -> Result<(), String> {
         self.reset_cancel();
+        // One-shot: delete legacy {album_db_id}.jpg files created before MBID-based naming
+        self.cleanup_legacy_artwork_if_needed();
         let start_time = Local::now();
 
         // Get albums without online artwork
@@ -244,7 +246,10 @@ impl ArtworkService {
         Ok(())
     }
 
-    /// Internal method to fetch album artwork
+    /// Internal method to fetch album artwork and MB metadata.
+    ///
+    /// The artwork file is saved as `{mbid}.jpg` so re-scraping the same release
+    /// never produces a duplicate file (stable across DB resets and rescans).
     async fn fetch_album_artwork_internal(
         &self,
         mb_client: &MusicBrainzClient,
@@ -253,21 +258,26 @@ impl ArtworkService {
         artist_name: &str,
     ) -> bool {
         match mb_client.search_album_artwork(album_title, artist_name).await {
-            Ok(Some(image_data)) => {
-                // Save image
-                let file_path = self.app_paths.album_artwork_dir().join(format!("{}.jpg", album_id));
-                if let Err(e) = std::fs::write(&file_path, &image_data) {
-                    log::error!("Failed to save album artwork for {}: {}", album_id, e);
+            Ok(Some(result)) => {
+                let file_path = self.app_paths.album_artwork_dir()
+                    .join(format!("{}.jpg", result.musicbrainz_id));
+
+                // Only write the file if it doesn't already exist (e.g. another album shares
+                // the same release, or the DB was reset but files were kept).
+                if !file_path.exists() {
+                    if let Err(e) = std::fs::write(&file_path, &result.image_data) {
+                        log::error!("Failed to save album artwork for {}: {}", album_id, e);
+                        return false;
+                    }
+                }
+
+                let path_str = file_path.to_string_lossy().to_string();
+                if let Err(e) = self.update_album_mb_info(album_id, &path_str, &result) {
+                    log::error!("Failed to update DB for album {}: {}", album_id, e);
                     return false;
                 }
 
-                // Update database
-                if let Err(e) = self.update_album_artwork(album_id, file_path.to_string_lossy().to_string()) {
-                    log::error!("Failed to update database for album {}: {}", album_id, e);
-                    return false;
-                }
-
-                log::info!("Fetched artwork for album {} - {}", artist_name, album_title);
+                log::info!("Fetched artwork for album {} - {} (mbid: {})", artist_name, album_title, result.musicbrainz_id);
                 true
             }
             Ok(None) => {
@@ -443,6 +453,90 @@ impl ArtworkService {
             .map_err(|e| e.to_string())?;
 
         Ok(result)
+    }
+
+    /// Write all MusicBrainz metadata + artwork path to the database.
+    fn update_album_mb_info(
+        &self,
+        album_id: i64,
+        artwork_path: &str,
+        result: &ArtworkSearchResult,
+    ) -> Result<(), String> {
+        let conn = self.pool.get().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE albums SET
+                online_artwork_path = ?1,
+                artwork_source      = 'musicbrainz',
+                artwork_fetched_at  = CURRENT_TIMESTAMP,
+                musicbrainz_id      = ?2,
+                label               = ?3,
+                country             = ?4,
+                barcode             = ?5,
+                album_type          = ?6,
+                release_status      = ?7
+             WHERE id = ?8",
+            rusqlite::params![
+                artwork_path,
+                result.musicbrainz_id,
+                result.label,
+                result.country,
+                result.barcode,
+                result.album_type,
+                result.release_status,
+                album_id,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// One-shot cleanup: delete artwork files using the old `{album_db_id}.jpg` naming
+    /// scheme (pure-digit filenames) that were created before MBID-based naming.
+    /// Triggered by the `pending_legacy_artwork_cleanup` flag set by migration 3.
+    fn cleanup_legacy_artwork_if_needed(&self) {
+        let conn = match self.pool.get() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+
+        let needs_cleanup: bool = conn
+            .query_row(
+                "SELECT value FROM app_state WHERE key = 'pending_legacy_artwork_cleanup'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .map(|v| v == "true")
+            .unwrap_or(false);
+
+        if !needs_cleanup {
+            return;
+        }
+
+        let artwork_dir = self.app_paths.album_artwork_dir();
+        if let Ok(entries) = std::fs::read_dir(&artwork_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |e| e == "jpg") {
+                    let is_legacy = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .map_or(false, |stem| stem.chars().all(|c| c.is_ascii_digit()));
+                    if is_legacy {
+                        if let Err(e) = std::fs::remove_file(&path) {
+                            log::warn!("Could not remove legacy artwork file {:?}: {}", path, e);
+                        } else {
+                            log::info!("Removed legacy artwork file: {:?}", path);
+                        }
+                    }
+                }
+            }
+        }
+
+        let _ = conn.execute(
+            "DELETE FROM app_state WHERE key = 'pending_legacy_artwork_cleanup'",
+            [],
+        );
+        log::info!("Legacy artwork cleanup complete");
     }
 
     /// Update album artwork in database

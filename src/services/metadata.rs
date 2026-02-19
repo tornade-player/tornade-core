@@ -5,7 +5,7 @@ use crate::utils::AppPaths;
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::picture::PictureType;
 use lofty::probe::Probe;
-use lofty::tag::Accessor;
+use lofty::tag::{Accessor, ItemKey};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -14,6 +14,9 @@ use std::time::Duration;
 pub struct TrackMetadata {
     pub title: String,
     pub artist: String,
+    /// The ALBUMARTIST tag, if present. Used to group tracks into albums
+    /// regardless of per-track featured artists.
+    pub album_artist: Option<String>,
     pub album: Option<String>,
     pub genre: Option<String>,
     pub track_number: Option<u32>,
@@ -65,6 +68,8 @@ impl MetadataService {
             .map(|s| s.to_string())
             .unwrap_or_else(|| "Unknown Artist".to_string());
 
+        let album_artist = tag.get_string(&ItemKey::AlbumArtist).map(|s| s.to_string());
+
         let album = tag.album().map(|s| s.to_string());
         let genre = tag.genre().map(|s| s.to_string());
         let track_number = tag.track().and_then(|n| n.try_into().ok());
@@ -80,6 +85,7 @@ impl MetadataService {
         Ok(TrackMetadata {
             title,
             artist,
+            album_artist,
             album,
             genre,
             track_number,
