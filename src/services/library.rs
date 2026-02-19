@@ -280,15 +280,27 @@ impl LibraryService {
         // When ALBUMARTIST is absent (common in compilations/mixtapes), first look for any
         // existing album with the same title and reuse it — this prevents creating a separate
         // album entry for every featured artist on a "70s Mixtape" or "80's Greatest Hits".
+        // If a second distinct artist is detected, the album is upgraded to "Various Artists"
+        // so it doesn't belong to a single (arbitrary) artist.
         let album_id = if let Some(ref album_title) = metadata.album {
             if metadata.album_artist.is_some() {
                 // ALBUMARTIST is set: use it, create per (title, artist) as normal
                 Some(queries::insert_album(conn, album_title, album_artist_id, metadata.year)?)
             } else {
                 // No ALBUMARTIST: reuse any existing album with this title to avoid duplicates
-                match queries::find_album_by_title(conn, album_title) {
-                    Ok(Some(existing_id)) => Some(existing_id),
-                    _ => Some(queries::insert_album(conn, album_title, album_artist_id, metadata.year)?),
+                match queries::find_album_by_title(conn, album_title)? {
+                    Some((existing_id, existing_artist_id)) => {
+                        // If a second distinct artist appears on this album, upgrade it to
+                        // "Various Artists" so no single real artist "owns" it
+                        if existing_artist_id != album_artist_id {
+                            let va_id = queries::insert_artist(conn, "Various Artists", None)?;
+                            if existing_artist_id != va_id {
+                                queries::update_album_artist(conn, existing_id, va_id)?;
+                            }
+                        }
+                        Some(existing_id)
+                    }
+                    None => Some(queries::insert_album(conn, album_title, album_artist_id, metadata.year)?),
                 }
             }
         } else {
@@ -930,6 +942,67 @@ mod tests {
         svc.rate_track(t1, 0).unwrap();
         let track = svc.get_track(t1).unwrap().unwrap();
         assert_eq!(track.rating, 0);
+    }
+
+    // ── Various Artists upgrade ───────────────────────────────────────────────
+
+    /// When two tracks with different artists share the same album title (no ALBUMARTIST),
+    /// the album should be reassigned to "Various Artists" on the second import.
+    #[test]
+    fn test_various_artists_upgrade_on_second_different_artist() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+
+        let source_id = queries::insert_source(&conn, "Test", crate::models::source::SourceType::Disk, None).unwrap();
+        let artist1 = queries::insert_artist(&conn, "Akhenaton", None).unwrap();
+        let artist2 = queries::insert_artist(&conn, "Kool Shen", None).unwrap();
+
+        // First track: album created and owned by artist1
+        let album_id = queries::insert_album(&conn, "70s Mixtape", artist1, None).unwrap();
+        queries::insert_track(&conn, "Track 1", Some(album_id), artist1, source_id,
+            &PathBuf::from("/music/t1.flac"), 200_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+
+        // Simulate second track import (different artist, same album title, no ALBUMARTIST)
+        let (existing_id, existing_artist_id) = queries::find_album_by_title(&conn, "70s Mixtape")
+            .unwrap().unwrap();
+        assert_eq!(existing_id, album_id);
+        assert_eq!(existing_artist_id, artist1);
+
+        // Upgrade to Various Artists
+        if existing_artist_id != artist2 {
+            let va_id = queries::insert_artist(&conn, "Various Artists", None).unwrap();
+            if existing_artist_id != va_id {
+                queries::update_album_artist(&conn, existing_id, va_id).unwrap();
+            }
+        }
+
+        // Album should now belong to "Various Artists"
+        let album = queries::get_album(&conn, album_id).unwrap().unwrap();
+        let va = queries::get_artist(&conn, album.artist_id).unwrap().unwrap();
+        assert_eq!(va.name, "Various Artists");
+    }
+
+    /// When two tracks share the same artist and same album, no upgrade should happen.
+    #[test]
+    fn test_no_various_artists_upgrade_when_same_artist() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+
+        let source_id = queries::insert_source(&conn, "Test", crate::models::source::SourceType::Disk, None).unwrap();
+        let artist_id = queries::insert_artist(&conn, "Akhenaton", None).unwrap();
+        let album_id = queries::insert_album(&conn, "Sol Invictus", artist_id, None).unwrap();
+        queries::insert_track(&conn, "Track 1", Some(album_id), artist_id, source_id,
+            &PathBuf::from("/music/t1.flac"), 200_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+
+        // Same artist on second track — no upgrade
+        let (existing_id, existing_artist_id) = queries::find_album_by_title(&conn, "Sol Invictus")
+            .unwrap().unwrap();
+
+        // artist IDs match → no upgrade
+        assert_eq!(existing_artist_id, artist_id);
+
+        let album = queries::get_album(&conn, existing_id).unwrap().unwrap();
+        assert_eq!(album.artist_id, artist_id, "album should still belong to Akhenaton");
     }
 
     #[test]

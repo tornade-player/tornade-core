@@ -194,5 +194,57 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    // Migration 6: Assign "Various Artists" to compilation albums.
+    //
+    // Albums that have tracks from more than one distinct artist (and no explicit
+    // ALBUMARTIST tag to override this) ended up arbitrarily owned by whichever
+    // artist was imported first. This migration corrects that by finding every album
+    // whose tracks span multiple distinct artists and re-pointing artist_id to a
+    // shared "Various Artists" row.
+    if current_version < 6 {
+        // Only act if there are multi-artist albums to fix
+        let has_multi_artist: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM (
+                    SELECT album_id FROM tracks
+                     WHERE album_id IS NOT NULL
+                     GROUP BY album_id
+                    HAVING COUNT(DISTINCT artist_id) > 1
+                 )",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+
+        if has_multi_artist {
+            // Find or create the "Various Artists" placeholder
+            conn.execute(
+                "INSERT OR IGNORE INTO artists (name) VALUES ('Various Artists')",
+                [],
+            )?;
+            let va_id: i64 = conn.query_row(
+                "SELECT id FROM artists WHERE name = 'Various Artists'",
+                [],
+                |r| r.get(0),
+            )?;
+
+            conn.execute(
+                "UPDATE albums SET artist_id = ?1
+                  WHERE id IN (
+                      SELECT album_id FROM tracks
+                       WHERE album_id IS NOT NULL
+                       GROUP BY album_id
+                      HAVING COUNT(DISTINCT artist_id) > 1
+                  )",
+                [va_id],
+            )?;
+        }
+
+        conn.execute(
+            "INSERT INTO schema_migrations (version) VALUES (?1)",
+            [6],
+        )?;
+    }
+
     Ok(())
 }

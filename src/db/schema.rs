@@ -301,7 +301,7 @@ mod tests {
         let max_version: i32 = conn
             .query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(max_version, 5);
+        assert_eq!(max_version, 6);
 
         // Verify migration 2 columns exist
         let album_cols: Vec<String> = conn
