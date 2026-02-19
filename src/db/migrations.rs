@@ -123,5 +123,76 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    // Migration 5: Collapse multi-artist ARTIST tag entries into their primary artist.
+    //
+    // Before this fix, a track tagged ARTIST="Akhenaton, Disiz la Peste" created a single
+    // artist row with that full string. We now keep only the primary artist (first element).
+    //
+    // Heuristic: split on ", " only when no resulting part contains " & " or " and ",
+    // which preserves legitimate band names like "Earth, Wind & Fire".
+    if current_version < 5 {
+        // Collect all artists whose name looks like a comma-separated list
+        let multi_artists: Vec<(i64, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT id, name FROM artists WHERE INSTR(name, ', ') > 0",
+            )?;
+            stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        for (multi_id, multi_name) in multi_artists {
+            let parts: Vec<&str> = multi_name.split(", ").collect();
+
+            // Skip if any part contains " & " or " and " → likely a band name
+            let is_list = parts.iter().all(|p| {
+                let lower = p.to_lowercase();
+                !lower.contains(" & ") && !lower.contains(" and ")
+            });
+            if !is_list {
+                continue;
+            }
+
+            let primary_name = parts[0].trim();
+
+            // Find or create the primary artist row
+            let primary_id: i64 = match conn.query_row(
+                "SELECT id FROM artists WHERE name = ?1",
+                [primary_name],
+                |r| r.get(0),
+            ) {
+                Ok(id) => id,
+                Err(_) => {
+                    conn.execute(
+                        "INSERT INTO artists (name) VALUES (?1)",
+                        [primary_name],
+                    )?;
+                    conn.last_insert_rowid()
+                }
+            };
+
+            if primary_id == multi_id {
+                continue;
+            }
+
+            // Remap tracks and albums that point to the multi-artist entry
+            conn.execute(
+                "UPDATE tracks SET artist_id = ?1 WHERE artist_id = ?2",
+                [primary_id, multi_id],
+            )?;
+            conn.execute(
+                "UPDATE albums SET artist_id = ?1 WHERE artist_id = ?2",
+                [primary_id, multi_id],
+            )?;
+
+            // Remove the now-orphaned multi-artist row
+            conn.execute("DELETE FROM artists WHERE id = ?1", [multi_id])?;
+        }
+
+        conn.execute(
+            "INSERT INTO schema_migrations (version) VALUES (?1)",
+            [5],
+        )?;
+    }
+
     Ok(())
 }
