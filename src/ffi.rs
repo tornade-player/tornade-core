@@ -140,6 +140,7 @@ mod ffi {
         fn get_genres() -> String;
         fn get_genre_tracks(genre_id: i64) -> String;
         fn get_genre_artists(genre_id: i64) -> String;
+        fn get_genre_albums(genre_id: i64) -> String;
         fn get_album_genres(album_id: i64) -> String;
         fn get_artist_genres(artist_id: i64) -> String;
 
@@ -1921,13 +1922,37 @@ fn get_genres() -> String {
 
             match crate::db::queries::list_genres_with_count(&conn) {
                 Ok(genres_with_counts) => {
+                    // Collect up to 4 representative album IDs per genre
+                    let mut genre_albums: std::collections::HashMap<i64, Vec<i64>> = std::collections::HashMap::new();
+                    if let Ok(mut stmt) = conn.prepare(
+                        "SELECT tg.genre_id, a.id
+                         FROM track_genres tg
+                         JOIN tracks t ON tg.track_id = t.id
+                         JOIN albums a ON t.album_id = a.id
+                         GROUP BY tg.genre_id, a.id
+                         ORDER BY tg.genre_id, a.id"
+                    ) {
+                        let _ = stmt.query_map([], |row| {
+                            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                        }).map(|rows| {
+                            for pair in rows.flatten() {
+                                let entry = genre_albums.entry(pair.0).or_default();
+                                if entry.len() < 4 {
+                                    entry.push(pair.1);
+                                }
+                            }
+                        });
+                    }
+
                     let genres: Vec<_> = genres_with_counts.into_iter()
                         .map(|(genre, track_count, album_count)| {
+                            let album_ids = genre_albums.get(&genre.id).cloned().unwrap_or_default();
                             serde_json::json!({
                                 "id": genre.id,
                                 "name": genre.name,
                                 "track_count": track_count,
-                                "album_count": album_count
+                                "album_count": album_count,
+                                "album_ids": album_ids
                             })
                         })
                         .collect();
@@ -2019,6 +2044,44 @@ fn get_genre_artists(genre_id: i64) -> String {
                     serde_json::json!({
                         "success": false,
                         "error": format!("Failed to get genre artists: {}", e)
+                    }).to_string()
+                }
+            }
+        }
+        Err(e) => {
+            serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
+            }).to_string()
+        }
+    }
+}
+
+fn get_genre_albums(genre_id: i64) -> String {
+    // Get all albums for a specific genre
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let conn = match pool.get() {
+                Ok(conn) => conn,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get database connection: {}", e)
+                    }).to_string();
+                }
+            };
+
+            match crate::db::queries::get_genre_albums(&conn, genre_id) {
+                Ok(albums) => {
+                    serde_json::json!({
+                        "success": true,
+                        "data": { "albums": albums }
+                    }).to_string()
+                }
+                Err(e) => {
+                    serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get genre albums: {}", e)
                     }).to_string()
                 }
             }

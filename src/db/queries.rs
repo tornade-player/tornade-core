@@ -504,6 +504,42 @@ pub fn list_artists(conn: &Connection) -> Result<Vec<Artist>> {
     artists.collect()
 }
 
+pub fn get_genre_albums(conn: &Connection, genre_id: i64) -> Result<Vec<Album>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT a.id, a.title, a.artist_id, ar.name as artist_name, a.year, a.rating,
+                a.artwork_path, a.online_artwork_path, a.description,
+                a.musicbrainz_id, a.label, a.country, a.barcode, a.album_type, a.release_status
+         FROM albums a
+         JOIN artists ar ON ar.id = a.artist_id
+         JOIN tracks t ON t.album_id = a.id
+         JOIN track_genres tg ON tg.track_id = t.id
+         WHERE tg.genre_id = ?1
+         ORDER BY a.year DESC, a.title"
+    )?;
+
+    let albums = stmt.query_map(params![genre_id], |row| {
+        Ok(Album {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            artist_id: row.get(2)?,
+            artist_name: row.get(3)?,
+            year: row.get(4)?,
+            rating: row.get(5)?,
+            artwork_path: row.get::<_, Option<String>>(6)?.map(PathBuf::from),
+            online_artwork_path: row.get::<_, Option<String>>(7)?.map(PathBuf::from),
+            description: row.get(8)?,
+            musicbrainz_id: row.get(9)?,
+            label: row.get(10)?,
+            country: row.get(11)?,
+            barcode: row.get(12)?,
+            album_type: row.get(13)?,
+            release_status: row.get(14)?,
+        })
+    })?;
+
+    albums.collect()
+}
+
 pub fn get_genre_artists(conn: &Connection, genre_id: i64) -> Result<Vec<Artist>> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT a.id, a.name, a.name_sort, a.bio

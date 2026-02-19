@@ -3,7 +3,7 @@
 mod client;
 mod matching;
 
-pub use client::{MusicBrainzClient, RateLimiter, ArtworkSearchResult};
+pub use client::{MusicBrainzClient, RateLimiter, ArtworkSearchResult, ArtistSearchResult};
 pub use matching::fuzzy_match;
 
 use crate::db::DbPool;
@@ -291,7 +291,7 @@ impl ArtworkService {
         }
     }
 
-    /// Internal method to fetch artist photo
+    /// Internal method to fetch artist photo and metadata
     async fn fetch_artist_photo_internal(
         &self,
         mb_client: &MusicBrainzClient,
@@ -299,32 +299,55 @@ impl ArtworkService {
         artist_name: &str,
     ) -> bool {
         match mb_client.search_artist_photo(artist_name).await {
-            Ok(Some(image_data)) => {
-                // Save image
-                let file_path = self.app_paths.artist_photo_dir().join(format!("{}.jpg", artist_id));
-                if let Err(e) = std::fs::write(&file_path, &image_data) {
-                    log::error!("Failed to save artist photo for {}: {}", artist_id, e);
-                    return false;
+            Ok(Some(result)) => {
+                // Save photo if available
+                if let Some(ref image_data) = result.image_data {
+                    let file_path = self.app_paths.artist_photo_dir().join(format!("{}.jpg", artist_id));
+                    if let Err(e) = std::fs::write(&file_path, image_data) {
+                        log::error!("Failed to save artist photo for {}: {}", artist_id, e);
+                        // Continue to save metadata even if image write fails
+                    } else if let Err(e) = self.update_artist_photo(artist_id, file_path.to_string_lossy().to_string()) {
+                        log::error!("Failed to update photo path for artist {}: {}", artist_id, e);
+                    }
                 }
 
-                // Update database
-                if let Err(e) = self.update_artist_photo(artist_id, file_path.to_string_lossy().to_string()) {
-                    log::error!("Failed to update database for artist {}: {}", artist_id, e);
-                    return false;
+                // Always save metadata (also sets photo_fetched_at so we don't retry)
+                if let Err(e) = self.update_artist_metadata(artist_id, &result) {
+                    log::error!("Failed to update metadata for artist {}: {}", artist_id, e);
                 }
 
-                log::info!("Fetched photo for artist {}", artist_name);
-                true
+                if result.image_data.is_some() {
+                    log::info!("Fetched photo + metadata for artist {}", artist_name);
+                } else {
+                    log::info!("Fetched metadata (no photo) for artist {}", artist_name);
+                }
+                true  // success = we found the artist (metadata is the value)
             }
             Ok(None) => {
-                log::warn!("No photo found for artist {}", artist_name);
+                // Artist not in TheAudioDB — mark as attempted so we don't retry on every run
+                log::warn!("Artist not found in TheAudioDB: {}", artist_name);
+                let _ = self.mark_artist_fetch_attempted(artist_id);
                 false
             }
             Err(e) => {
-                log::error!("Error fetching photo for artist {}: {}", artist_name, e);
+                // Network/parse error — also mark as attempted to avoid hammering the API
+                log::error!("Error fetching data for artist {}: {}", artist_name, e);
+                let _ = self.mark_artist_fetch_attempted(artist_id);
                 false
             }
         }
+    }
+
+    /// Mark an artist as "fetch attempted" without saving any data.
+    /// Used when the artist is not found or an error occurs, to prevent endless retries.
+    fn mark_artist_fetch_attempted(&self, artist_id: i64) -> Result<(), String> {
+        let conn = self.pool.get().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE artists SET photo_fetched_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            [artist_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     /// Get albums without online artwork
@@ -355,14 +378,14 @@ impl ArtworkService {
         Ok(albums)
     }
 
-    /// Get artists without photos
+    /// Get artists without photos (i.e. not yet attempted)
     fn get_artists_without_photos(&self) -> Result<Vec<ArtistInfo>, String> {
         let conn = self.pool.get().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
                 "SELECT id, name
                  FROM artists
-                 WHERE photo_path IS NULL
+                 WHERE photo_fetched_at IS NULL
                  ORDER BY name",
             )
             .map_err(|e| e.to_string())?;
@@ -397,7 +420,7 @@ impl ArtworkService {
         matches!(result, Ok(Some(_)))
     }
 
-    /// Check if an artist already has a photo
+    /// Check if an artist has already been attempted (photo_fetched_at is set)
     fn has_artist_photo(&self, artist_id: i64) -> bool {
         let conn = match self.pool.get() {
             Ok(conn) => conn,
@@ -405,7 +428,7 @@ impl ArtworkService {
         };
 
         let result: Result<Option<String>, _> = conn.query_row(
-            "SELECT photo_path FROM artists WHERE id = ?1",
+            "SELECT photo_fetched_at FROM artists WHERE id = ?1",
             [artist_id],
             |row| row.get(0),
         );
@@ -556,6 +579,43 @@ impl ArtworkService {
         conn.execute(
             "UPDATE artists SET photo_path = ?1, photo_source = 'theaudiodb', photo_fetched_at = CURRENT_TIMESTAMP WHERE id = ?2",
             rusqlite::params![path, artist_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Update rich artist metadata from TheAudioDB, using COALESCE to avoid overwriting existing data.
+    fn update_artist_metadata(&self, artist_id: i64, result: &crate::services::artwork::client::ArtistSearchResult) -> Result<(), String> {
+        let conn = self.pool.get().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE artists SET
+                bio              = COALESCE(?1, bio),
+                country          = COALESCE(?2, country),
+                genre            = COALESCE(?3, genre),
+                style            = COALESCE(?4, style),
+                mood             = COALESCE(?5, mood),
+                formed_year      = COALESCE(?6, formed_year),
+                born_year        = COALESCE(?7, born_year),
+                died_year        = COALESCE(?8, died_year),
+                disbanded        = COALESCE(?9, disbanded),
+                musicbrainz_id   = COALESCE(?10, musicbrainz_id),
+                theaudiodb_id    = COALESCE(?11, theaudiodb_id),
+                photo_fetched_at = CURRENT_TIMESTAMP
+             WHERE id = ?12",
+            rusqlite::params![
+                result.bio,
+                result.country,
+                result.genre,
+                result.style,
+                result.mood,
+                result.formed_year,
+                result.born_year,
+                result.died_year,
+                result.disbanded,
+                result.musicbrainz_id,
+                result.theaudiodb_id,
+                artist_id,
+            ],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -863,5 +923,26 @@ mod tests {
         let (env, _, _) = setup_artwork_env();
         let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
         assert!(!service.has_artist_photo(9999));
+    }
+
+    #[test]
+    fn test_mark_artist_fetch_attempted_excludes_from_future_runs() {
+        let (env, artist_id, _album_id) = setup_artwork_env();
+        let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
+
+        // Before: artist should appear in "without photos" list
+        assert_eq!(service.get_artists_without_photos().unwrap().len(), 1);
+
+        // Mark as attempted (not found in TADB, no photo saved)
+        service.mark_artist_fetch_attempted(artist_id).unwrap();
+
+        // After: artist should no longer appear (photo_fetched_at is set)
+        assert_eq!(service.get_artists_without_photos().unwrap().len(), 0);
+        // But photo_path should still be NULL
+        let conn = env.pool.get().unwrap();
+        let photo_path: Option<String> = conn
+            .query_row("SELECT photo_path FROM artists WHERE id = ?1", [artist_id], |r| r.get(0))
+            .unwrap();
+        assert!(photo_path.is_none());
     }
 }

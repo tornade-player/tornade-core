@@ -246,5 +246,22 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    // Migration 7: Add rich artist metadata from TheAudioDB
+    if current_version < 7 {
+        conn.execute_batch(
+            "ALTER TABLE artists ADD COLUMN country TEXT;
+             ALTER TABLE artists ADD COLUMN genre TEXT;
+             ALTER TABLE artists ADD COLUMN style TEXT;
+             ALTER TABLE artists ADD COLUMN mood TEXT;
+             ALTER TABLE artists ADD COLUMN formed_year INTEGER;
+             ALTER TABLE artists ADD COLUMN born_year INTEGER;
+             ALTER TABLE artists ADD COLUMN died_year INTEGER;
+             ALTER TABLE artists ADD COLUMN disbanded TEXT;
+             ALTER TABLE artists ADD COLUMN musicbrainz_id TEXT;
+             ALTER TABLE artists ADD COLUMN theaudiodb_id TEXT;",
+        )?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (?1)", [7])?;
+    }
+
     Ok(())
 }

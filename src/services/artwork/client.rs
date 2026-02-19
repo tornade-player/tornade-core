@@ -120,6 +120,24 @@ pub struct ArtworkSearchResult {
     pub mb_year: Option<u16>,
 }
 
+/// All data returned when an artist is found in TheAudioDB: image bytes plus rich metadata.
+#[derive(Debug)]
+pub struct ArtistSearchResult {
+    /// Raw JPEG bytes of the artist thumbnail, if one was found
+    pub image_data: Option<Vec<u8>>,
+    pub bio: Option<String>,
+    pub country: Option<String>,
+    pub genre: Option<String>,
+    pub style: Option<String>,
+    pub mood: Option<String>,
+    pub formed_year: Option<i64>,
+    pub born_year: Option<i64>,
+    pub died_year: Option<i64>,
+    pub disbanded: Option<String>,
+    pub musicbrainz_id: Option<String>,
+    pub theaudiodb_id: Option<String>,
+}
+
 /// Rate limiter to respect API rate limits
 pub struct RateLimiter {
     min_interval_ms: u64,
@@ -346,11 +364,12 @@ impl MusicBrainzClient {
         Ok(None)
     }
 
-    /// Search for an artist photo via TheAudioDB.
+    /// Search for an artist photo and rich metadata via TheAudioDB.
     ///
     /// Uses the free public API (key `2`) — no registration required.
-    /// Returns the raw image bytes of the artist thumbnail when found.
-    pub async fn search_artist_photo(&self, artist_name: &str) -> Result<Option<Vec<u8>>, String> {
+    /// Returns an `ArtistSearchResult` with all available metadata plus image bytes when found.
+    /// Returns `Ok(None)` only if the artist was not found in TheAudioDB at all.
+    pub async fn search_artist_photo(&self, artist_name: &str) -> Result<Option<ArtistSearchResult>, String> {
         let wait_time = {
             let mut limiter = self.rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
             limiter.calculate_wait()
@@ -365,7 +384,7 @@ impl MusicBrainzClient {
             urlencoding::encode(artist_name)
         );
 
-        log::debug!("Searching TheAudioDB for artist photo: {}", url);
+        log::debug!("Searching TheAudioDB for artist: {}", url);
 
         let response = self.http_client
             .get(&url)
@@ -383,60 +402,77 @@ impl MusicBrainzClient {
             .map_err(|e| format!("Failed to parse TheAudioDB response: {}", e))?;
 
         // TheAudioDB returns `"artists": null` when nothing is found
-        let thumb_url = search_result.artists
+        let Some(artist) = search_result.artists
             .as_ref()
             .and_then(|artists| artists.first())
-            .and_then(|a| a.artist_thumb.as_ref())
-            .cloned();
-
-        let Some(thumb_url) = thumb_url else {
-            log::debug!("No artist photo found in TheAudioDB for: {}", artist_name);
+        else {
+            log::debug!("Artist not found in TheAudioDB: {}", artist_name);
             return Ok(None);
         };
 
-        // Download the image
-        let wait_time = {
-            let mut limiter = self.rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
-            limiter.calculate_wait()
+        // Build result struct from all available metadata
+        let mut result = ArtistSearchResult {
+            image_data: None,
+            bio: artist.biography_en.clone(),
+            country: artist.country.clone(),
+            genre: artist.genre.clone(),
+            style: artist.style.clone(),
+            mood: artist.mood.clone(),
+            formed_year: artist.formed_year.as_deref().and_then(|s| s.parse::<i64>().ok()),
+            born_year: artist.born_year.as_deref().and_then(|s| s.parse::<i64>().ok()),
+            died_year: artist.died_year.as_deref().and_then(|s| s.parse::<i64>().ok()),
+            disbanded: artist.disbanded.clone(),
+            musicbrainz_id: artist.musicbrainz_id.clone(),
+            theaudiodb_id: artist.id.clone(),
         };
-        if let Some(duration) = wait_time {
-            tokio::time::sleep(duration).await;
+
+        // Download the thumbnail image if available
+        if let Some(ref thumb_url) = artist.artist_thumb.clone() {
+            let wait_time = {
+                let mut limiter = self.rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
+                limiter.calculate_wait()
+            };
+            if let Some(duration) = wait_time {
+                tokio::time::sleep(duration).await;
+            }
+
+            log::debug!("Downloading artist photo: {}", thumb_url);
+
+            match self.http_client.get(thumb_url).send().await {
+                Ok(img_response) if img_response.status().is_success() => {
+                    const MAX_IMAGE_SIZE: usize = 5 * 1024 * 1024;
+                    match img_response.bytes().await {
+                        Ok(bytes) if bytes.len() <= MAX_IMAGE_SIZE => {
+                            log::info!("Found artist photo for {} ({} KB)", artist_name, bytes.len() / 1024);
+                            result.image_data = Some(bytes.to_vec());
+                        }
+                        Ok(bytes) => {
+                            log::warn!(
+                                "Artist photo too large ({} MB) for {}, skipping image",
+                                bytes.len() / 1024 / 1024,
+                                artist_name
+                            );
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to read artist photo bytes for {}: {}", artist_name, e);
+                        }
+                    }
+                }
+                Ok(img_response) => {
+                    log::debug!(
+                        "Artist photo download returned {} for {}",
+                        img_response.status(),
+                        artist_name
+                    );
+                }
+                Err(e) => {
+                    log::warn!("Artist photo download failed for {}: {}", artist_name, e);
+                }
+            }
         }
 
-        log::debug!("Downloading artist photo: {}", thumb_url);
-
-        let img_response = self.http_client
-            .get(&thumb_url)
-            .send()
-            .await
-            .map_err(|e| format!("Artist photo download failed: {}", e))?;
-
-        if !img_response.status().is_success() {
-            log::debug!(
-                "Artist photo download returned {} for {}",
-                img_response.status(),
-                artist_name
-            );
-            return Ok(None);
-        }
-
-        const MAX_IMAGE_SIZE: usize = 5 * 1024 * 1024;
-        let bytes = img_response
-            .bytes()
-            .await
-            .map_err(|e| format!("Failed to read artist photo bytes: {}", e))?;
-
-        if bytes.len() > MAX_IMAGE_SIZE {
-            log::warn!(
-                "Artist photo too large ({} MB) for {}, skipping",
-                bytes.len() / 1024 / 1024,
-                artist_name
-            );
-            return Ok(None);
-        }
-
-        log::info!("Found artist photo for {} ({} KB)", artist_name, bytes.len() / 1024);
-        Ok(Some(bytes.to_vec()))
+        // Return the result whether or not we got a photo — the metadata is always valuable
+        Ok(Some(result))
     }
 }
 
@@ -491,9 +527,32 @@ struct TADBSearchResult {
 
 #[derive(Debug, Deserialize)]
 struct TADBArtist {
+    #[serde(rename = "idArtist")]
+    id: Option<String>,
     /// URL of the artist thumbnail image.
     #[serde(rename = "strArtistThumb")]
     artist_thumb: Option<String>,
+    #[serde(rename = "strBiographyEN")]
+    biography_en: Option<String>,
+    #[serde(rename = "strCountry")]
+    country: Option<String>,
+    #[serde(rename = "strGenre")]
+    genre: Option<String>,
+    #[serde(rename = "strStyle")]
+    style: Option<String>,
+    #[serde(rename = "strMood")]
+    mood: Option<String>,
+    /// TheAudioDB returns years as strings (e.g. "1970") or null
+    #[serde(rename = "intFormedYear")]
+    formed_year: Option<String>,
+    #[serde(rename = "intBornYear")]
+    born_year: Option<String>,
+    #[serde(rename = "intDiedYear")]
+    died_year: Option<String>,
+    #[serde(rename = "strDisbanded")]
+    disbanded: Option<String>,
+    #[serde(rename = "strMusicBrainzID")]
+    musicbrainz_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -692,9 +751,41 @@ mod tests {
         }
         let items: Vec<serde_json::Value> = thumbs
             .iter()
-            .map(|thumb| serde_json::json!({ "strArtistThumb": thumb }))
+            .map(|thumb| serde_json::json!({
+                "idArtist": "111258",
+                "strArtistThumb": thumb,
+                "strBiographyEN": null,
+                "strCountry": null,
+                "strGenre": null,
+                "strStyle": null,
+                "strMood": null,
+                "intFormedYear": null,
+                "intBornYear": null,
+                "intDiedYear": null,
+                "strDisbanded": null,
+                "strMusicBrainzID": null
+            }))
             .collect();
         serde_json::json!({ "artists": items })
+    }
+
+    fn tadb_artists_json_with_metadata(thumb: &str) -> serde_json::Value {
+        serde_json::json!({
+            "artists": [{
+                "idArtist": "111258",
+                "strArtistThumb": thumb,
+                "strBiographyEN": "ABBA was a Swedish pop/rock group...",
+                "strCountry": "Stockholm, Sweden",
+                "strGenre": "Pop",
+                "strStyle": "Rock/Pop",
+                "strMood": "Cheerful",
+                "intFormedYear": "1970",
+                "intBornYear": null,
+                "intDiedYear": null,
+                "strDisbanded": null,
+                "strMusicBrainzID": "d87e52c5-bb8d-4da8-b941-9f4928627dc8"
+            }]
+        })
     }
 
     // ── search_album_artwork ─────────────────────────────────────────────────
@@ -864,11 +955,13 @@ mod tests {
         let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
         let result = client.search_artist_photo("Pink Floyd").await.unwrap();
         assert!(result.is_some());
-        assert_eq!(result.unwrap(), fake_photo);
+        assert_eq!(result.unwrap().image_data, Some(fake_photo));
     }
 
     #[tokio::test]
-    async fn test_search_artist_photo_thumb_404_returns_none() {
+    async fn test_search_artist_photo_thumb_404_returns_some_without_image() {
+        // When the artist is found but the thumbnail URL returns 404,
+        // we still return Some(result) with the metadata (image_data = None).
         let mock_server = MockServer::start().await;
         let photo_path = "/images/media/artist/thumb/artist.jpg";
 
@@ -888,7 +981,47 @@ mod tests {
 
         let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
         let result = client.search_artist_photo("Some Artist").await.unwrap();
-        assert!(result.is_none());
+        // Artist was found — result should be Some, but image_data should be None
+        assert!(result.is_some());
+        assert!(result.unwrap().image_data.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_search_artist_photo_captures_metadata() {
+        let mock_server = MockServer::start().await;
+        let photo_path = "/images/media/artist/thumb/abba.jpg";
+        let fake_photo = b"FAKE_ABBA_PHOTO".to_vec();
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/json/2/search.php"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                tadb_artists_json_with_metadata(&format!("{}{}", mock_server.uri(), photo_path))
+            ))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path(photo_path))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(fake_photo.clone()))
+            .mount(&mock_server)
+            .await;
+
+        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
+        let result = client.search_artist_photo("ABBA").await.unwrap();
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert_eq!(r.image_data, Some(fake_photo));
+        assert_eq!(r.bio.as_deref(), Some("ABBA was a Swedish pop/rock group..."));
+        assert_eq!(r.country.as_deref(), Some("Stockholm, Sweden"));
+        assert_eq!(r.genre.as_deref(), Some("Pop"));
+        assert_eq!(r.style.as_deref(), Some("Rock/Pop"));
+        assert_eq!(r.mood.as_deref(), Some("Cheerful"));
+        assert_eq!(r.formed_year, Some(1970));
+        assert_eq!(r.born_year, None);
+        assert_eq!(r.died_year, None);
+        assert_eq!(r.disbanded, None);
+        assert_eq!(r.musicbrainz_id.as_deref(), Some("d87e52c5-bb8d-4da8-b941-9f4928627dc8"));
+        assert_eq!(r.theaudiodb_id.as_deref(), Some("111258"));
     }
 
     #[tokio::test]
@@ -919,5 +1052,35 @@ mod tests {
         let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
         let result = client.search_artist_photo("Pink Floyd").await;
         assert!(result.is_err());
+    }
+
+    /// Integration test — calls the real TheAudioDB API.
+    /// Run with: cargo test test_real_theaudiodb -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn test_real_theaudiodb_abba() {
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .user_agent("Tornade-Music-Player/1.0 ( contact@tornade.app )")
+            .build()
+            .unwrap();
+        let rate_limiter = Arc::new(Mutex::new(RateLimiter::new(0)));
+        let client = MusicBrainzClient::new(http_client, rate_limiter);
+
+        let result = client.search_artist_photo("ABBA").await;
+        if let Ok(Some(ref a)) = result {
+            println!("image: {:?}", a.image_data.as_ref().map(|d| format!("{} bytes", d.len())));
+            println!("country: {:?}", a.country);
+            println!("genre: {:?}", a.genre);
+            println!("bio: {:?}", a.bio.as_deref().map(|s| &s[..50.min(s.len())]));
+        } else {
+            println!("Result: {:?}", result);
+        }
+        assert!(result.is_ok(), "API call failed: {:?}", result.err());
+        let result = result.unwrap();
+        assert!(result.is_some(), "ABBA should be found in TheAudioDB");
+        let data = result.unwrap();
+        assert!(data.country.is_some(), "ABBA should have a country");
+        assert!(data.genre.is_some(), "ABBA should have a genre");
     }
 }
