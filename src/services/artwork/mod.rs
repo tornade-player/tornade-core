@@ -554,7 +554,7 @@ impl ArtworkService {
     fn update_artist_photo(&self, artist_id: i64, path: String) -> Result<(), String> {
         let conn = self.pool.get().map_err(|e| e.to_string())?;
         conn.execute(
-            "UPDATE artists SET photo_path = ?1, photo_source = 'musicbrainz', photo_fetched_at = CURRENT_TIMESTAMP WHERE id = ?2",
+            "UPDATE artists SET photo_path = ?1, photo_source = 'theaudiodb', photo_fetched_at = CURRENT_TIMESTAMP WHERE id = ?2",
             rusqlite::params![path, artist_id],
         )
         .map_err(|e| e.to_string())?;
@@ -727,7 +727,7 @@ mod tests {
         let source: String = conn
             .query_row("SELECT photo_source FROM artists WHERE id = ?1", [artist_id], |r| r.get(0))
             .unwrap();
-        assert_eq!(source, "musicbrainz");
+        assert_eq!(source, "theaudiodb");
     }
 
     // ── get_progress / cancel_fetch ──────────────────────────────────────────

@@ -154,12 +154,13 @@ impl RateLimiter {
     }
 }
 
-/// MusicBrainz API client
+/// MusicBrainz API client (also handles TheAudioDB for artist photos)
 pub struct MusicBrainzClient {
     http_client: reqwest::Client,
     rate_limiter: Arc<Mutex<RateLimiter>>,
     musicbrainz_base_url: String,
     coverart_base_url: String,
+    theaudiodb_base_url: String,
 }
 
 impl MusicBrainzClient {
@@ -169,6 +170,7 @@ impl MusicBrainzClient {
             rate_limiter,
             musicbrainz_base_url: "https://musicbrainz.org".to_string(),
             coverart_base_url: "https://coverartarchive.org".to_string(),
+            theaudiodb_base_url: "https://www.theaudiodb.com".to_string(),
         }
     }
 
@@ -179,12 +181,14 @@ impl MusicBrainzClient {
         rate_limiter: Arc<Mutex<RateLimiter>>,
         musicbrainz_base_url: &str,
         coverart_base_url: &str,
+        theaudiodb_base_url: &str,
     ) -> Self {
         Self {
             http_client,
             rate_limiter,
             musicbrainz_base_url: musicbrainz_base_url.to_string(),
             coverart_base_url: coverart_base_url.to_string(),
+            theaudiodb_base_url: theaudiodb_base_url.to_string(),
         }
     }
 
@@ -342,9 +346,11 @@ impl MusicBrainzClient {
         Ok(None)
     }
 
-    /// Search for artist photo
+    /// Search for an artist photo via TheAudioDB.
+    ///
+    /// Uses the free public API (key `2`) — no registration required.
+    /// Returns the raw image bytes of the artist thumbnail when found.
     pub async fn search_artist_photo(&self, artist_name: &str) -> Result<Option<Vec<u8>>, String> {
-        // Wait for rate limit
         let wait_time = {
             let mut limiter = self.rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
             limiter.calculate_wait()
@@ -353,40 +359,84 @@ impl MusicBrainzClient {
             tokio::time::sleep(duration).await;
         }
 
-        // Search for artist
-        let query = format!("artist:\"{}\"", artist_name);
         let url = format!(
-            "{}/ws/2/artist/?query={}&fmt=json&limit=3",
-            self.musicbrainz_base_url,
-            urlencoding::encode(&query)
+            "{}/api/v1/json/2/search.php?s={}",
+            self.theaudiodb_base_url,
+            urlencoding::encode(artist_name)
         );
 
-        log::debug!("Searching MusicBrainz for artist: {}", url);
+        log::debug!("Searching TheAudioDB for artist photo: {}", url);
 
         let response = self.http_client
             .get(&url)
-            .header("User-Agent", "Tornade-Music-Player/1.0 ( thomas@example.com )")
             .send()
             .await
-            .map_err(|e| format!("MusicBrainz artist search failed: {}", e))?;
+            .map_err(|e| format!("TheAudioDB search failed: {}", e))?;
 
         if !response.status().is_success() {
-            return Err(format!("MusicBrainz returned status: {}", response.status()));
+            return Err(format!("TheAudioDB returned status: {}", response.status()));
         }
 
-        let search_result: MBArtistSearchResult = response
+        let search_result: TADBSearchResult = response
             .json()
             .await
-            .map_err(|e| format!("Failed to parse MusicBrainz response: {}", e))?;
+            .map_err(|e| format!("Failed to parse TheAudioDB response: {}", e))?;
 
-        if search_result.artists.is_empty() {
+        // TheAudioDB returns `"artists": null` when nothing is found
+        let thumb_url = search_result.artists
+            .as_ref()
+            .and_then(|artists| artists.first())
+            .and_then(|a| a.artist_thumb.as_ref())
+            .cloned();
+
+        let Some(thumb_url) = thumb_url else {
+            log::debug!("No artist photo found in TheAudioDB for: {}", artist_name);
+            return Ok(None);
+        };
+
+        // Download the image
+        let wait_time = {
+            let mut limiter = self.rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
+            limiter.calculate_wait()
+        };
+        if let Some(duration) = wait_time {
+            tokio::time::sleep(duration).await;
+        }
+
+        log::debug!("Downloading artist photo: {}", thumb_url);
+
+        let img_response = self.http_client
+            .get(&thumb_url)
+            .send()
+            .await
+            .map_err(|e| format!("Artist photo download failed: {}", e))?;
+
+        if !img_response.status().is_success() {
+            log::debug!(
+                "Artist photo download returned {} for {}",
+                img_response.status(),
+                artist_name
+            );
             return Ok(None);
         }
 
-        // MusicBrainz doesn't provide artist photos directly
-        // For v1, we'll just return None. v2 can add Spotify/Last.fm integration
-        log::debug!("Found artist {} in MusicBrainz, but artist photos not implemented yet", artist_name);
-        Ok(None)
+        const MAX_IMAGE_SIZE: usize = 5 * 1024 * 1024;
+        let bytes = img_response
+            .bytes()
+            .await
+            .map_err(|e| format!("Failed to read artist photo bytes: {}", e))?;
+
+        if bytes.len() > MAX_IMAGE_SIZE {
+            log::warn!(
+                "Artist photo too large ({} MB) for {}, skipping",
+                bytes.len() / 1024 / 1024,
+                artist_name
+            );
+            return Ok(None);
+        }
+
+        log::info!("Found artist photo for {} ({} KB)", artist_name, bytes.len() / 1024);
+        Ok(Some(bytes.to_vec()))
     }
 }
 
@@ -433,16 +483,17 @@ fn year_from_mb_date(date: &str) -> Option<u16> {
     date.get(..4)?.parse().ok()
 }
 
+/// TheAudioDB search response — `artists` is `null` when nothing is found.
 #[derive(Debug, Deserialize)]
-struct MBArtistSearchResult {
-    artists: Vec<MBArtist>,
+struct TADBSearchResult {
+    artists: Option<Vec<TADBArtist>>,
 }
 
 #[derive(Debug, Deserialize)]
-struct MBArtist {
-    id: String,
-    name: String,
-    score: Option<i32>,
+struct TADBArtist {
+    /// URL of the artist thumbnail image.
+    #[serde(rename = "strArtistThumb")]
+    artist_thumb: Option<String>,
 }
 
 #[cfg(test)]
@@ -617,12 +668,13 @@ mod tests {
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    fn no_rate_limit_client(mb_url: &str, caa_url: &str) -> MusicBrainzClient {
+    fn no_rate_limit_client(mb_url: &str, caa_url: &str, tadb_url: &str) -> MusicBrainzClient {
         MusicBrainzClient::with_base_urls(
             reqwest::Client::new(),
             Arc::new(Mutex::new(RateLimiter::new(0))), // no delay in tests
             mb_url,
             caa_url,
+            tadb_url,
         )
     }
 
@@ -634,10 +686,13 @@ mod tests {
         serde_json::json!({ "releases": items })
     }
 
-    fn mb_artists_json(artists: &[(&str, &str)]) -> serde_json::Value {
-        let items: Vec<serde_json::Value> = artists
+    fn tadb_artists_json(thumbs: &[&str]) -> serde_json::Value {
+        if thumbs.is_empty() {
+            return serde_json::json!({ "artists": null });
+        }
+        let items: Vec<serde_json::Value> = thumbs
             .iter()
-            .map(|(id, name)| serde_json::json!({ "id": id, "name": name, "score": 100 }))
+            .map(|thumb| serde_json::json!({ "strArtistThumb": thumb }))
             .collect();
         serde_json::json!({ "artists": items })
     }
@@ -654,7 +709,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri());
+        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
         let result = client.search_album_artwork("Unknown Album", "Unknown Artist").await.unwrap();
         assert!(result.is_none());
     }
@@ -676,7 +731,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri());
+        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
         let result = client.search_album_artwork("The Wall", "Pink Floyd").await.unwrap();
         assert!(result.is_some());
         let r = result.unwrap();
@@ -700,7 +755,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri());
+        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
         let result = client.search_album_artwork("Wish You Were Here", "Pink Floyd").await.unwrap();
         assert!(result.is_none());
     }
@@ -715,7 +770,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri());
+        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
         let result = client.search_album_artwork("Abbey Road", "The Beatles").await;
         assert!(result.is_err());
     }
@@ -730,7 +785,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri());
+        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
         let result = client.search_album_artwork("Abbey Road", "The Beatles").await;
         assert!(result.is_err());
     }
@@ -761,7 +816,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri());
+        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
         let result = client.search_album_artwork("Animals", "Pink Floyd").await.unwrap();
         assert!(result.is_some());
         let r = result.unwrap();
@@ -769,65 +824,99 @@ mod tests {
         assert_eq!(r.musicbrainz_id, "release-good");
     }
 
-    // ── search_artist_photo ──────────────────────────────────────────────────
+    // ── search_artist_photo (TheAudioDB) ─────────────────────────────────────
 
     #[tokio::test]
-    async fn test_search_artist_photo_no_artists_returns_none() {
+    async fn test_search_artist_photo_not_found_returns_none() {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .and(path("/ws/2/artist/"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(mb_artists_json(&[])))
+            .and(path("/api/v1/json/2/search.php"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(tadb_artists_json(&[])))
             .mount(&mock_server)
             .await;
 
-        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri());
+        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
         let result = client.search_artist_photo("Unknown Artist").await.unwrap();
         assert!(result.is_none());
     }
 
     #[tokio::test]
-    async fn test_search_artist_photo_found_in_mb_returns_none() {
-        // Artist photos not implemented yet — even if MB finds the artist, returns None
+    async fn test_search_artist_photo_found_returns_bytes() {
         let mock_server = MockServer::start().await;
+        let fake_photo = b"FAKE_ARTIST_PHOTO".to_vec();
+        let photo_path = "/images/media/artist/thumb/pinkfloyd.jpg";
 
         Mock::given(method("GET"))
-            .and(path("/ws/2/artist/"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(mb_artists_json(&[("artist-123", "Pink Floyd")])))
+            .and(path("/api/v1/json/2/search.php"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                tadb_artists_json(&[&format!("{}{}", mock_server.uri(), photo_path)])
+            ))
             .mount(&mock_server)
             .await;
 
-        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri());
+        Mock::given(method("GET"))
+            .and(path(photo_path))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(fake_photo.clone()))
+            .mount(&mock_server)
+            .await;
+
+        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
         let result = client.search_artist_photo("Pink Floyd").await.unwrap();
-        assert!(result.is_none(), "artist photos not yet implemented — must return None");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), fake_photo);
     }
 
     #[tokio::test]
-    async fn test_search_artist_photo_mb_server_error_returns_err() {
+    async fn test_search_artist_photo_thumb_404_returns_none() {
+        let mock_server = MockServer::start().await;
+        let photo_path = "/images/media/artist/thumb/artist.jpg";
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/json/2/search.php"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                tadb_artists_json(&[&format!("{}{}", mock_server.uri(), photo_path)])
+            ))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path(photo_path))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock_server)
+            .await;
+
+        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
+        let result = client.search_artist_photo("Some Artist").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_search_artist_photo_server_error_returns_err() {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .and(path("/ws/2/artist/"))
+            .and(path("/api/v1/json/2/search.php"))
             .respond_with(ResponseTemplate::new(500))
             .mount(&mock_server)
             .await;
 
-        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri());
+        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
         let result = client.search_artist_photo("Pink Floyd").await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
-    async fn test_search_artist_photo_mb_invalid_json_returns_err() {
+    async fn test_search_artist_photo_invalid_json_returns_err() {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .and(path("/ws/2/artist/"))
+            .and(path("/api/v1/json/2/search.php"))
             .respond_with(ResponseTemplate::new(200).set_body_string("{ bad json }"))
             .mount(&mock_server)
             .await;
 
-        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri());
+        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
         let result = client.search_artist_photo("Pink Floyd").await;
         assert!(result.is_err());
     }
