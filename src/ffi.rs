@@ -2110,22 +2110,6 @@ fn get_artist_genres(artist_id: i64) -> String {
 
 // Import Functions
 
-/// Given a base name and a set of names already in use, return the first
-/// available name: `base`, then `base-2`, `base-3`, etc.
-fn unique_playlist_name(base: &str, existing: &std::collections::HashSet<String>) -> String {
-    if !existing.contains(base) {
-        return base.to_string();
-    }
-    let mut suffix = 2usize;
-    loop {
-        let candidate = format!("{}-{}", base, suffix);
-        if !existing.contains(&candidate) {
-            return candidate;
-        }
-        suffix += 1;
-    }
-}
-
 fn import_files(paths_json: &str) -> String {
     // Parse JSON array of path strings
     let path_strings: Vec<String> = match serde_json::from_str(paths_json) {
@@ -2144,72 +2128,12 @@ fn import_files(paths_json: &str) -> String {
         Ok(library_service) => {
             match library_service.import_paths(&path_bufs) {
                 Ok(track_ids) => {
-                    if track_ids.is_empty() {
-                        return serde_json::json!({
-                            "success": true,
-                            "data": {
-                                "tracks_imported": 0,
-                                "playlist": null
-                            }
-                        }).to_string();
-                    }
-
-                    let tracks_imported = track_ids.len();
-
-                    // Generate playlist name: import-YYYY-MM-DD (with collision handling)
-                    match get_or_init_pool() {
-                        Ok(pool) => {
-                            let playlist_service = PlaylistService::new(pool.clone());
-
-                            let base_name = chrono::Local::now().format("import-%Y-%m-%d").to_string();
-
-                            // Check for name collision
-                            let playlist_name = match playlist_service.list_playlists() {
-                                Ok(existing) => {
-                                    let existing_names: std::collections::HashSet<String> =
-                                        existing.iter().map(|p| p.name.clone()).collect();
-                                    unique_playlist_name(&base_name, &existing_names)
-                                }
-                                Err(_) => base_name.clone(),
-                            };
-
-                            // Create the playlist
-                            match playlist_service.create_playlist(&playlist_name, None) {
-                                Ok(playlist) => {
-                                    // Add all track IDs to the playlist
-                                    if let Err(e) = playlist_service.add_tracks(playlist.id, track_ids) {
-                                        return serde_json::json!({
-                                            "success": false,
-                                            "error": format!("Failed to add tracks to playlist: {}", e)
-                                        }).to_string();
-                                    }
-
-                                    serde_json::json!({
-                                        "success": true,
-                                        "data": {
-                                            "tracks_imported": tracks_imported,
-                                            "playlist": {
-                                                "id": playlist.id,
-                                                "name": playlist.name
-                                            }
-                                        }
-                                    }).to_string()
-                                }
-                                Err(e) => {
-                                    serde_json::json!({
-                                        "success": false,
-                                        "error": format!("Failed to create playlist: {}", e)
-                                    }).to_string()
-                                }
-                            }
+                    serde_json::json!({
+                        "success": true,
+                        "data": {
+                            "tracks_imported": track_ids.len()
                         }
-                        Err(e) => {
-                            serde_json::json!({
-                                "success": false,
-                                "error": format!("Failed to get pool: {}", e)
-                            }).to_string()
-                        }
-                    }
+                    }).to_string()
                 }
                 Err(e) => {
                     serde_json::json!({
@@ -2444,6 +2368,22 @@ mod tests {
 
     const MINIMAL_FLAC: &[u8] =
         include_bytes!("../tests/fixtures/minimal.flac");
+
+    /// Given a base name and a set of names already in use, return the first
+    /// available name: `base`, then `base-2`, `base-3`, etc.
+    fn unique_playlist_name(base: &str, existing: &std::collections::HashSet<String>) -> String {
+        if !existing.contains(base) {
+            return base.to_string();
+        }
+        let mut suffix = 2usize;
+        loop {
+            let candidate = format!("{}-{}", base, suffix);
+            if !existing.contains(&candidate) {
+                return candidate;
+            }
+            suffix += 1;
+        }
+    }
 
     // ── unique_playlist_name ─────────────────────────────────────────────────
 
