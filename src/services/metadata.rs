@@ -47,40 +47,36 @@ impl MetadataService {
 
         let tag = tagged_file
             .primary_tag()
-            .or_else(|| tagged_file.first_tag())
-            .ok_or_else(|| LibraryError::Metadata("No tags found".to_string()))?;
+            .or_else(|| tagged_file.first_tag());
 
         let properties = tagged_file.properties();
 
-        // Extract basic metadata
-        let title = tag
-            .title()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| {
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("Unknown")
-                    .to_string()
-            });
+        let default_title = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Unknown")
+            .to_string();
 
-        let artist = tag
-            .artist()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "Unknown Artist".to_string());
-
-        let album_artist = tag.get_string(&ItemKey::AlbumArtist).map(|s| s.to_string());
-
-        let album = tag.album().map(|s| s.to_string());
-        let genre = tag.genre().map(|s| s.to_string());
-        let track_number = tag.track().and_then(|n| n.try_into().ok());
-        let disc_number = tag.disk().and_then(|n| n.try_into().ok());
-        let year = tag.year().and_then(|y| y.try_into().ok());
+        // Extract basic metadata, falling back to defaults when no tags are present
+        let (title, artist, album_artist, album, genre, track_number, disc_number, year, has_artwork) =
+            if let Some(tag) = tag {
+                let title = tag.title().map(|s| s.to_string()).unwrap_or(default_title);
+                let artist = tag.artist().map(|s| s.to_string()).unwrap_or_else(|| "Unknown Artist".to_string());
+                let album_artist = tag.get_string(&ItemKey::AlbumArtist).map(|s| s.to_string());
+                let album = tag.album().map(|s| s.to_string());
+                let genre = tag.genre().map(|s| s.to_string());
+                let track_number = tag.track().and_then(|n| n.try_into().ok());
+                let disc_number = tag.disk().and_then(|n| n.try_into().ok());
+                let year = tag.year().and_then(|y| y.try_into().ok());
+                let has_artwork = !tag.pictures().is_empty();
+                (title, artist, album_artist, album, genre, track_number, disc_number, year, has_artwork)
+            } else {
+                (default_title, "Unknown Artist".to_string(), None, None, None, None, None, None, false)
+            };
 
         let duration = properties.duration();
         let sample_rate = properties.sample_rate();
         let bit_depth = properties.bit_depth();
-
-        let has_artwork = tag.pictures().len() > 0;
 
         Ok(TrackMetadata {
             title,
@@ -241,6 +237,11 @@ mod tests {
     const MINIMAL_FLAC: &[u8] =
         include_bytes!("../../tests/fixtures/minimal.flac");
 
+    // Minimal FLAC with STREAMINFO only — no VORBIS_COMMENT block.
+    // Used to exercise the "no tags" fallback path in read_metadata.
+    const NO_TAGS_FLAC: &[u8] =
+        include_bytes!("../../tests/fixtures/no-tags.flac");
+
     fn make_service() -> (TestEnv, MetadataService) {
         let env = TestEnv::new();
         let svc = MetadataService::new(env.app_paths.clone());
@@ -319,6 +320,65 @@ mod tests {
         let (_env, svc) = make_service();
         let result = svc.read_metadata(&bad_path);
         assert!(result.is_err(), "corrupted file must return an error");
+    }
+
+    // ── read_metadata — no-tags fallback ──────────────────────────────────────
+
+    #[test]
+    fn test_read_metadata_no_tags_title_falls_back_to_file_stem() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("my_song.flac");
+        std::fs::write(&path, NO_TAGS_FLAC).unwrap();
+
+        let (_env, svc) = make_service();
+        let meta = svc.read_metadata(&path).unwrap();
+
+        assert_eq!(meta.title, "my_song", "title must fall back to file stem when no tags");
+    }
+
+    #[test]
+    fn test_read_metadata_no_tags_artist_falls_back_to_unknown() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("track.flac");
+        std::fs::write(&path, NO_TAGS_FLAC).unwrap();
+
+        let (_env, svc) = make_service();
+        let meta = svc.read_metadata(&path).unwrap();
+
+        assert_eq!(meta.artist, "Unknown Artist");
+    }
+
+    #[test]
+    fn test_read_metadata_no_tags_optional_fields_are_none() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("track.flac");
+        std::fs::write(&path, NO_TAGS_FLAC).unwrap();
+
+        let (_env, svc) = make_service();
+        let meta = svc.read_metadata(&path).unwrap();
+
+        assert!(meta.album.is_none(), "album must be None when no tags");
+        assert!(meta.album_artist.is_none(), "album_artist must be None when no tags");
+        assert!(meta.genre.is_none(), "genre must be None when no tags");
+        assert!(meta.track_number.is_none());
+        assert!(meta.disc_number.is_none());
+        assert!(meta.year.is_none());
+        assert!(!meta.has_artwork);
+    }
+
+    #[test]
+    fn test_read_metadata_tagged_file_uses_embedded_values() {
+        // minimal.flac contains TITLE=Test Track, ARTIST=Test Artist, ALBUM=Test Album
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("tagged.flac");
+        std::fs::write(&path, MINIMAL_FLAC).unwrap();
+
+        let (_env, svc) = make_service();
+        let meta = svc.read_metadata(&path).unwrap();
+
+        assert_eq!(meta.title, "Test Track");
+        assert_eq!(meta.artist, "Test Artist");
+        assert_eq!(meta.album.as_deref(), Some("Test Album"));
     }
 
     // ── get_thumbnail ─────────────────────────────────────────────────────────

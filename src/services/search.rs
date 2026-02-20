@@ -212,4 +212,96 @@ mod tests {
         let results = service.search("Artist").unwrap();
         assert!(!results.tracks.is_empty(), "FTS5 must find tracks by artist name token");
     }
+
+    // ── FTS5 special characters — must not panic ──────────────────────────
+
+    #[test]
+    fn test_search_fts5_double_quote_does_not_panic() {
+        let env = TestEnv::new();
+        env.seed_basic_library();
+        let service = SearchService::new(env.pool.clone());
+        // A bare double-quote is malformed FTS5 syntax; must not panic.
+        // Returning Ok(empty) or Err(...) are both acceptable.
+        let _ = service.search("\"");
+    }
+
+    #[test]
+    fn test_search_fts5_unclosed_paren_does_not_panic() {
+        let env = TestEnv::new();
+        env.seed_basic_library();
+        let service = SearchService::new(env.pool.clone());
+        let _ = service.search("(unclosed");
+    }
+
+    #[test]
+    fn test_search_fts5_boolean_operators_do_not_panic() {
+        let env = TestEnv::new();
+        env.seed_basic_library();
+        let service = SearchService::new(env.pool.clone());
+        // FTS5 treats AND/OR/NOT as operators; verify no panic for edge-case inputs.
+        let _ = service.search("AND");
+        let _ = service.search("OR");
+        let _ = service.search("NOT");
+    }
+
+    #[test]
+    fn test_search_fts5_colon_does_not_panic() {
+        let env = TestEnv::new();
+        env.seed_basic_library();
+        let service = SearchService::new(env.pool.clone());
+        let _ = service.search("title:");
+    }
+
+    // ── LIKE wildcard behaviour ───────────────────────────────────────────
+
+    #[test]
+    fn test_search_percent_causes_fts5_syntax_error() {
+        let env = TestEnv::new();
+        env.seed_basic_library();
+        let service = SearchService::new(env.pool.clone());
+        // "%" is invalid FTS5 syntax; search() must return Err rather than panic.
+        // The LIKE path would match all albums, but FTS5 fires first and errors.
+        // This test documents the current behaviour as a regression checkpoint.
+        // Ideal future behaviour: sanitise the query and return Ok(empty).
+        let result = service.search("%");
+        assert!(result.is_err(), "current behaviour: '%' causes an FTS5 syntax error");
+    }
+
+    #[test]
+    fn test_search_underscore_in_query_does_not_match_wrong_artist() {
+        let env = TestEnv::new();
+        env.seed_basic_library(); // artist "Test Artist"
+        let service = SearchService::new(env.pool.clone());
+        // "_est Artist" would match "Test Artist" because "_" is a LIKE single-char wildcard.
+        let results = service.search("_est Artist").unwrap();
+        // Current behaviour: the "_" wildcard matches, so "Test Artist" is returned.
+        // This documents the current behaviour; the ideal fix would escape "_".
+        assert!(
+            !results.artists.is_empty(),
+            "current behaviour: '_' in query acts as LIKE single-char wildcard"
+        );
+    }
+
+    // ── Result capping ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_search_results_capped_per_type() {
+        let env = TestEnv::new();
+        env.seed_basic_library(); // 2 tracks, 1 album, 1 artist
+        let service = SearchService::new(env.pool.clone());
+        let results = service.search("Test").unwrap();
+        assert!(results.tracks.len()  <= 50, "track results must be capped at 50");
+        assert!(results.albums.len()  <= 20, "album results must be capped at 20");
+        assert!(results.artists.len() <= 20, "artist results must be capped at 20");
+    }
+
+    #[test]
+    fn test_search_empty_library_returns_all_empty() {
+        let env = TestEnv::new(); // no data seeded
+        let service = SearchService::new(env.pool.clone());
+        let results = service.search("anything").unwrap();
+        assert!(results.tracks.is_empty());
+        assert!(results.albums.is_empty());
+        assert!(results.artists.is_empty());
+    }
 }

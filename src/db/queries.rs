@@ -1553,4 +1553,188 @@ mod tests {
         let tracks = get_source_tracks(&conn, 9999).unwrap();
         assert!(tracks.is_empty());
     }
+
+    // ====================================================================
+    // insert_track — upsert contract
+    // ====================================================================
+
+    #[test]
+    fn test_insert_track_upsert_does_not_create_duplicate() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source = insert_source(&conn, "s", SourceType::Disk, None).unwrap();
+        let artist = insert_artist(&conn, "A", None).unwrap();
+        let path = PathBuf::from("/music/x.flac");
+
+        insert_track(&conn, "Original", None, artist, source, &path, 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        insert_track(&conn, "Updated", None, artist, source, &path, 90_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 1, "re-inserting same source+path must not create a duplicate row");
+    }
+
+    #[test]
+    fn test_insert_track_upsert_updates_title() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source = insert_source(&conn, "s", SourceType::Disk, None).unwrap();
+        let artist = insert_artist(&conn, "A", None).unwrap();
+        let path = PathBuf::from("/music/x.flac");
+
+        insert_track(&conn, "Original Title", None, artist, source, &path, 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        insert_track(&conn, "Updated Title",  None, artist, source, &path, 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+
+        let title: String = conn.query_row("SELECT title FROM tracks", [], |r| r.get(0)).unwrap();
+        assert_eq!(title, "Updated Title", "upsert must update the title column");
+    }
+
+    #[test]
+    fn test_insert_track_upsert_updates_duration() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source = insert_source(&conn, "s", SourceType::Disk, None).unwrap();
+        let artist = insert_artist(&conn, "A", None).unwrap();
+        let path = PathBuf::from("/music/x.flac");
+
+        insert_track(&conn, "T", None, artist, source, &path,  60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        insert_track(&conn, "T", None, artist, source, &path, 180_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+
+        let duration: i64 = conn.query_row("SELECT duration FROM tracks", [], |r| r.get(0)).unwrap();
+        assert_eq!(duration, 180_000, "upsert must update the duration column");
+    }
+
+    #[test]
+    fn test_insert_track_upsert_updates_artist_id() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source  = insert_source(&conn, "s", SourceType::Disk, None).unwrap();
+        let artist1 = insert_artist(&conn, "Old Artist", None).unwrap();
+        let artist2 = insert_artist(&conn, "New Artist", None).unwrap();
+        let path = PathBuf::from("/music/x.flac");
+
+        insert_track(&conn, "T", None, artist1, source, &path, 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        insert_track(&conn, "T", None, artist2, source, &path, 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+
+        let stored_artist: i64 = conn.query_row("SELECT artist_id FROM tracks", [], |r| r.get(0)).unwrap();
+        assert_eq!(stored_artist, artist2, "upsert must update the artist_id column");
+    }
+
+    // ====================================================================
+    // get_album_tracks — sort order
+    // ====================================================================
+
+    #[test]
+    fn test_get_album_tracks_sorted_by_track_number() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source = insert_source(&conn, "s", SourceType::Disk, None).unwrap();
+        let artist = insert_artist(&conn, "A", None).unwrap();
+        let album  = insert_album(&conn, "Album", artist, None).unwrap();
+
+        // Insert deliberately out of order
+        let t3 = insert_track(&conn, "T3", Some(album), artist, source, &PathBuf::from("/t3.flac"), 60_000, Some(3), None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        let t1 = insert_track(&conn, "T1", Some(album), artist, source, &PathBuf::from("/t1.flac"), 60_000, Some(1), None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        let t2 = insert_track(&conn, "T2", Some(album), artist, source, &PathBuf::from("/t2.flac"), 60_000, Some(2), None, None, AudioFormat::Flac, 1_000_000).unwrap();
+
+        let ids: Vec<i64> = get_album_tracks(&conn, album).unwrap().iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![t1, t2, t3], "tracks must be returned sorted by track_number ASC");
+    }
+
+    #[test]
+    fn test_get_album_tracks_disc_number_takes_precedence_over_track_number() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source = insert_source(&conn, "s", SourceType::Disk, None).unwrap();
+        let artist = insert_artist(&conn, "A", None).unwrap();
+        let album  = insert_album(&conn, "2xCD", artist, None).unwrap();
+
+        // Disc 2 track 1 inserted before Disc 1 track 5
+        let d2t1 = insert_track(&conn, "D2T1", Some(album), artist, source, &PathBuf::from("/d2t1.flac"), 60_000, Some(1), None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        let d1t5 = insert_track(&conn, "D1T5", Some(album), artist, source, &PathBuf::from("/d1t5.flac"), 60_000, Some(5), None, None, AudioFormat::Flac, 1_000_000).unwrap();
+
+        // Set disc numbers via SQL (insert_track doesn't expose disc_number)
+        conn.execute("UPDATE tracks SET disc_number = 2 WHERE id = ?1", [d2t1]).unwrap();
+        conn.execute("UPDATE tracks SET disc_number = 1 WHERE id = ?1", [d1t5]).unwrap();
+
+        let ids: Vec<i64> = get_album_tracks(&conn, album).unwrap().iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![d1t5, d2t1], "Disc 1 Track 5 must precede Disc 2 Track 1");
+    }
+
+    // ====================================================================
+    // count_albums — genre filter
+    // ====================================================================
+
+    #[test]
+    fn test_count_albums_genre_filter_alone() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source     = insert_source(&conn, "s", SourceType::Disk, None).unwrap();
+        let artist     = insert_artist(&conn, "A", None).unwrap();
+        let genre_rock = insert_genre(&conn, "Rock").unwrap();
+        let genre_jazz = insert_genre(&conn, "Jazz").unwrap();
+        let album_rock = insert_album(&conn, "Rock Album", artist, None).unwrap();
+        let album_jazz = insert_album(&conn, "Jazz Album", artist, None).unwrap();
+
+        let t_rock = insert_track(&conn, "R", Some(album_rock), artist, source, &PathBuf::from("/r.flac"), 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        let t_jazz = insert_track(&conn, "J", Some(album_jazz), artist, source, &PathBuf::from("/j.flac"), 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        link_track_genre(&conn, t_rock, genre_rock).unwrap();
+        link_track_genre(&conn, t_jazz, genre_jazz).unwrap();
+
+        assert_eq!(count_albums(&conn, None, Some(genre_rock), None).unwrap(), 1, "genre=rock must count 1");
+        assert_eq!(count_albums(&conn, None, Some(genre_jazz), None).unwrap(), 1, "genre=jazz must count 1");
+        assert_eq!(count_albums(&conn, None, None,             None).unwrap(), 2, "no filter must count all");
+    }
+
+    #[test]
+    fn test_count_albums_genre_filter_unknown_genre_returns_zero() {
+        let env = TestEnv::new();
+        env.seed_basic_library();
+        let conn = env.pool.get().unwrap();
+        let count = count_albums(&conn, None, Some(99999), None).unwrap();
+        assert_eq!(count, 0, "unknown genre must yield 0, not an error");
+    }
+
+    // ====================================================================
+    // list_albums — pagination edge cases
+    // ====================================================================
+
+    #[test]
+    fn test_list_albums_offset_beyond_total_returns_empty() {
+        let env = TestEnv::new();
+        env.seed_basic_library(); // 1 album
+        let conn = env.pool.get().unwrap();
+        let albums = list_albums(&conn, None, None, None, Some(10), Some(999)).unwrap();
+        assert!(albums.is_empty(), "offset beyond total must return an empty list");
+    }
+
+    #[test]
+    fn test_list_albums_limit_zero_returns_empty() {
+        let env = TestEnv::new();
+        env.seed_basic_library();
+        let conn = env.pool.get().unwrap();
+        let albums = list_albums(&conn, None, None, None, Some(0), None).unwrap();
+        assert!(albums.is_empty(), "limit=0 must return an empty list");
+    }
+
+    #[test]
+    fn test_list_albums_pagination_pages_are_contiguous_and_non_overlapping() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let artist = insert_artist(&conn, "Art", None).unwrap();
+        for i in 0..5u32 {
+            insert_album(&conn, &format!("Album {:02}", i), artist, None).unwrap();
+        }
+
+        let page1 = list_albums(&conn, None, None, None, Some(2), Some(0)).unwrap();
+        let page2 = list_albums(&conn, None, None, None, Some(2), Some(2)).unwrap();
+        let page3 = list_albums(&conn, None, None, None, Some(2), Some(4)).unwrap();
+
+        assert_eq!(page1.len(), 2, "page 1 must have 2 albums");
+        assert_eq!(page2.len(), 2, "page 2 must have 2 albums");
+        assert_eq!(page3.len(), 1, "page 3 must have the remaining 1 album");
+
+        let p1_ids: std::collections::HashSet<i64> = page1.iter().map(|a| a.id).collect();
+        let p2_ids: std::collections::HashSet<i64> = page2.iter().map(|a| a.id).collect();
+        assert!(p1_ids.is_disjoint(&p2_ids), "consecutive pages must not overlap");
+    }
 }

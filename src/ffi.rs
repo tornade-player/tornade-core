@@ -120,7 +120,7 @@ mod ffi {
         fn get_scan_progress() -> String;
 
         // Track Functions
-        fn get_tracks_page(offset: u32, limit: u32) -> String;
+        fn get_tracks_page(offset: u32, limit: u32, sort_by: &str, sort_dir: &str) -> String;
         fn get_track_by_id(track_id: i64) -> String;
         fn get_random_tracks(count: u32) -> String;
         fn search_tracks(query: &str, limit: u32) -> String;
@@ -339,7 +339,7 @@ fn get_scan_progress() -> String {
     }
 }
 
-fn get_tracks_page(offset: u32, limit: u32) -> String {
+fn get_tracks_page(offset: u32, limit: u32, sort_by: &str, sort_dir: &str) -> String {
     // T014: Get paginated list of tracks (limit capped at 100)
     match get_or_init_pool() {
         Ok(pool) => {
@@ -356,13 +356,32 @@ fn get_tracks_page(offset: u32, limit: u32) -> String {
                 }
             };
 
-            // Query tracks with pagination - all fields to match Swift Track model
+            // Map sort_by to the appropriate SQL expression
+            let order_col = match sort_by {
+                "artist" => "ar.name",
+                "album"  => "al.title",
+                "duration" => "t.duration",
+                "track_number" => "t.disc_number * 1000 + COALESCE(t.track_number, 0)",
+                "file_size" => "t.file_size",
+                "play_count" => "t.play_count",
+                "rating" => "t.rating",
+                "file_path" => "t.file_path",
+                _ => "t.title",
+            };
+            let order_dir = if sort_dir.eq_ignore_ascii_case("desc") { "DESC" } else { "ASC" };
+
+            // Query tracks with pagination and dynamic ORDER BY
+            // LEFT JOINs allow sorting by artist name or album title
             let query = format!(
-                "SELECT id, title, artist_id, album_id, source_id, file_path, duration, \
-                 track_number, disc_number, sample_rate, bit_depth, file_type, file_size, \
-                 rating, fingerprint, is_duplicate, duplicate_of, last_played_at, play_count \
-                 FROM tracks ORDER BY title LIMIT {} OFFSET {}",
-                limit_capped, offset_val
+                "SELECT t.id, t.title, t.artist_id, t.album_id, t.source_id, t.file_path, t.duration, \
+                 t.track_number, t.disc_number, t.sample_rate, t.bit_depth, t.file_type, t.file_size, \
+                 t.rating, t.fingerprint, t.is_duplicate, t.duplicate_of, t.last_played_at, t.play_count, \
+                 t.created_at \
+                 FROM tracks t \
+                 LEFT JOIN artists ar ON t.artist_id = ar.id \
+                 LEFT JOIN albums al ON t.album_id = al.id \
+                 ORDER BY {} {} LIMIT {} OFFSET {}",
+                order_col, order_dir, limit_capped, offset_val
             );
 
             match conn.prepare(&query) {
@@ -388,6 +407,7 @@ fn get_tracks_page(offset: u32, limit: u32) -> String {
                             "duplicate_of": row.get::<_, Option<i64>>(16)?,
                             "last_played_at": row.get::<_, Option<String>>(17)?,
                             "play_count": row.get::<_, u32>(18)?,
+                            "created_at": row.get::<_, Option<String>>(19)?,
                         }))
                     });
 
@@ -2552,6 +2572,264 @@ mod tests {
         let (id, name) = playlist.expect("playlist should be created");
         assert!(id > 0, "playlist id must be positive");
         assert!(name.starts_with("import-"), "playlist name must start with 'import-', got: {}", name);
+    }
+
+    // ── get_tracks_page — sorting ────────────────────────────────────────────
+
+    /// Runs the same ORDER BY logic as `get_tracks_page` but against a given pool,
+    /// returning the ordered list of track IDs.
+    fn query_track_ids_sorted(pool: &crate::db::DbPool, sort_by: &str, sort_dir: &str) -> Vec<i64> {
+        let conn = pool.get().unwrap();
+
+        let order_col = match sort_by {
+            "artist"       => "ar.name",
+            "album"        => "al.title",
+            "duration"     => "t.duration",
+            "track_number" => "t.disc_number * 1000 + COALESCE(t.track_number, 0)",
+            "file_size"    => "t.file_size",
+            "play_count"   => "t.play_count",
+            "rating"       => "t.rating",
+            "file_path"    => "t.file_path",
+            _              => "t.title",
+        };
+        let order_dir = if sort_dir.eq_ignore_ascii_case("desc") { "DESC" } else { "ASC" };
+
+        let query = format!(
+            "SELECT t.id FROM tracks t \
+             LEFT JOIN artists ar ON t.artist_id = ar.id \
+             LEFT JOIN albums al ON t.album_id = al.id \
+             ORDER BY {} {}",
+            order_col, order_dir
+        );
+
+        let mut stmt = conn.prepare(&query).unwrap();
+        stmt.query_map([], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn test_get_tracks_page_sort_by_duration_asc() {
+        let env = TestEnv::new();
+        let (_, _, _, _, track1_id, track2_id) = env.seed_basic_library();
+        // track1: duration=240_000ms (longer), track2: duration=180_000ms (shorter)
+        let ids = query_track_ids_sorted(&env.pool, "duration", "asc");
+        assert_eq!(ids, vec![track2_id, track1_id], "shorter duration must come first in ASC order");
+    }
+
+    #[test]
+    fn test_get_tracks_page_sort_by_duration_desc() {
+        let env = TestEnv::new();
+        let (_, _, _, _, track1_id, track2_id) = env.seed_basic_library();
+        let ids = query_track_ids_sorted(&env.pool, "duration", "desc");
+        assert_eq!(ids, vec![track1_id, track2_id], "longer duration must come first in DESC order");
+    }
+
+    #[test]
+    fn test_get_tracks_page_sort_dir_case_insensitive() {
+        let env = TestEnv::new();
+        env.seed_basic_library();
+        let ids_upper = query_track_ids_sorted(&env.pool, "duration", "DESC");
+        let ids_lower = query_track_ids_sorted(&env.pool, "duration", "desc");
+        assert_eq!(ids_upper, ids_lower, "sort_dir must be case-insensitive");
+    }
+
+    #[test]
+    fn test_get_tracks_page_unknown_sort_by_falls_back_to_title() {
+        let env = TestEnv::new();
+        env.seed_basic_library();
+        // "Track One" < "Track Two" alphabetically → track1 comes first ASC
+        let ids_unknown = query_track_ids_sorted(&env.pool, "unknown_field", "asc");
+        let ids_title   = query_track_ids_sorted(&env.pool, "title", "asc");
+        // Both should use t.title order (which is not a named sort_by key, so also falls to default)
+        // We just verify the fallback doesn't crash and returns both tracks
+        assert_eq!(ids_unknown.len(), 2);
+        assert_eq!(ids_unknown, ids_title);
+    }
+
+    #[test]
+    fn test_get_tracks_page_sort_by_file_size_asc() {
+        let env = TestEnv::new();
+        let (_, _, _, _, track1_id, track2_id) = env.seed_basic_library();
+        // track1: file_size=30_000_000, track2: file_size=25_000_000
+        let ids = query_track_ids_sorted(&env.pool, "file_size", "asc");
+        assert_eq!(ids, vec![track2_id, track1_id], "smaller file_size must come first in ASC order");
+    }
+
+    #[test]
+    fn test_get_tracks_page_empty_library_returns_empty() {
+        let env = TestEnv::new();
+        // No tracks seeded
+        let ids = query_track_ids_sorted(&env.pool, "duration", "asc");
+        assert!(ids.is_empty());
+    }
+
+    // ── get_library_stats ────────────────────────────────────────────────
+
+    /// Runs the same stats queries as `get_library_stats` against a provided pool.
+    fn query_library_stats(pool: &crate::db::DbPool) -> serde_json::Value {
+        let conn = pool.get().unwrap();
+        let albums:   i64 = conn.query_row("SELECT COUNT(*) FROM albums",  [], |r| r.get(0)).unwrap();
+        let artists:  i64 = conn.query_row("SELECT COUNT(*) FROM artists", [], |r| r.get(0)).unwrap();
+        let tracks:   i64 = conn.query_row("SELECT COUNT(*) FROM tracks",  [], |r| r.get(0)).unwrap();
+        let duration: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(duration), 0) / 1000 FROM tracks", [], |r| r.get(0),
+        ).unwrap();
+        let artworks: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM albums WHERE online_artwork_path IS NOT NULL", [], |r| r.get(0),
+        ).unwrap();
+        serde_json::json!({
+            "success": true,
+            "data": {
+                "album_count":            albums,
+                "artist_count":           artists,
+                "track_count":            tracks,
+                "total_duration_seconds": duration,
+                "artwork_count":          artworks,
+            }
+        })
+    }
+
+    #[test]
+    fn test_library_stats_empty_db_returns_all_zeros() {
+        let env = TestEnv::new();
+        let v = query_library_stats(&env.pool);
+        assert_eq!(v["data"]["album_count"],   0);
+        assert_eq!(v["data"]["artist_count"],  0);
+        assert_eq!(v["data"]["track_count"],   0);
+        assert_eq!(v["data"]["artwork_count"], 0);
+    }
+
+    #[test]
+    fn test_library_stats_total_duration_is_zero_not_null_on_empty_db() {
+        // COALESCE(SUM(duration), 0) must return integer 0, not JSON null.
+        // A regression would cause JSON serialisation to fail or produce null.
+        let env = TestEnv::new();
+        let v = query_library_stats(&env.pool);
+        assert!(!v["data"]["total_duration_seconds"].is_null());
+        assert_eq!(v["data"]["total_duration_seconds"], 0);
+    }
+
+    #[test]
+    fn test_library_stats_counts_match_seeded_data() {
+        let env = TestEnv::new();
+        env.seed_basic_library(); // 1 artist, 1 album, 2 tracks (240s + 180s = 420s)
+        let v = query_library_stats(&env.pool);
+        assert_eq!(v["data"]["album_count"],            1);
+        assert_eq!(v["data"]["artist_count"],           1);
+        assert_eq!(v["data"]["track_count"],            2);
+        assert_eq!(v["data"]["total_duration_seconds"], 420);
+    }
+
+    // ── delete_tracks ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_delete_tracks_invalid_json_returns_error() {
+        let result = delete_tracks("not-json");
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["success"], false);
+        assert!(v["error"].as_str().unwrap().contains("Invalid track IDs JSON"));
+    }
+
+    #[test]
+    fn test_delete_tracks_wrong_json_type_returns_error() {
+        let result = delete_tracks("{\"id\": 1}");
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["success"], false);
+    }
+
+    #[test]
+    fn test_delete_tracks_empty_array_returns_zero_deleted() {
+        let result = delete_tracks("[]");
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["success"], true);
+        assert_eq!(v["data"]["deleted"], 0);
+    }
+
+    /// Helper: run the delete-tracks logic against a TestEnv pool (bypasses global singleton).
+    fn delete_tracks_with_pool(pool: &crate::db::DbPool, ids: &[i64]) -> (bool, usize) {
+        let conn = pool.get().unwrap();
+        let mut deleted = 0usize;
+        for &id in ids {
+            match crate::db::queries::delete_track(&conn, id) {
+                Ok(_)  => deleted += 1,
+                Err(_) => return (false, deleted),
+            }
+        }
+        (true, deleted)
+    }
+
+    #[test]
+    fn test_delete_tracks_nonexistent_id_counted_as_deleted() {
+        // SQLite DELETE never errors on a missing row (returns Ok(0) rows affected).
+        // The loop in delete_tracks counts every Ok(_) as a deletion, so a nonexistent
+        // ID still increments the counter.  This is the current behaviour; a future
+        // fix might check rows_affected instead.
+        let env = TestEnv::new();
+        let (success, deleted) = delete_tracks_with_pool(&env.pool, &[99999999]);
+        assert!(success, "deleting a nonexistent ID must not return an error");
+        assert_eq!(deleted, 1,
+            "current behaviour: nonexistent delete is counted (SQLite returns Ok with 0 rows affected)");
+    }
+
+    #[test]
+    fn test_delete_tracks_existing_track_is_removed() {
+        let env = TestEnv::new();
+        let (_, _, _, _, track_id, _) = env.seed_basic_library();
+        let conn = env.pool.get().unwrap();
+
+        let (success, deleted) = delete_tracks_with_pool(&env.pool, &[track_id]);
+        assert!(success);
+        assert_eq!(deleted, 1);
+
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tracks WHERE id = ?1", [track_id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(count, 0, "track must be absent from the database after deletion");
+    }
+
+    // ── get_tracks_page — pagination edge cases ──────────────────────────
+
+    fn query_track_ids_paged(pool: &crate::db::DbPool, limit: u32, offset: u32) -> Vec<i64> {
+        let conn = pool.get().unwrap();
+        let limit_capped = std::cmp::min(limit, 100) as usize;
+        let query = format!(
+            "SELECT id FROM tracks ORDER BY title LIMIT {} OFFSET {}",
+            limit_capped, offset
+        );
+        let mut stmt = conn.prepare(&query).unwrap();
+        stmt.query_map([], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn test_get_tracks_page_offset_beyond_total_returns_empty() {
+        let env = TestEnv::new();
+        env.seed_basic_library(); // 2 tracks
+        let ids = query_track_ids_paged(&env.pool, 10, 999);
+        assert!(ids.is_empty(), "offset beyond total must return an empty list");
+    }
+
+    #[test]
+    fn test_get_tracks_page_limit_zero_returns_empty() {
+        let env = TestEnv::new();
+        env.seed_basic_library();
+        let ids = query_track_ids_paged(&env.pool, 0, 0);
+        assert!(ids.is_empty(), "limit=0 must return an empty list");
+    }
+
+    #[test]
+    fn test_get_tracks_page_all_named_sort_fields_do_not_crash() {
+        let env = TestEnv::new();
+        env.seed_basic_library();
+        for sort_by in &["artist", "album", "duration", "track_number",
+                         "file_size", "play_count", "rating", "file_path", "unknown_field"] {
+            let ids = query_track_ids_sorted(&env.pool, sort_by, "asc");
+            assert_eq!(ids.len(), 2, "sort_by='{}' must return all seeded tracks", sort_by);
+        }
     }
 
     #[test]
