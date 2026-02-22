@@ -43,3 +43,4 @@ wiremock = "0.5"
 [features]
 default = []
 device-support = []
+appstore = []  # Enables App Store build (StoreKit IAP instead of license keys)
