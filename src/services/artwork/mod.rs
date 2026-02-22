@@ -3,18 +3,19 @@
 mod client;
 mod matching;
 
-pub use client::{MusicBrainzClient, RateLimiter, ArtworkSearchResult, ArtistSearchResult};
+pub use client::{ArtistSearchResult, ArtworkSearchResult, MusicBrainzClient, RateLimiter};
 pub use matching::fuzzy_match;
 
 use crate::db::DbPool;
-use crate::utils::paths::AppPaths;
 use crate::services::reports::ArtworkReport;
+use crate::utils::MutexExt;
+use crate::utils::paths::AppPaths;
 use chrono::Local;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
-use serde::{Serialize, Deserialize};
 
 /// Progress tracking for artwork fetching
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ArtworkFetchProgress {
     pub total_items: u32,
     pub processed_items: u32,
@@ -27,10 +28,7 @@ impl ArtworkFetchProgress {
     pub fn new(total_items: u32) -> Self {
         Self {
             total_items,
-            processed_items: 0,
-            current_item: String::new(),
-            successful: 0,
-            failed: 0,
+            ..Default::default()
         }
     }
 
@@ -60,9 +58,9 @@ impl ArtworkService {
     /// Create a new artwork service
     pub fn new(pool: DbPool, app_paths: AppPaths) -> Self {
         let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))         // Hard timeout per request
-            .connect_timeout(std::time::Duration::from_secs(5))  // Connection timeout
-            .pool_max_idle_per_host(2)                           // Limit connections per host
+            .timeout(std::time::Duration::from_secs(15)) // Hard timeout per request
+            .connect_timeout(std::time::Duration::from_secs(5)) // Connection timeout
+            .pool_max_idle_per_host(2) // Limit connections per host
             .user_agent("Tornade-Music-Player/1.0 ( contact@tornade.app )")
             .build()
             .expect("Failed to create HTTP client");
@@ -79,22 +77,22 @@ impl ArtworkService {
 
     /// Get current fetch progress
     pub fn get_progress(&self) -> Option<ArtworkFetchProgress> {
-        self.fetch_progress.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.fetch_progress.lock_infallible().clone()
     }
 
     /// Cancel ongoing fetch operation
     pub fn cancel_fetch(&self) {
-        *self.fetch_cancelled.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        *self.fetch_cancelled.lock_infallible() = true;
     }
 
     /// Check if fetch was cancelled
     fn is_cancelled(&self) -> bool {
-        *self.fetch_cancelled.lock().unwrap_or_else(|e| e.into_inner())
+        *self.fetch_cancelled.lock_infallible()
     }
 
     /// Reset cancellation flag
     fn reset_cancel(&self) {
-        *self.fetch_cancelled.lock().unwrap_or_else(|e| e.into_inner()) = false;
+        *self.fetch_cancelled.lock_infallible() = false;
     }
 
     /// Fetch artwork for all albums (and optionally artists)
@@ -107,15 +105,16 @@ impl ArtworkService {
         // Get albums without online artwork
         let albums = self.get_albums_without_artwork()?;
         let total_albums = albums.len();
-        let total_items = albums.len() as u32 + if fetch_artists {
-            self.get_artists_without_photos()?.len() as u32
-        } else {
-            0
-        };
+        let total_items = albums.len() as u32
+            + if fetch_artists {
+                self.get_artists_without_photos()?.len() as u32
+            } else {
+                0
+            };
 
         // Initialize progress
         {
-            let mut progress = self.fetch_progress.lock().unwrap_or_else(|e| e.into_inner());
+            let mut progress = self.fetch_progress.lock_infallible();
             *progress = Some(ArtworkFetchProgress::new(total_items));
         }
 
@@ -124,10 +123,7 @@ impl ArtworkService {
         let mut albums_successful = 0;
 
         // Create MusicBrainz client
-        let mb_client = MusicBrainzClient::new(
-            self.http_client.clone(),
-            self.rate_limiter.clone(),
-        );
+        let mb_client = MusicBrainzClient::new(self.http_client.clone(), self.rate_limiter.clone());
 
         // Fetch album artwork
         for album in albums {
@@ -140,22 +136,32 @@ impl ArtworkService {
             // Check if artwork already exists (skip if already downloaded during this session)
             if self.has_album_artwork(album.id) {
                 albums_successful += 1;
-                let mut progress = self.fetch_progress.lock().unwrap_or_else(|e| e.into_inner());
+                let mut progress = self.fetch_progress.lock_infallible();
                 if let Some(ref mut p) = *progress {
                     p.update(album_name, true);
                 }
                 continue;
             }
 
-            let success = self.fetch_album_artwork_internal(&mb_client, album.id, &album.title, &album.artist_name).await;
+            let success = self
+                .fetch_album_artwork_internal(
+                    &mb_client,
+                    album.id,
+                    &album.title,
+                    &album.artist_name,
+                )
+                .await;
 
             if success {
                 albums_successful += 1;
             } else {
-                albums_failed.push((album_name.clone(), "Not found or download failed".to_string()));
+                albums_failed.push((
+                    album_name.clone(),
+                    "Not found or download failed".to_string(),
+                ));
             }
 
-            let mut progress = self.fetch_progress.lock().unwrap_or_else(|e| e.into_inner());
+            let mut progress = self.fetch_progress.lock_infallible();
             if let Some(ref mut p) = *progress {
                 p.update(album_name, success);
             }
@@ -179,22 +185,27 @@ impl ArtworkService {
                 // Check if photo already exists (skip if already downloaded during this session)
                 if self.has_artist_photo(artist.id) {
                     artists_successful += 1;
-                    let mut progress = self.fetch_progress.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut progress = self.fetch_progress.lock_infallible();
                     if let Some(ref mut p) = *progress {
                         p.update(artist.name, true);
                     }
                     continue;
                 }
 
-                let success = self.fetch_artist_photo_internal(&mb_client, artist.id, &artist.name).await;
+                let success = self
+                    .fetch_artist_photo_internal(&mb_client, artist.id, &artist.name)
+                    .await;
 
                 if success {
                     artists_successful += 1;
                 } else {
-                    artists_failed.push((artist.name.clone(), "Not found or download failed".to_string()));
+                    artists_failed.push((
+                        artist.name.clone(),
+                        "Not found or download failed".to_string(),
+                    ));
                 }
 
-                let mut progress = self.fetch_progress.lock().unwrap_or_else(|e| e.into_inner());
+                let mut progress = self.fetch_progress.lock_infallible();
                 if let Some(ref mut p) = *progress {
                     p.update(artist.name, success);
                 }
@@ -213,8 +224,8 @@ impl ArtworkService {
 
         // Try to save report (non-fatal if it fails)
         match report.save(&self.app_paths.reports_dir()) {
-            Ok(path) => log::info!("Artwork scraping report saved to: {:?}", path),
-            Err(e) => log::warn!("Failed to save artwork report: {}", e),
+            Ok(path) => log::info!("Artwork scraping report saved to: {path:?}"),
+            Err(e) => log::warn!("Failed to save artwork report: {e}"),
         }
 
         Ok(())
@@ -224,12 +235,10 @@ impl ArtworkService {
     pub async fn fetch_album_artwork(&self, album_id: i64) -> Result<(), String> {
         let album = self.get_album_info(album_id)?;
 
-        let mb_client = MusicBrainzClient::new(
-            self.http_client.clone(),
-            self.rate_limiter.clone(),
-        );
+        let mb_client = MusicBrainzClient::new(self.http_client.clone(), self.rate_limiter.clone());
 
-        self.fetch_album_artwork_internal(&mb_client, album_id, &album.title, &album.artist_name).await;
+        self.fetch_album_artwork_internal(&mb_client, album_id, &album.title, &album.artist_name)
+            .await;
         Ok(())
     }
 
@@ -237,12 +246,10 @@ impl ArtworkService {
     pub async fn fetch_artist_photo(&self, artist_id: i64) -> Result<(), String> {
         let artist = self.get_artist_info(artist_id)?;
 
-        let mb_client = MusicBrainzClient::new(
-            self.http_client.clone(),
-            self.rate_limiter.clone(),
-        );
+        let mb_client = MusicBrainzClient::new(self.http_client.clone(), self.rate_limiter.clone());
 
-        self.fetch_artist_photo_internal(&mb_client, artist_id, &artist.name).await;
+        self.fetch_artist_photo_internal(&mb_client, artist_id, &artist.name)
+            .await;
         Ok(())
     }
 
@@ -257,35 +264,45 @@ impl ArtworkService {
         album_title: &str,
         artist_name: &str,
     ) -> bool {
-        match mb_client.search_album_artwork(album_title, artist_name).await {
+        match mb_client
+            .search_album_artwork(album_title, artist_name)
+            .await
+        {
             Ok(Some(result)) => {
-                let file_path = self.app_paths.album_artwork_dir()
+                let file_path = self
+                    .app_paths
+                    .album_artwork_dir()
                     .join(format!("{}.jpg", result.musicbrainz_id));
 
                 // Only write the file if it doesn't already exist (e.g. another album shares
                 // the same release, or the DB was reset but files were kept).
-                if !file_path.exists() {
-                    if let Err(e) = std::fs::write(&file_path, &result.image_data) {
-                        log::error!("Failed to save album artwork for {}: {}", album_id, e);
-                        return false;
-                    }
+                if !file_path.exists()
+                    && let Err(e) = std::fs::write(&file_path, &result.image_data)
+                {
+                    log::error!("Failed to save album artwork for {album_id}: {e}");
+                    return false;
                 }
 
                 let path_str = file_path.to_string_lossy().to_string();
                 if let Err(e) = self.update_album_mb_info(album_id, &path_str, &result) {
-                    log::error!("Failed to update DB for album {}: {}", album_id, e);
+                    log::error!("Failed to update DB for album {album_id}: {e}");
                     return false;
                 }
 
-                log::info!("Fetched artwork for album {} - {} (mbid: {})", artist_name, album_title, result.musicbrainz_id);
+                log::info!(
+                    "Fetched artwork for album {} - {} (mbid: {})",
+                    artist_name,
+                    album_title,
+                    result.musicbrainz_id
+                );
                 true
             }
             Ok(None) => {
-                log::warn!("No artwork found for album {} - {}", artist_name, album_title);
+                log::warn!("No artwork found for album {artist_name} - {album_title}");
                 false
             }
             Err(e) => {
-                log::error!("Error fetching artwork for album {} - {}: {}", artist_name, album_title, e);
+                log::error!("Error fetching artwork for album {artist_name} - {album_title}: {e}");
                 false
             }
         }
@@ -302,36 +319,41 @@ impl ArtworkService {
             Ok(Some(result)) => {
                 // Save photo if available
                 if let Some(ref image_data) = result.image_data {
-                    let file_path = self.app_paths.artist_photo_dir().join(format!("{}.jpg", artist_id));
+                    let file_path = self
+                        .app_paths
+                        .artist_photo_dir()
+                        .join(format!("{artist_id}.jpg"));
                     if let Err(e) = std::fs::write(&file_path, image_data) {
-                        log::error!("Failed to save artist photo for {}: {}", artist_id, e);
+                        log::error!("Failed to save artist photo for {artist_id}: {e}");
                         // Continue to save metadata even if image write fails
-                    } else if let Err(e) = self.update_artist_photo(artist_id, file_path.to_string_lossy().to_string()) {
-                        log::error!("Failed to update photo path for artist {}: {}", artist_id, e);
+                    } else if let Err(e) =
+                        self.update_artist_photo(artist_id, &file_path.to_string_lossy())
+                    {
+                        log::error!("Failed to update photo path for artist {artist_id}: {e}");
                     }
                 }
 
                 // Always save metadata (also sets photo_fetched_at so we don't retry)
                 if let Err(e) = self.update_artist_metadata(artist_id, &result) {
-                    log::error!("Failed to update metadata for artist {}: {}", artist_id, e);
+                    log::error!("Failed to update metadata for artist {artist_id}: {e}");
                 }
 
                 if result.image_data.is_some() {
-                    log::info!("Fetched photo + metadata for artist {}", artist_name);
+                    log::info!("Fetched photo + metadata for artist {artist_name}");
                 } else {
-                    log::info!("Fetched metadata (no photo) for artist {}", artist_name);
+                    log::info!("Fetched metadata (no photo) for artist {artist_name}");
                 }
-                true  // success = we found the artist (metadata is the value)
+                true // success = we found the artist (metadata is the value)
             }
             Ok(None) => {
                 // Artist not in TheAudioDB — mark as attempted so we don't retry on every run
-                log::warn!("Artist not found in TheAudioDB: {}", artist_name);
+                log::warn!("Artist not found in TheAudioDB: {artist_name}");
                 let _ = self.mark_artist_fetch_attempted(artist_id);
                 false
             }
             Err(e) => {
                 // Network/parse error — also mark as attempted to avoid hammering the API
-                log::error!("Error fetching data for artist {}: {}", artist_name, e);
+                log::error!("Error fetching data for artist {artist_name}: {e}");
                 let _ = self.mark_artist_fetch_attempted(artist_id);
                 false
             }
@@ -539,16 +561,16 @@ impl ArtworkService {
         if let Ok(entries) = std::fs::read_dir(&artwork_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |e| e == "jpg") {
+                if path.extension().is_some_and(|e| e == "jpg") {
                     let is_legacy = path
                         .file_stem()
                         .and_then(|s| s.to_str())
-                        .map_or(false, |stem| stem.chars().all(|c| c.is_ascii_digit()));
+                        .is_some_and(|stem| stem.chars().all(|c| c.is_ascii_digit()));
                     if is_legacy {
                         if let Err(e) = std::fs::remove_file(&path) {
-                            log::warn!("Could not remove legacy artwork file {:?}: {}", path, e);
+                            log::warn!("Could not remove legacy artwork file {path:?}: {e}");
                         } else {
-                            log::info!("Removed legacy artwork file: {:?}", path);
+                            log::info!("Removed legacy artwork file: {path:?}");
                         }
                     }
                 }
@@ -562,7 +584,8 @@ impl ArtworkService {
         log::info!("Legacy artwork cleanup complete");
     }
 
-    /// Update album artwork in database
+    /// Update album artwork in database (test helper only)
+    #[cfg(test)]
     fn update_album_artwork(&self, album_id: i64, path: String) -> Result<(), String> {
         let conn = self.pool.get().map_err(|e| e.to_string())?;
         conn.execute(
@@ -574,7 +597,7 @@ impl ArtworkService {
     }
 
     /// Update artist photo in database
-    fn update_artist_photo(&self, artist_id: i64, path: String) -> Result<(), String> {
+    fn update_artist_photo(&self, artist_id: i64, path: &str) -> Result<(), String> {
         let conn = self.pool.get().map_err(|e| e.to_string())?;
         conn.execute(
             "UPDATE artists SET photo_path = ?1, photo_source = 'theaudiodb', photo_fetched_at = CURRENT_TIMESTAMP WHERE id = ?2",
@@ -585,7 +608,11 @@ impl ArtworkService {
     }
 
     /// Update rich artist metadata from TheAudioDB, using COALESCE to avoid overwriting existing data.
-    fn update_artist_metadata(&self, artist_id: i64, result: &crate::services::artwork::client::ArtistSearchResult) -> Result<(), String> {
+    fn update_artist_metadata(
+        &self,
+        artist_id: i64,
+        result: &crate::services::artwork::client::ArtistSearchResult,
+    ) -> Result<(), String> {
         let conn = self.pool.get().map_err(|e| e.to_string())?;
         conn.execute(
             "UPDATE artists SET
@@ -638,8 +665,8 @@ struct ArtistInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helpers::TestEnv;
     use crate::db::queries;
+    use crate::test_helpers::TestEnv;
 
     // ArtworkFetchProgress tests
 
@@ -709,7 +736,9 @@ mod tests {
         let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
 
         // Set artwork
-        service.update_album_artwork(album_id, "/path/to/art.jpg".to_string()).unwrap();
+        service
+            .update_album_artwork(album_id, "/path/to/art.jpg".to_string())
+            .unwrap();
 
         let albums = service.get_albums_without_artwork().unwrap();
         assert_eq!(albums.len(), 0);
@@ -726,7 +755,9 @@ mod tests {
     fn test_has_album_artwork_true() {
         let (env, _artist_id, album_id) = setup_artwork_env();
         let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
-        service.update_album_artwork(album_id, "/art.jpg".to_string()).unwrap();
+        service
+            .update_album_artwork(album_id, "/art.jpg".to_string())
+            .unwrap();
         assert!(service.has_album_artwork(album_id));
     }
 
@@ -734,16 +765,26 @@ mod tests {
     fn test_update_album_artwork() {
         let (env, _artist_id, album_id) = setup_artwork_env();
         let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
-        service.update_album_artwork(album_id, "/path/art.jpg".to_string()).unwrap();
+        service
+            .update_album_artwork(album_id, "/path/art.jpg".to_string())
+            .unwrap();
 
         let conn = env.pool.get().unwrap();
         let path: String = conn
-            .query_row("SELECT online_artwork_path FROM albums WHERE id = ?1", [album_id], |r| r.get(0))
+            .query_row(
+                "SELECT online_artwork_path FROM albums WHERE id = ?1",
+                [album_id],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(path, "/path/art.jpg");
 
         let source: String = conn
-            .query_row("SELECT artwork_source FROM albums WHERE id = ?1", [album_id], |r| r.get(0))
+            .query_row(
+                "SELECT artwork_source FROM albums WHERE id = ?1",
+                [album_id],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(source, "musicbrainz");
     }
@@ -768,7 +809,9 @@ mod tests {
     fn test_has_artist_photo_true() {
         let (env, artist_id, _album_id) = setup_artwork_env();
         let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
-        service.update_artist_photo(artist_id, "/photo.jpg".to_string()).unwrap();
+        service
+            .update_artist_photo(artist_id, "/photo.jpg")
+            .unwrap();
         assert!(service.has_artist_photo(artist_id));
     }
 
@@ -776,16 +819,26 @@ mod tests {
     fn test_update_artist_photo() {
         let (env, artist_id, _album_id) = setup_artwork_env();
         let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
-        service.update_artist_photo(artist_id, "/path/photo.jpg".to_string()).unwrap();
+        service
+            .update_artist_photo(artist_id, "/path/photo.jpg")
+            .unwrap();
 
         let conn = env.pool.get().unwrap();
         let path: String = conn
-            .query_row("SELECT photo_path FROM artists WHERE id = ?1", [artist_id], |r| r.get(0))
+            .query_row(
+                "SELECT photo_path FROM artists WHERE id = ?1",
+                [artist_id],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(path, "/path/photo.jpg");
 
         let source: String = conn
-            .query_row("SELECT photo_source FROM artists WHERE id = ?1", [artist_id], |r| r.get(0))
+            .query_row(
+                "SELECT photo_source FROM artists WHERE id = ?1",
+                [artist_id],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(source, "theaudiodb");
     }
@@ -874,7 +927,9 @@ mod tests {
         drop(conn);
 
         let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
-        service.update_artist_photo(with_photo, "/photo.jpg".to_string()).unwrap();
+        service
+            .update_artist_photo(with_photo, "/photo.jpg")
+            .unwrap();
 
         let artists = service.get_artists_without_photos().unwrap();
         assert_eq!(artists.len(), 1);
@@ -887,26 +942,44 @@ mod tests {
     fn test_update_album_artwork_sets_fetched_at() {
         let (env, _artist_id, album_id) = setup_artwork_env();
         let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
-        service.update_album_artwork(album_id, "/art.jpg".to_string()).unwrap();
+        service
+            .update_album_artwork(album_id, "/art.jpg".to_string())
+            .unwrap();
 
         let conn = env.pool.get().unwrap();
         let fetched_at: Option<String> = conn
-            .query_row("SELECT artwork_fetched_at FROM albums WHERE id = ?1", [album_id], |r| r.get(0))
+            .query_row(
+                "SELECT artwork_fetched_at FROM albums WHERE id = ?1",
+                [album_id],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert!(fetched_at.is_some(), "artwork_fetched_at should be set after update");
+        assert!(
+            fetched_at.is_some(),
+            "artwork_fetched_at should be set after update"
+        );
     }
 
     #[test]
     fn test_update_artist_photo_sets_fetched_at() {
         let (env, artist_id, _album_id) = setup_artwork_env();
         let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
-        service.update_artist_photo(artist_id, "/photo.jpg".to_string()).unwrap();
+        service
+            .update_artist_photo(artist_id, "/photo.jpg")
+            .unwrap();
 
         let conn = env.pool.get().unwrap();
         let fetched_at: Option<String> = conn
-            .query_row("SELECT photo_fetched_at FROM artists WHERE id = ?1", [artist_id], |r| r.get(0))
+            .query_row(
+                "SELECT photo_fetched_at FROM artists WHERE id = ?1",
+                [artist_id],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert!(fetched_at.is_some(), "photo_fetched_at should be set after update");
+        assert!(
+            fetched_at.is_some(),
+            "photo_fetched_at should be set after update"
+        );
     }
 
     // ── has_album_artwork / has_artist_photo for unknown ids ─────────────────
@@ -941,8 +1014,46 @@ mod tests {
         // But photo_path should still be NULL
         let conn = env.pool.get().unwrap();
         let photo_path: Option<String> = conn
-            .query_row("SELECT photo_path FROM artists WHERE id = ?1", [artist_id], |r| r.get(0))
+            .query_row(
+                "SELECT photo_path FROM artists WHERE id = ?1",
+                [artist_id],
+                |r| r.get(0),
+            )
             .unwrap();
         assert!(photo_path.is_none());
+    }
+
+    // =========================================================================
+    // ArtworkFetchProgress::new — T006
+    // =========================================================================
+
+    #[test]
+    fn test_artwork_fetch_progress_new_sets_total_items() {
+        let p = ArtworkFetchProgress::new(42);
+        assert_eq!(p.total_items, 42);
+    }
+
+    #[test]
+    fn test_artwork_fetch_progress_new_zeroes_counters() {
+        let p = ArtworkFetchProgress::new(10);
+        assert_eq!(p.processed_items, 0);
+        assert_eq!(p.successful, 0);
+        assert_eq!(p.failed, 0);
+    }
+
+    #[test]
+    fn test_artwork_fetch_progress_new_empty_current_item() {
+        let p = ArtworkFetchProgress::new(5);
+        assert!(p.current_item.is_empty());
+    }
+
+    #[test]
+    fn test_artwork_fetch_progress_new_zero_total() {
+        let p = ArtworkFetchProgress::new(0);
+        assert_eq!(p.total_items, 0);
+        assert_eq!(p.processed_items, 0);
+        assert_eq!(p.successful, 0);
+        assert_eq!(p.failed, 0);
+        assert!(p.current_item.is_empty());
     }
 }

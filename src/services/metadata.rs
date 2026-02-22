@@ -41,9 +41,9 @@ impl MetadataService {
     /// Read metadata from an audio file
     pub fn read_metadata(&self, path: &Path) -> Result<TrackMetadata, LibraryError> {
         let tagged_file = Probe::open(path)
-            .map_err(|e| LibraryError::Metadata(format!("Failed to open file: {}", e)))?
+            .map_err(|e| LibraryError::Metadata(format!("Failed to open file: {e}")))?
             .read()
-            .map_err(|e| LibraryError::Metadata(format!("Failed to read file: {}", e)))?;
+            .map_err(|e| LibraryError::Metadata(format!("Failed to read file: {e}")))?;
 
         let tag = tagged_file
             .primary_tag()
@@ -58,21 +58,54 @@ impl MetadataService {
             .to_string();
 
         // Extract basic metadata, falling back to defaults when no tags are present
-        let (title, artist, album_artist, album, genre, track_number, disc_number, year, has_artwork) =
-            if let Some(tag) = tag {
-                let title = tag.title().map(|s| s.to_string()).unwrap_or(default_title);
-                let artist = tag.artist().map(|s| s.to_string()).unwrap_or_else(|| "Unknown Artist".to_string());
-                let album_artist = tag.get_string(&ItemKey::AlbumArtist).map(|s| s.to_string());
-                let album = tag.album().map(|s| s.to_string());
-                let genre = tag.genre().map(|s| s.to_string());
-                let track_number = tag.track().and_then(|n| n.try_into().ok());
-                let disc_number = tag.disk().and_then(|n| n.try_into().ok());
-                let year = tag.year().and_then(|y| y.try_into().ok());
-                let has_artwork = !tag.pictures().is_empty();
-                (title, artist, album_artist, album, genre, track_number, disc_number, year, has_artwork)
-            } else {
-                (default_title, "Unknown Artist".to_string(), None, None, None, None, None, None, false)
-            };
+        let (
+            title,
+            artist,
+            album_artist,
+            album,
+            genre,
+            track_number,
+            disc_number,
+            year,
+            has_artwork,
+        ) = if let Some(tag) = tag {
+            let title = tag.title().map_or(default_title, |s| s.to_string());
+            let artist = tag
+                .artist()
+                .map_or_else(|| "Unknown Artist".to_string(), |s| s.to_string());
+            let album_artist = tag
+                .get_string(&ItemKey::AlbumArtist)
+                .map(std::string::ToString::to_string);
+            let album = tag.album().map(|s| s.to_string());
+            let genre = tag.genre().map(|s| s.to_string());
+            let track_number = tag.track();
+            let disc_number = tag.disk();
+            let year = tag.year().and_then(|y| y.try_into().ok());
+            let has_artwork = !tag.pictures().is_empty();
+            (
+                title,
+                artist,
+                album_artist,
+                album,
+                genre,
+                track_number,
+                disc_number,
+                year,
+                has_artwork,
+            )
+        } else {
+            (
+                default_title,
+                "Unknown Artist".to_string(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+            )
+        };
 
         let duration = properties.duration();
         let sample_rate = properties.sample_rate();
@@ -95,9 +128,13 @@ impl MetadataService {
     }
 
     /// Extract and cache album artwork
-    pub fn extract_artwork(&self, path: &Path, artwork_hash: &str) -> Result<PathBuf, LibraryError> {
+    pub fn extract_artwork(
+        &self,
+        path: &Path,
+        artwork_hash: &str,
+    ) -> Result<PathBuf, LibraryError> {
         let cache_dir = self.app_paths.artwork_cache_dir();
-        let cached_path = cache_dir.join(format!("{}.jpg", artwork_hash));
+        let cached_path = cache_dir.join(format!("{artwork_hash}.jpg"));
 
         // Return cached path if it exists
         if cached_path.exists() {
@@ -106,9 +143,9 @@ impl MetadataService {
 
         // Read file and extract artwork
         let tagged_file = Probe::open(path)
-            .map_err(|e| LibraryError::Metadata(format!("Failed to open file: {}", e)))?
+            .map_err(|e| LibraryError::Metadata(format!("Failed to open file: {e}")))?
             .read()
-            .map_err(|e| LibraryError::Metadata(format!("Failed to read file: {}", e)))?;
+            .map_err(|e| LibraryError::Metadata(format!("Failed to read file: {e}")))?;
 
         let tag = tagged_file
             .primary_tag()
@@ -124,8 +161,7 @@ impl MetadataService {
             .ok_or_else(|| LibraryError::Metadata("No artwork found".to_string()))?;
 
         // Save artwork to cache
-        fs::write(&cached_path, picture.data())
-            .map_err(|e| LibraryError::Io(e))?;
+        fs::write(&cached_path, picture.data()).map_err(LibraryError::Io)?;
 
         Ok(cached_path)
     }
@@ -144,7 +180,7 @@ impl MetadataService {
     pub fn get_file_format(path: &Path) -> Option<String> {
         path.extension()
             .and_then(|ext| ext.to_str())
-            .map(|s| s.to_lowercase())
+            .map(str::to_lowercase)
     }
 
     /// Generate thumbnail from artwork (T131)
@@ -156,7 +192,7 @@ impl MetadataService {
         size: u32,
     ) -> Result<PathBuf, LibraryError> {
         let cache_dir = self.app_paths.artwork_cache_dir();
-        let thumbnail_path = cache_dir.join(format!("{}_{}x{}.jpg", artwork_hash, size, size));
+        let thumbnail_path = cache_dir.join(format!("{artwork_hash}_{size}x{size}.jpg"));
 
         // Return cached thumbnail if it exists
         if thumbnail_path.exists() {
@@ -168,7 +204,7 @@ impl MetadataService {
 
         // Load and resize image
         let img = image::open(&artwork_path)
-            .map_err(|e| LibraryError::Metadata(format!("Failed to load image: {}", e)))?;
+            .map_err(|e| LibraryError::Metadata(format!("Failed to load image: {e}")))?;
 
         // Create thumbnail using a fast filter
         let thumbnail = img.thumbnail(size, size);
@@ -176,7 +212,7 @@ impl MetadataService {
         // Save thumbnail
         thumbnail
             .save(&thumbnail_path)
-            .map_err(|e| LibraryError::Metadata(format!("Failed to save thumbnail: {}", e)))?;
+            .map_err(|e| LibraryError::Metadata(format!("Failed to save thumbnail: {e}")))?;
 
         Ok(thumbnail_path)
     }
@@ -196,14 +232,14 @@ impl MetadataService {
                 Ok(path) => thumbnails.push(path),
                 Err(e) => {
                     // Log but continue with other sizes
-                    log::warn!("Failed to generate {}x{} thumbnail: {}", size, size, e);
+                    log::warn!("Failed to generate {size}x{size} thumbnail: {e}");
                 }
             }
         }
 
         if thumbnails.is_empty() {
             return Err(LibraryError::Metadata(
-                "Failed to generate any thumbnails".to_string()
+                "Failed to generate any thumbnails".to_string(),
             ));
         }
 
@@ -218,13 +254,14 @@ impl MetadataService {
         size: u32,
     ) -> Option<PathBuf> {
         let cache_dir = self.app_paths.artwork_cache_dir();
-        let thumbnail_path = cache_dir.join(format!("{}_{}x{}.jpg", artwork_hash, size, size));
+        let thumbnail_path = cache_dir.join(format!("{artwork_hash}_{size}x{size}.jpg"));
 
         if thumbnail_path.exists() {
             Some(thumbnail_path)
         } else {
             // Try to generate it
-            self.generate_thumbnail(source_path, artwork_hash, size).ok()
+            self.generate_thumbnail(source_path, artwork_hash, size)
+                .ok()
         }
     }
 }
@@ -234,13 +271,11 @@ mod tests {
     use super::*;
     use crate::test_helpers::TestEnv;
 
-    const MINIMAL_FLAC: &[u8] =
-        include_bytes!("../../tests/fixtures/minimal.flac");
+    const MINIMAL_FLAC: &[u8] = include_bytes!("../../tests/fixtures/minimal.flac");
 
     // Minimal FLAC with STREAMINFO only — no VORBIS_COMMENT block.
     // Used to exercise the "no tags" fallback path in read_metadata.
-    const NO_TAGS_FLAC: &[u8] =
-        include_bytes!("../../tests/fixtures/no-tags.flac");
+    const NO_TAGS_FLAC: &[u8] = include_bytes!("../../tests/fixtures/no-tags.flac");
 
     fn make_service() -> (TestEnv, MetadataService) {
         let env = TestEnv::new();
@@ -251,13 +286,22 @@ mod tests {
     #[test]
     fn test_file_format() {
         let path = Path::new("/music/test.flac");
-        assert_eq!(MetadataService::get_file_format(path), Some("flac".to_string()));
+        assert_eq!(
+            MetadataService::get_file_format(path),
+            Some("flac".to_string())
+        );
     }
 
     #[test]
     fn test_file_format_case_insensitive() {
-        assert_eq!(MetadataService::get_file_format(Path::new("/x.FLAC")), Some("flac".to_string()));
-        assert_eq!(MetadataService::get_file_format(Path::new("/x.MP3")), Some("mp3".to_string()));
+        assert_eq!(
+            MetadataService::get_file_format(Path::new("/x.FLAC")),
+            Some("flac".to_string())
+        );
+        assert_eq!(
+            MetadataService::get_file_format(Path::new("/x.MP3")),
+            Some("mp3".to_string())
+        );
     }
 
     #[test]
@@ -333,7 +377,10 @@ mod tests {
         let (_env, svc) = make_service();
         let meta = svc.read_metadata(&path).unwrap();
 
-        assert_eq!(meta.title, "my_song", "title must fall back to file stem when no tags");
+        assert_eq!(
+            meta.title, "my_song",
+            "title must fall back to file stem when no tags"
+        );
     }
 
     #[test]
@@ -358,7 +405,10 @@ mod tests {
         let meta = svc.read_metadata(&path).unwrap();
 
         assert!(meta.album.is_none(), "album must be None when no tags");
-        assert!(meta.album_artist.is_none(), "album_artist must be None when no tags");
+        assert!(
+            meta.album_artist.is_none(),
+            "album_artist must be None when no tags"
+        );
         assert!(meta.genre.is_none(), "genre must be None when no tags");
         assert!(meta.track_number.is_none());
         assert!(meta.disc_number.is_none());

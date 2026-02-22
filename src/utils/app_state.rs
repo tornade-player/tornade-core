@@ -1,6 +1,6 @@
 // Application state persistence
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 use crate::db::DbPool;
 use crate::models::RepeatMode;
@@ -8,7 +8,7 @@ use crate::models::RepeatMode;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedState {
     pub current_track_id: Option<i64>,
-    pub playback_position: f64,  // Position in seconds
+    pub playback_position: f64, // Position in seconds
     pub queue: Vec<i64>,
     pub queue_index: usize,
     #[serde(default)]
@@ -51,17 +51,18 @@ pub fn save_state(pool: &DbPool, state: &PersistedState) -> Result<(), Box<dyn s
 pub fn load_state(pool: &DbPool) -> Result<PersistedState, Box<dyn std::error::Error>> {
     let conn = pool.get()?;
 
-    let state_json: String = conn.query_row(
-        "SELECT value FROM app_state WHERE key = 'playback_state'",
-        [],
-        |row| row.get(0),
-    ).unwrap_or_else(|_| {
-        // Return default state if not found
-        serde_json::to_string(&PersistedState::default()).unwrap()
-    });
+    let state_json: String = conn
+        .query_row(
+            "SELECT value FROM app_state WHERE key = 'playback_state'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|_| {
+            // Return default state if not found
+            serde_json::to_string(&PersistedState::default()).unwrap()
+        });
 
-    let state: PersistedState = serde_json::from_str(&state_json)
-        .unwrap_or_default();
+    let state: PersistedState = serde_json::from_str(&state_json).unwrap_or_default();
 
     Ok(state)
 }
@@ -70,10 +71,7 @@ pub fn load_state(pool: &DbPool) -> Result<PersistedState, Box<dyn std::error::E
 pub fn clear_state(pool: &DbPool) -> Result<(), Box<dyn std::error::Error>> {
     let conn = pool.get()?;
 
-    conn.execute(
-        "DELETE FROM app_state WHERE key = 'playback_state'",
-        [],
-    )?;
+    conn.execute("DELETE FROM app_state WHERE key = 'playback_state'", [])?;
 
     Ok(())
 }
@@ -160,7 +158,8 @@ mod tests {
         conn.execute(
             "INSERT OR REPLACE INTO app_state (key, value) VALUES ('playback_state', ?1)",
             ["{ not valid json !!!"],
-        ).unwrap();
+        )
+        .unwrap();
         drop(conn);
 
         // Should silently fall back to default instead of panicking
@@ -173,8 +172,16 @@ mod tests {
     fn test_save_overwrites_previous_state() {
         let (_dir, pool) = create_test_pool();
 
-        let state1 = PersistedState { current_track_id: Some(10), volume: 0.5, ..Default::default() };
-        let state2 = PersistedState { current_track_id: Some(20), volume: 0.8, ..Default::default() };
+        let state1 = PersistedState {
+            current_track_id: Some(10),
+            volume: 0.5,
+            ..Default::default()
+        };
+        let state2 = PersistedState {
+            current_track_id: Some(20),
+            volume: 0.8,
+            ..Default::default()
+        };
 
         save_state(&pool, &state1).unwrap();
         save_state(&pool, &state2).unwrap();
@@ -207,7 +214,10 @@ mod tests {
     fn test_save_and_load_repeat_mode_one() {
         let (_dir, pool) = create_test_pool();
 
-        let state = PersistedState { repeat_mode: RepeatMode::One, ..Default::default() };
+        let state = PersistedState {
+            repeat_mode: RepeatMode::One,
+            ..Default::default()
+        };
         save_state(&pool, &state).unwrap();
 
         let loaded = load_state(&pool).unwrap();

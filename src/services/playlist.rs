@@ -1,6 +1,6 @@
 // Playlist management service
 
-use crate::db::{queries, DbPool};
+use crate::db::{DbPool, queries};
 use crate::models::Playlist;
 use crate::services::error::PlaylistError;
 use log::info;
@@ -23,11 +23,7 @@ impl PlaylistService {
 
     /// Create a new playlist
     pub fn create_playlist(&self, name: &str, description: Option<&str>) -> Result<Playlist> {
-        let conn = self.pool.get().map_err(|e| {
-            PlaylistError::Database(rusqlite::Error::InvalidPath(
-                std::path::PathBuf::from(format!("Pool error: {}", e))
-            ))
-        })?;
+        let conn = self.pool.get()?;
 
         let playlist_id = queries::create_playlist(&conn, name, description)?;
 
@@ -37,25 +33,17 @@ impl PlaylistService {
 
     /// Get playlist by ID
     pub fn get_playlist(&self, id: i64) -> Result<Option<Playlist>> {
-        let conn = self.pool.get().map_err(|e| {
-            PlaylistError::Database(rusqlite::Error::InvalidPath(
-                std::path::PathBuf::from(format!("Pool error: {}", e))
-            ))
-        })?;
+        let conn = self.pool.get()?;
 
         Ok(queries::get_playlist(&conn, id)?)
     }
 
     /// List all playlists
     pub fn list_playlists(&self) -> Result<Vec<Playlist>> {
-        let conn = self.pool.get().map_err(|e| {
-            PlaylistError::Database(rusqlite::Error::InvalidPath(
-                std::path::PathBuf::from(format!("Pool error: {}", e))
-            ))
-        })?;
+        let conn = self.pool.get()?;
 
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, created_at, updated_at FROM playlists ORDER BY name"
+            "SELECT id, name, description, created_at, updated_at FROM playlists ORDER BY name",
         )?;
 
         let playlists = stmt.query_map([], |row| {
@@ -67,7 +55,7 @@ impl PlaylistService {
 
             // Get tracks
             let mut track_stmt = conn.prepare(
-                "SELECT track_id FROM playlist_tracks WHERE playlist_id = ?1 ORDER BY position"
+                "SELECT track_id FROM playlist_tracks WHERE playlist_id = ?1 ORDER BY position",
             )?;
             let tracks: rusqlite::Result<Vec<i64>> = track_stmt
                 .query_map([playlist_id], |row| row.get(0))?
@@ -83,64 +71,49 @@ impl PlaylistService {
             })
         })?;
 
-        playlists.collect::<rusqlite::Result<Vec<_>>>()
+        playlists
+            .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(PlaylistError::Database)
     }
 
     /// Rename playlist
     pub fn rename_playlist(&self, id: i64, name: &str) -> Result<()> {
-        let conn = self.pool.get().map_err(|e| {
-            PlaylistError::Database(rusqlite::Error::InvalidPath(
-                std::path::PathBuf::from(format!("Pool error: {}", e))
-            ))
-        })?;
+        let conn = self.pool.get()?;
 
         conn.execute(
             "UPDATE playlists SET name = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
             rusqlite::params![name, id],
         )?;
 
-        info!("Renamed playlist {} to '{}'", id, name);
+        info!("Renamed playlist {id} to '{name}'");
         Ok(())
     }
 
     /// Delete playlist
     pub fn delete_playlist(&self, id: i64) -> Result<()> {
-        let conn = self.pool.get().map_err(|e| {
-            PlaylistError::Database(rusqlite::Error::InvalidPath(
-                std::path::PathBuf::from(format!("Pool error: {}", e))
-            ))
-        })?;
+        let conn = self.pool.get()?;
 
         conn.execute("DELETE FROM playlists WHERE id = ?1", rusqlite::params![id])?;
 
-        info!("Deleted playlist {}", id);
+        info!("Deleted playlist {id}");
         Ok(())
     }
 
     /// Add tracks to playlist
     pub fn add_tracks(&self, playlist_id: i64, track_ids: Vec<i64>) -> Result<()> {
-        let conn = self.pool.get().map_err(|e| {
-            PlaylistError::Database(rusqlite::Error::InvalidPath(
-                std::path::PathBuf::from(format!("Pool error: {}", e))
-            ))
-        })?;
+        let conn = self.pool.get()?;
 
         for track_id in track_ids {
             queries::add_track_to_playlist(&conn, playlist_id, track_id)?;
         }
 
-        info!("Added tracks to playlist {}", playlist_id);
+        info!("Added tracks to playlist {playlist_id}");
         Ok(())
     }
 
     /// Remove track from playlist at position
     pub fn remove_track(&self, playlist_id: i64, position: usize) -> Result<()> {
-        let conn = self.pool.get().map_err(|e| {
-            PlaylistError::Database(rusqlite::Error::InvalidPath(
-                std::path::PathBuf::from(format!("Pool error: {}", e))
-            ))
-        })?;
+        let conn = self.pool.get()?;
 
         conn.execute(
             "DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND position = ?2",
@@ -159,26 +132,22 @@ impl PlaylistService {
             rusqlite::params![playlist_id],
         )?;
 
-        info!("Removed track at position {} from playlist {}", position, playlist_id);
+        info!("Removed track at position {position} from playlist {playlist_id}");
         Ok(())
     }
 
     /// Move track in playlist
     pub fn move_track(&self, playlist_id: i64, from: usize, to: usize) -> Result<()> {
-        let conn = self.pool.get().map_err(|e| {
-            PlaylistError::Database(rusqlite::Error::InvalidPath(
-                std::path::PathBuf::from(format!("Pool error: {}", e))
-            ))
-        })?;
+        let conn = self.pool.get()?;
 
         // Simple implementation: get all tracks, reorder, and update
         let playlist = queries::get_playlist(&conn, playlist_id)?
             .ok_or(PlaylistError::PlaylistNotFound(playlist_id))?;
 
         if from >= playlist.tracks.len() || to >= playlist.tracks.len() {
-            return Err(PlaylistError::Database(rusqlite::Error::InvalidParameterName(
-                "Invalid position".to_string()
-            )));
+            return Err(PlaylistError::Database(
+                rusqlite::Error::InvalidParameterName("Invalid position".to_string()),
+            ));
         }
 
         let mut tracks = playlist.tracks;
@@ -203,7 +172,7 @@ impl PlaylistService {
             rusqlite::params![playlist_id],
         )?;
 
-        info!("Moved track from position {} to {} in playlist {}", from, to, playlist_id);
+        info!("Moved track from position {from} to {to} in playlist {playlist_id}");
         Ok(())
     }
 
@@ -215,14 +184,11 @@ impl PlaylistService {
     pub fn import_m3u(&self, path: &Path) -> Result<Playlist> {
         let m3u_data = crate::utils::m3u::parse_m3u(path)?;
 
-        let conn = self.pool.get().map_err(|e| {
-            PlaylistError::Database(rusqlite::Error::InvalidPath(
-                std::path::PathBuf::from(format!("Pool error: {}", e))
-            ))
-        })?;
+        let conn = self.pool.get()?;
 
         // Create playlist
-        let name = path.file_stem()
+        let name = path
+            .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("Imported Playlist");
 
@@ -244,7 +210,7 @@ impl PlaylistService {
             }
         }
 
-        info!("Imported M3U playlist '{}' with {} tracks", name, added);
+        info!("Imported M3U playlist '{name}' with {added} tracks");
 
         queries::get_playlist(&conn, playlist_id)?
             .ok_or(PlaylistError::PlaylistNotFound(playlist_id))
@@ -252,11 +218,7 @@ impl PlaylistService {
 
     /// Export playlist to M3U file
     pub fn export_m3u(&self, playlist_id: i64, path: &Path) -> Result<()> {
-        let conn = self.pool.get().map_err(|e| {
-            PlaylistError::Database(rusqlite::Error::InvalidPath(
-                std::path::PathBuf::from(format!("Pool error: {}", e))
-            ))
-        })?;
+        let conn = self.pool.get()?;
 
         let playlist = queries::get_playlist(&conn, playlist_id)?
             .ok_or(PlaylistError::PlaylistNotFound(playlist_id))?;
@@ -271,7 +233,7 @@ impl PlaylistService {
 
         crate::utils::m3u::write_m3u(path, &tracks)?;
 
-        info!("Exported playlist {} to M3U file: {:?}", playlist_id, path);
+        info!("Exported playlist {playlist_id} to M3U file: {path:?}");
         Ok(())
     }
 }
@@ -290,7 +252,9 @@ mod tests {
     #[test]
     fn test_create_playlist() {
         let (_env, service) = setup();
-        let pl = service.create_playlist("My Mix", Some("A great mix")).unwrap();
+        let pl = service
+            .create_playlist("My Mix", Some("A great mix"))
+            .unwrap();
         assert_eq!(pl.name, "My Mix");
         assert_eq!(pl.description, Some("A great mix".to_string()));
         assert!(pl.tracks.is_empty());
@@ -414,7 +378,10 @@ mod tests {
 
         let (_env, service) = setup();
         let playlist = service.import_m3u(&m3u_path).unwrap();
-        assert!(playlist.tracks.is_empty(), "paths not in DB must be skipped");
+        assert!(
+            playlist.tracks.is_empty(),
+            "paths not in DB must be skipped"
+        );
     }
 
     #[test]
@@ -427,7 +394,11 @@ mod tests {
         env.seed_basic_library();
 
         let playlist = service.import_m3u(&m3u_path).unwrap();
-        assert_eq!(playlist.tracks.len(), 2, "both seeded tracks must be matched");
+        assert_eq!(
+            playlist.tracks.len(),
+            2,
+            "both seeded tracks must be matched"
+        );
     }
 
     // ── export_m3u ───────────────────────────────────────────────────────────
@@ -479,6 +450,9 @@ mod tests {
 
         let contents = std::fs::read_to_string(tmp.path()).unwrap();
         assert!(contents.contains("#EXTM3U"));
-        assert!(!contents.contains("#EXTINF"), "no track entries for empty playlist");
+        assert!(
+            !contents.contains("#EXTINF"),
+            "no track entries for empty playlist"
+        );
     }
 }

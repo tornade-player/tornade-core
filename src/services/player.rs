@@ -1,15 +1,15 @@
 // Audio playback service using rodio
 
 use crate::db::DbPool;
-use crate::models::{Track, Queue, RepeatMode};
+use crate::models::{Queue, RepeatMode, Track};
 use crate::services::error::PlayerError;
-use crate::utils::app_state::{self, PersistedState};
 use crate::services::events::PlaybackState;
+use crate::utils::app_state::{self, PersistedState};
 use log::{info, warn};
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink};
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::BufReader;
-use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -45,7 +45,11 @@ impl PlayerService {
             shuffle_order: persisted.shuffle_order,
         };
 
-        info!("Restored queue with {} tracks (index {})", queue.tracks.len(), queue.current_index);
+        info!(
+            "Restored queue with {} tracks (index {})",
+            queue.tracks.len(),
+            queue.current_index
+        );
 
         Ok(PlayerService {
             pool,
@@ -69,11 +73,11 @@ impl PlayerService {
 
         if audio.is_none() {
             let (stream, handle) = OutputStream::try_default()
-                .map_err(|e| PlayerError::Audio(format!("Failed to create audio stream: {}", e)))?;
-            *audio = Some((stream, handle.clone()));
+                .map_err(|e| PlayerError::Audio(format!("Failed to create audio stream: {e}")))?;
+            *audio = Some((stream, handle.clone())); // clone: store handle and return it
             Ok(handle)
         } else {
-            Ok(audio.as_ref().unwrap().1.clone())
+            Ok(audio.as_ref().unwrap().1.clone()) // clone: escape MutexGuard scope
         }
     }
 
@@ -83,35 +87,36 @@ impl PlayerService {
 
     /// Start playing a track
     pub fn play(&self, track_id: i64) -> Result<()> {
-        info!("Playing track: {}", track_id);
+        info!("Playing track: {track_id}");
 
         // Ensure audio stream is initialized
         let stream_handle = self.ensure_audio_stream()?;
 
         // Get track from database
-        let conn = self.pool.get().map_err(|e| {
-            PlayerError::Audio(format!("Database connection error: {}", e))
-        })?;
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| PlayerError::Audio(format!("Database connection error: {e}")))?;
 
         let track = crate::db::queries::get_track(&conn, track_id)
-            .map_err(|e| PlayerError::Audio(format!("Database error: {}", e)))?
+            .map_err(|e| PlayerError::Audio(format!("Database error: {e}")))?
             .ok_or(PlayerError::TrackNotFound(track_id))?;
 
         // Create new sink
         let sink = Sink::try_new(&stream_handle)
-            .map_err(|e| PlayerError::Audio(format!("Failed to create sink: {}", e)))?;
+            .map_err(|e| PlayerError::Audio(format!("Failed to create sink: {e}")))?;
 
         // Open and decode file
         let file = File::open(&track.file_path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 PlayerError::FileNotFound(track.file_path.to_string_lossy().into_owned())
             } else {
-                PlayerError::Audio(format!("Failed to open file: {}", e))
+                PlayerError::Audio(format!("Failed to open file: {e}"))
             }
         })?;
 
         let source = Decoder::new(BufReader::new(file))
-            .map_err(|e| PlayerError::Audio(format!("Failed to decode audio: {}", e)))?;
+            .map_err(|e| PlayerError::Audio(format!("Failed to decode audio: {e}")))?;
 
         // Set volume
         let volume = self.state.lock().unwrap().volume;
@@ -137,7 +142,12 @@ impl PlayerService {
                 // If shuffle is enabled, find position in shuffle_order
                 if state.queue.shuffle_enabled {
                     // Find the index in shuffle_order that points to this track position
-                    if let Some(shuffle_idx) = state.queue.shuffle_order.iter().position(|&idx| idx == position) {
+                    if let Some(shuffle_idx) = state
+                        .queue
+                        .shuffle_order
+                        .iter()
+                        .position(|&idx| idx == position)
+                    {
                         state.queue.current_index = shuffle_idx;
                     }
                 } else {
@@ -230,9 +240,11 @@ impl PlayerService {
             let state = self.state.lock().unwrap();
 
             // Verify we have a current track
-            let track = state.current_track.as_ref()
+            let track = state
+                .current_track
+                .as_ref()
                 .ok_or(PlayerError::EmptyQueue)?
-                .clone();
+                .clone(); // clone: must escape MutexGuard scope
 
             let was_playing = matches!(state.playback_state, PlaybackState::Playing);
             let volume = state.volume;
@@ -251,7 +263,7 @@ impl PlayerService {
         if !was_playing {
             let mut state = self.state.lock().unwrap();
             state.paused_at = Some(clamped_position);
-            info!("Seeked to {:?} while paused", clamped_position);
+            info!("Seeked to {clamped_position:?} while paused");
             return Ok(());
         }
 
@@ -264,12 +276,12 @@ impl PlayerService {
             if e.kind() == std::io::ErrorKind::NotFound {
                 PlayerError::FileNotFound(track.file_path.to_string_lossy().into_owned())
             } else {
-                PlayerError::Audio(format!("Failed to open file: {}", e))
+                PlayerError::Audio(format!("Failed to open file: {e}"))
             }
         })?;
 
         let source = Decoder::new(BufReader::new(file))
-            .map_err(|e| PlayerError::Audio(format!("Failed to decode audio: {}", e)))?;
+            .map_err(|e| PlayerError::Audio(format!("Failed to decode audio: {e}")))?;
 
         // Skip to the desired position using rodio's skip_duration
         use rodio::Source;
@@ -277,7 +289,7 @@ impl PlayerService {
 
         // Create new sink
         let sink = Sink::try_new(&stream_handle)
-            .map_err(|e| PlayerError::Audio(format!("Failed to create sink: {}", e)))?;
+            .map_err(|e| PlayerError::Audio(format!("Failed to create sink: {e}")))?;
 
         sink.set_volume(volume);
         sink.append(source_at_position);
@@ -293,7 +305,7 @@ impl PlayerService {
             *self.sink.lock().unwrap() = Some(sink);
         }
 
-        info!("Seeked to {:?}", clamped_position);
+        info!("Seeked to {clamped_position:?}");
         Ok(())
     }
 
@@ -339,8 +351,13 @@ impl PlayerService {
                     return Ok(());
                 }
                 Err(PlayerError::FileNotFound(path)) if consecutive_misses < 3 => {
-                    warn!("Track {} file not found in next(), skipping", track_id);
-                    self.state.lock().unwrap().skipped_track_ids.insert(track_id);
+                    warn!("Track {track_id} file not found in next(), skipping");
+                    let mut state = self.state.lock().unwrap();
+                    // Cap the set at 500 entries to prevent unbounded growth
+                    if state.skipped_track_ids.len() < 500 {
+                        state.skipped_track_ids.insert(track_id);
+                    }
+                    drop(state);
                     consecutive_misses += 1;
                 }
                 Err(e) => return Err(e),
@@ -365,7 +382,10 @@ impl PlayerService {
 
         if should_restart {
             // Restart current track
-            let track_id = self.state.lock().unwrap()
+            let track_id = self
+                .state
+                .lock()
+                .unwrap()
                 .current_track
                 .as_ref()
                 .map(|t| t.id)
@@ -390,8 +410,7 @@ impl PlayerService {
             }
         }
 
-        let track_id = state.queue.current_track()
-            .ok_or(PlayerError::EmptyQueue)?;
+        let track_id = state.queue.current_track().ok_or(PlayerError::EmptyQueue)?;
 
         drop(state);
 
@@ -430,8 +449,12 @@ impl PlayerService {
                     return Ok(());
                 }
                 Err(PlayerError::FileNotFound(path)) => {
-                    warn!("Track {} file not found ({}), skipping", track_id, path);
-                    self.state.lock().unwrap().skipped_track_ids.insert(track_id);
+                    warn!("Track {track_id} file not found ({path}), skipping");
+                    let mut state = self.state.lock().unwrap();
+                    if state.skipped_track_ids.len() < 500 {
+                        state.skipped_track_ids.insert(track_id);
+                    }
+                    drop(state);
                     // Stop after 3 consecutive missing files — likely a disconnected volume
                     if current >= index + 3 {
                         return Err(PlayerError::FileNotFound(path));
@@ -457,16 +480,16 @@ impl PlayerService {
             PersistedState {
                 current_track_id: state.current_track.as_ref().map(|t| t.id),
                 playback_position: 0.0,
-                queue: state.queue.tracks.clone(),
+                queue: state.queue.tracks.clone(), // clone: PersistedState needs owned Vec
                 queue_index: state.queue.current_index,
-                shuffle_order: state.queue.shuffle_order.clone(),
+                shuffle_order: state.queue.shuffle_order.clone(), // clone: PersistedState needs owned Vec
                 volume: state.volume,
                 shuffle_enabled: state.queue.shuffle_enabled,
                 repeat_mode: state.queue.repeat_mode,
             }
         };
         if let Err(e) = app_state::save_state(&self.pool, &persisted) {
-            warn!("Failed to persist queue state: {}", e);
+            warn!("Failed to persist queue state: {e}");
         }
     }
 
@@ -509,7 +532,7 @@ impl PlayerService {
             }
         }
 
-        info!("Added {} tracks to queue", count);
+        info!("Added {count} tracks to queue");
         self.save_queue_state();
         Ok(())
     }
@@ -538,7 +561,7 @@ impl PlayerService {
             state.queue.shuffle_order = indices;
         }
 
-        info!("Removed track at position {}", position);
+        info!("Removed track at position {position}");
         drop(state);
         self.save_queue_state();
         Ok(())
@@ -575,7 +598,7 @@ impl PlayerService {
             }
         }
 
-        info!("Moved track from position {} to {}", from, to);
+        info!("Moved track from position {from} to {to}");
         self.save_queue_state();
         Ok(())
     }
@@ -596,7 +619,7 @@ impl PlayerService {
 
     /// Get current queue
     pub fn get_queue(&self) -> Vec<i64> {
-        self.state.lock().unwrap().queue.tracks.clone()
+        self.state.lock().unwrap().queue.tracks.clone() // clone: return owned Vec across lock boundary
     }
 
     /// Get current queue index
@@ -606,7 +629,13 @@ impl PlayerService {
 
     /// Get track IDs that failed to play due to missing files
     pub fn get_skipped_track_ids(&self) -> Vec<i64> {
-        self.state.lock().unwrap().skipped_track_ids.iter().copied().collect()
+        self.state
+            .lock()
+            .unwrap()
+            .skipped_track_ids
+            .iter()
+            .copied()
+            .collect()
     }
 
     // ========================================================================
@@ -618,7 +647,7 @@ impl PlayerService {
     }
 
     pub fn get_current_track(&self) -> Option<Track> {
-        self.state.lock().unwrap().current_track.clone()
+        self.state.lock().unwrap().current_track.clone() // clone: return owned Track across lock boundary
     }
 
     /// Get current playback position in seconds
@@ -633,9 +662,7 @@ impl PlayerService {
                     0.0
                 }
             }
-            PlaybackState::Paused => {
-                state.paused_at.map(|d| d.as_secs_f64()).unwrap_or(0.0)
-            }
+            PlaybackState::Paused => state.paused_at.map_or(0.0, |d| d.as_secs_f64()),
             PlaybackState::Stopped => 0.0,
         }
     }
@@ -655,7 +682,9 @@ impl PlayerService {
         } else {
             // When disabling shuffle, current_index is a shuffle_order position
             // We need to convert it to the actual track position
-            if !state.queue.shuffle_order.is_empty() && state.queue.current_index < state.queue.shuffle_order.len() {
+            if !state.queue.shuffle_order.is_empty()
+                && state.queue.current_index < state.queue.shuffle_order.len()
+            {
                 Some(state.queue.shuffle_order[state.queue.current_index])
             } else {
                 None
@@ -670,17 +699,21 @@ impl PlayerService {
             use rand::thread_rng;
 
             let mut indices: Vec<usize> = (0..state.queue.len()).collect();
-            eprintln!("🎲 SHUFFLE: Before shuffle - indices={:?}", indices);
+            log::debug!("SHUFFLE: Before shuffle - indices={indices:?}");
             indices.shuffle(&mut thread_rng());
-            eprintln!("🎲 SHUFFLE: After shuffle - indices={:?}", indices);
+            log::debug!("SHUFFLE: After shuffle - indices={indices:?}");
             state.queue.shuffle_order = indices;
 
             // Update current_index to point to the same track in the new shuffle order
-            if let Some(track_pos) = current_track_position {
-                if let Some(shuffle_idx) = state.queue.shuffle_order.iter().position(|&idx| idx == track_pos) {
-                    eprintln!("🎲 SHUFFLE: track_pos={}, shuffle_idx={}", track_pos, shuffle_idx);
-                    state.queue.current_index = shuffle_idx;
-                }
+            if let Some(track_pos) = current_track_position
+                && let Some(shuffle_idx) = state
+                    .queue
+                    .shuffle_order
+                    .iter()
+                    .position(|&idx| idx == track_pos)
+            {
+                log::debug!("SHUFFLE: track_pos={track_pos}, shuffle_idx={shuffle_idx}");
+                state.queue.current_index = shuffle_idx;
             }
         } else {
             // When disabling shuffle, set current_index to the actual track position
@@ -689,7 +722,8 @@ impl PlayerService {
             }
         }
 
-        eprintln!("🎲 SHUFFLE: {} (current_index={}, shuffle_order={:?})",
+        log::debug!(
+            "SHUFFLE: {} (current_index={}, shuffle_order={:?})",
             if enabled { "enabled" } else { "disabled" },
             state.queue.current_index,
             state.queue.shuffle_order
@@ -701,7 +735,7 @@ impl PlayerService {
 
     pub fn set_repeat(&self, mode: RepeatMode) -> Result<()> {
         self.state.lock().unwrap().queue.repeat_mode = mode;
-        info!("Repeat mode set to {:?}", mode);
+        info!("Repeat mode set to {mode:?}");
         self.save_queue_state();
         Ok(())
     }
@@ -711,7 +745,7 @@ impl PlayerService {
     }
 
     pub fn get_shuffle_order(&self) -> Vec<usize> {
-        self.state.lock().unwrap().queue.shuffle_order.clone()
+        self.state.lock().unwrap().queue.shuffle_order.clone() // clone: return owned Vec across lock boundary
     }
 
     pub fn get_repeat_mode(&self) -> RepeatMode {
@@ -733,7 +767,7 @@ impl PlayerService {
         }
 
         self.state.lock().unwrap().volume = volume;
-        info!("Volume set to {}", volume);
+        info!("Volume set to {volume}");
         Ok(())
     }
 
@@ -776,7 +810,7 @@ impl PlayerService {
         // Primary: rodio sink reports all samples consumed
         let sink_empty = {
             let sink_lock = self.sink.lock().unwrap();
-            sink_lock.as_ref().map(|s| s.empty()).unwrap_or(false)
+            sink_lock.as_ref().is_some_and(rodio::Sink::empty)
         };
         if sink_empty {
             return true;
@@ -811,8 +845,8 @@ mod tests {
     use super::*;
     use crate::db;
     use crate::db::queries;
-    use crate::models::source::SourceType;
     use crate::models::AudioFormat;
+    use crate::models::source::SourceType;
     use std::io::Write;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
@@ -1262,7 +1296,7 @@ mod tests {
             bit_depth: Some(16),
             file_type: crate::models::AudioFormat::Flac,
             file_size: 0,
-            rating: 0,
+            rating: crate::models::Rating(0),
             fingerprint: None,
             is_duplicate: false,
             duplicate_of: None,
@@ -1302,7 +1336,7 @@ mod tests {
             bit_depth: Some(16),
             file_type: crate::models::AudioFormat::Flac,
             file_size: 0,
-            rating: 0,
+            rating: crate::models::Rating(0),
             fingerprint: None,
             is_duplicate: false,
             duplicate_of: None,
@@ -1758,5 +1792,102 @@ mod tests {
             id1,
             "RepeatMode::One must replay track 1, not advance to track 2"
         );
+    }
+
+    // =========================================================================
+    // Shuffle — T004
+    // =========================================================================
+
+    #[test]
+    fn test_set_shuffle_enable_toggle() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_queue(vec![1, 2, 3, 4, 5]).unwrap();
+
+        assert!(!player.is_shuffle_enabled());
+        player.set_shuffle(true).unwrap();
+        assert!(player.is_shuffle_enabled());
+        player.set_shuffle(false).unwrap();
+        assert!(!player.is_shuffle_enabled());
+    }
+
+    #[test]
+    fn test_set_shuffle_order_length_invariant() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        let queue = vec![10i64, 20, 30, 40, 50];
+        player.set_queue(queue.clone()).unwrap();
+
+        player.set_shuffle(true).unwrap();
+        let order = player.get_shuffle_order();
+        assert_eq!(
+            order.len(),
+            queue.len(),
+            "shuffle_order must contain exactly one entry per queue track"
+        );
+    }
+
+    #[test]
+    fn test_set_shuffle_order_contains_all_indices() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_queue(vec![10, 20, 30]).unwrap();
+
+        player.set_shuffle(true).unwrap();
+        let mut order = player.get_shuffle_order();
+        order.sort_unstable();
+        assert_eq!(
+            order,
+            vec![0, 1, 2],
+            "shuffle_order must be a permutation of 0..queue_len"
+        );
+    }
+
+    #[test]
+    fn test_set_shuffle_current_track_preserved_in_order() {
+        // When shuffle is enabled, the current track must appear at current_index
+        // within the shuffle_order so the player still points to the same track.
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_queue(vec![10, 20, 30, 40, 50]).unwrap();
+
+        // Move to index 2 (the third track) via direct state access
+        {
+            let mut state = player.state.lock().unwrap();
+            state.queue.current_index = 2;
+        }
+        let expected_pos = 2usize;
+
+        player.set_shuffle(true).unwrap();
+        let shuffle_idx = player.get_queue_index();
+        let order = player.get_shuffle_order();
+
+        assert_eq!(
+            order[shuffle_idx], expected_pos,
+            "shuffle_order[current_index] must equal the original track position"
+        );
+    }
+
+    #[test]
+    fn test_set_shuffle_disable_restores_track_position() {
+        let (_dir, pool) = create_test_pool();
+        let player = make_player(pool);
+        player.set_queue(vec![10, 20, 30]).unwrap();
+
+        // Move to index 1 via direct state access
+        {
+            let mut state = player.state.lock().unwrap();
+            state.queue.current_index = 1;
+        }
+
+        player.set_shuffle(true).unwrap();
+        player.set_shuffle(false).unwrap();
+
+        assert_eq!(
+            player.get_queue_index(),
+            1,
+            "disabling shuffle must restore current_index to the original track position"
+        );
+        assert!(!player.is_shuffle_enabled());
     }
 }

@@ -24,10 +24,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 
     // Migration 1: Initial schema (already applied via schema.rs)
     if current_version < 1 {
-        conn.execute(
-            "INSERT INTO schema_migrations (version) VALUES (?1)",
-            [1],
-        )?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (?1)", [1])?;
     }
 
     // Migration 2: Add online artwork support
@@ -41,10 +38,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
              ALTER TABLE artists ADD COLUMN photo_source TEXT;
              ALTER TABLE artists ADD COLUMN photo_fetched_at DATETIME;",
         )?;
-        conn.execute(
-            "INSERT INTO schema_migrations (version) VALUES (?1)",
-            [2],
-        )?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (?1)", [2])?;
     }
 
     // Migration 3: Add MusicBrainz metadata fields + rename artwork files to MBID-based names.
@@ -74,10 +68,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
              INSERT OR IGNORE INTO app_state (key, value)
              VALUES ('pending_legacy_artwork_cleanup', 'true');",
         )?;
-        conn.execute(
-            "INSERT INTO schema_migrations (version) VALUES (?1)",
-            [3],
-        )?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (?1)", [3])?;
     }
 
     // Migration 4: Merge duplicate album entries caused by missing ALBUMARTIST tags.
@@ -117,10 +108,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
                    );
             ",
         )?;
-        conn.execute(
-            "INSERT INTO schema_migrations (version) VALUES (?1)",
-            [4],
-        )?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (?1)", [4])?;
     }
 
     // Migration 5: Collapse multi-artist ARTIST tag entries into their primary artist.
@@ -133,11 +121,12 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     if current_version < 5 {
         // Collect all artists whose name looks like a comma-separated list
         let multi_artists: Vec<(i64, String)> = {
-            let mut stmt = conn.prepare(
-                "SELECT id, name FROM artists WHERE INSTR(name, ', ') > 0",
-            )?;
-            stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?
+            let mut stmt =
+                conn.prepare("SELECT id, name FROM artists WHERE INSTR(name, ', ') > 0")?;
+            stmt.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
         };
 
         for (multi_id, multi_name) in multi_artists {
@@ -155,19 +144,15 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             let primary_name = parts[0].trim();
 
             // Find or create the primary artist row
-            let primary_id: i64 = match conn.query_row(
+            let primary_id: i64 = if let Ok(id) = conn.query_row(
                 "SELECT id FROM artists WHERE name = ?1",
                 [primary_name],
                 |r| r.get(0),
             ) {
-                Ok(id) => id,
-                Err(_) => {
-                    conn.execute(
-                        "INSERT INTO artists (name) VALUES (?1)",
-                        [primary_name],
-                    )?;
-                    conn.last_insert_rowid()
-                }
+                id
+            } else {
+                conn.execute("INSERT INTO artists (name) VALUES (?1)", [primary_name])?;
+                conn.last_insert_rowid()
             };
 
             if primary_id == multi_id {
@@ -188,10 +173,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             conn.execute("DELETE FROM artists WHERE id = ?1", [multi_id])?;
         }
 
-        conn.execute(
-            "INSERT INTO schema_migrations (version) VALUES (?1)",
-            [5],
-        )?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (?1)", [5])?;
     }
 
     // Migration 6: Assign "Various Artists" to compilation albums.
@@ -240,10 +222,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             )?;
         }
 
-        conn.execute(
-            "INSERT INTO schema_migrations (version) VALUES (?1)",
-            [6],
-        )?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (?1)", [6])?;
     }
 
     // Migration 7: Add rich artist metadata from TheAudioDB
@@ -300,18 +279,21 @@ mod tests {
                     SELECT title FROM albums
                     GROUP BY title HAVING COUNT(*) > 1
                 );",
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     fn apply_migration_5_logic(conn: &Connection) {
         let multi_artists: Vec<(i64, String)> = {
-            let mut stmt = conn.prepare(
-                "SELECT id, name FROM artists WHERE INSTR(name, ', ') > 0",
-            ).unwrap();
-            stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
-                .unwrap()
-                .map(|r| r.unwrap())
-                .collect()
+            let mut stmt = conn
+                .prepare("SELECT id, name FROM artists WHERE INSTR(name, ', ') > 0")
+                .unwrap();
+            stmt.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
         };
 
         for (multi_id, multi_name) in multi_artists {
@@ -320,7 +302,9 @@ mod tests {
                 let lower = p.to_lowercase();
                 !lower.contains(" & ") && !lower.contains(" and ")
             });
-            if !is_list { continue; }
+            if !is_list {
+                continue;
+            }
 
             let primary_name = parts[0].trim();
             let primary_id: i64 = match conn.query_row(
@@ -330,37 +314,59 @@ mod tests {
             ) {
                 Ok(id) => id,
                 Err(_) => {
-                    conn.execute("INSERT INTO artists (name) VALUES (?1)", [primary_name]).unwrap();
+                    conn.execute("INSERT INTO artists (name) VALUES (?1)", [primary_name])
+                        .unwrap();
                     conn.last_insert_rowid()
                 }
             };
 
-            if primary_id == multi_id { continue; }
+            if primary_id == multi_id {
+                continue;
+            }
 
-            conn.execute("UPDATE tracks SET artist_id = ?1 WHERE artist_id = ?2", [primary_id, multi_id]).unwrap();
-            conn.execute("UPDATE albums SET artist_id = ?1 WHERE artist_id = ?2", [primary_id, multi_id]).unwrap();
-            conn.execute("DELETE FROM artists WHERE id = ?1", [multi_id]).unwrap();
+            conn.execute(
+                "UPDATE tracks SET artist_id = ?1 WHERE artist_id = ?2",
+                [primary_id, multi_id],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE albums SET artist_id = ?1 WHERE artist_id = ?2",
+                [primary_id, multi_id],
+            )
+            .unwrap();
+            conn.execute("DELETE FROM artists WHERE id = ?1", [multi_id])
+                .unwrap();
         }
     }
 
     fn apply_migration_6_logic(conn: &Connection) {
-        let has_multi: bool = conn.query_row(
-            "SELECT COUNT(*) > 0 FROM (
+        let has_multi: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM (
                  SELECT album_id FROM tracks WHERE album_id IS NOT NULL
                  GROUP BY album_id HAVING COUNT(DISTINCT artist_id) > 1
              )",
-            [],
-            |r| r.get(0),
-        ).unwrap_or(false);
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
 
-        if !has_multi { return; }
+        if !has_multi {
+            return;
+        }
 
-        conn.execute("INSERT OR IGNORE INTO artists (name) VALUES ('Various Artists')", []).unwrap();
-        let va_id: i64 = conn.query_row(
-            "SELECT id FROM artists WHERE name = 'Various Artists'",
+        conn.execute(
+            "INSERT OR IGNORE INTO artists (name) VALUES ('Various Artists')",
             [],
-            |r| r.get(0),
-        ).unwrap();
+        )
+        .unwrap();
+        let va_id: i64 = conn
+            .query_row(
+                "SELECT id FROM artists WHERE name = 'Various Artists'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
 
         conn.execute(
             "UPDATE albums SET artist_id = ?1
@@ -369,7 +375,8 @@ mod tests {
                   GROUP BY album_id HAVING COUNT(DISTINCT artist_id) > 1
               )",
             [va_id],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     // ── Migration 4: duplicate-album deduplication ────────────────────────
@@ -378,7 +385,7 @@ mod tests {
     fn test_migration_4_reparents_all_tracks_to_winner_album() {
         let env = TestEnv::new();
         let conn = env.pool.get().unwrap();
-        let source  = queries::insert_source(&conn, "s", SourceType::Disk, None).unwrap();
+        let source = queries::insert_source(&conn, "s", SourceType::Disk, None).unwrap();
         let artist1 = queries::insert_artist(&conn, "Artist1", None).unwrap();
         let artist2 = queries::insert_artist(&conn, "Artist2", None).unwrap();
 
@@ -386,16 +393,77 @@ mod tests {
         let album_a = queries::insert_album(&conn, "Mixtape", artist1, None).unwrap(); // 1 track
         let album_b = queries::insert_album(&conn, "Mixtape", artist2, None).unwrap(); // 3 tracks → winner
 
-        queries::insert_track(&conn, "S1", Some(album_a), artist1, source, &PathBuf::from("/a/1.flac"), 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
-        queries::insert_track(&conn, "S2", Some(album_b), artist2, source, &PathBuf::from("/b/2.flac"), 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
-        queries::insert_track(&conn, "S3", Some(album_b), artist2, source, &PathBuf::from("/b/3.flac"), 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
-        queries::insert_track(&conn, "S4", Some(album_b), artist2, source, &PathBuf::from("/b/4.flac"), 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        queries::insert_track(
+            &conn,
+            "S1",
+            Some(album_a),
+            artist1,
+            source,
+            &PathBuf::from("/a/1.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
+        queries::insert_track(
+            &conn,
+            "S2",
+            Some(album_b),
+            artist2,
+            source,
+            &PathBuf::from("/b/2.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
+        queries::insert_track(
+            &conn,
+            "S3",
+            Some(album_b),
+            artist2,
+            source,
+            &PathBuf::from("/b/3.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
+        queries::insert_track(
+            &conn,
+            "S4",
+            Some(album_b),
+            artist2,
+            source,
+            &PathBuf::from("/b/4.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
 
         apply_migration_4_sql(&conn);
 
         let all_album_ids: Vec<Option<i64>> = {
-            let mut stmt = conn.prepare("SELECT album_id FROM tracks ORDER BY id").unwrap();
-            stmt.query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect()
+            let mut stmt = conn
+                .prepare("SELECT album_id FROM tracks ORDER BY id")
+                .unwrap();
+            stmt.query_map([], |r| r.get(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
         };
         assert!(
             all_album_ids.iter().all(|&id| id == Some(album_b)),
@@ -407,23 +475,71 @@ mod tests {
     fn test_migration_4_deletes_loser_album() {
         let env = TestEnv::new();
         let conn = env.pool.get().unwrap();
-        let source  = queries::insert_source(&conn, "s", SourceType::Disk, None).unwrap();
+        let source = queries::insert_source(&conn, "s", SourceType::Disk, None).unwrap();
         let artist1 = queries::insert_artist(&conn, "A1", None).unwrap();
         let artist2 = queries::insert_artist(&conn, "A2", None).unwrap();
 
         let album_a = queries::insert_album(&conn, "Shared Title", artist1, None).unwrap();
         let album_b = queries::insert_album(&conn, "Shared Title", artist2, None).unwrap();
-        queries::insert_track(&conn, "T1", Some(album_a), artist1, source, &PathBuf::from("/a.flac"), 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
-        queries::insert_track(&conn, "T2", Some(album_b), artist2, source, &PathBuf::from("/b1.flac"), 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
-        queries::insert_track(&conn, "T3", Some(album_b), artist2, source, &PathBuf::from("/b2.flac"), 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        queries::insert_track(
+            &conn,
+            "T1",
+            Some(album_a),
+            artist1,
+            source,
+            &PathBuf::from("/a.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
+        queries::insert_track(
+            &conn,
+            "T2",
+            Some(album_b),
+            artist2,
+            source,
+            &PathBuf::from("/b1.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
+        queries::insert_track(
+            &conn,
+            "T3",
+            Some(album_b),
+            artist2,
+            source,
+            &PathBuf::from("/b2.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
 
         apply_migration_4_sql(&conn);
 
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM albums WHERE title = 'Shared Title'",
-            [], |r| r.get(0),
-        ).unwrap();
-        assert_eq!(count, 1, "loser album must be deleted, leaving only the winner");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM albums WHERE title = 'Shared Title'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "loser album must be deleted, leaving only the winner"
+        );
     }
 
     #[test]
@@ -432,15 +548,36 @@ mod tests {
         let conn = env.pool.get().unwrap();
         let source = queries::insert_source(&conn, "s", SourceType::Disk, None).unwrap();
         let artist = queries::insert_artist(&conn, "Solo", None).unwrap();
-        let album  = queries::insert_album(&conn, "Unique Album", artist, None).unwrap();
-        queries::insert_track(&conn, "T", Some(album), artist, source, &PathBuf::from("/t.flac"), 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        let album = queries::insert_album(&conn, "Unique Album", artist, None).unwrap();
+        queries::insert_track(
+            &conn,
+            "T",
+            Some(album),
+            artist,
+            source,
+            &PathBuf::from("/t.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
 
         apply_migration_4_sql(&conn);
 
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM albums", [], |r| r.get(0)).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM albums", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(count, 1, "album with a unique title must not be touched");
-        let album_id: i64 = conn.query_row("SELECT album_id FROM tracks", [], |r| r.get(0)).unwrap();
-        assert_eq!(album_id, album, "track must still reference the original album");
+        let album_id: i64 = conn
+            .query_row("SELECT album_id FROM tracks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            album_id, album,
+            "track must still reference the original album"
+        );
     }
 
     // ── Migration 5: multi-artist artist-tag collapse ─────────────────────
@@ -451,24 +588,55 @@ mod tests {
         let conn = env.pool.get().unwrap();
         let source = queries::insert_source(&conn, "s", SourceType::Disk, None).unwrap();
 
-        conn.execute("INSERT INTO artists (name) VALUES ('Akhenaton, Disiz')", []).unwrap();
+        conn.execute("INSERT INTO artists (name) VALUES ('Akhenaton, Disiz')", [])
+            .unwrap();
         let multi_id: i64 = conn.last_insert_rowid();
         let album = queries::insert_album(&conn, "Collab", multi_id, None).unwrap();
-        queries::insert_track(&conn, "T", Some(album), multi_id, source, &PathBuf::from("/t.flac"), 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        queries::insert_track(
+            &conn,
+            "T",
+            Some(album),
+            multi_id,
+            source,
+            &PathBuf::from("/t.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
 
         apply_migration_5_logic(&conn);
 
-        let primary_id: Option<i64> = conn.query_row(
-            "SELECT id FROM artists WHERE name = 'Akhenaton'", [], |r| r.get(0),
-        ).optional().unwrap();
-        assert!(primary_id.is_some(), "primary artist 'Akhenaton' must be created");
+        let primary_id: Option<i64> = conn
+            .query_row("SELECT id FROM artists WHERE name = 'Akhenaton'", [], |r| {
+                r.get(0)
+            })
+            .optional()
+            .unwrap();
+        assert!(
+            primary_id.is_some(),
+            "primary artist 'Akhenaton' must be created"
+        );
 
-        let track_artist: i64 = conn.query_row("SELECT artist_id FROM tracks", [], |r| r.get(0)).unwrap();
-        assert_eq!(track_artist, primary_id.unwrap(), "track must point to the primary artist");
+        let track_artist: i64 = conn
+            .query_row("SELECT artist_id FROM tracks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            track_artist,
+            primary_id.unwrap(),
+            "track must point to the primary artist"
+        );
 
-        let multi_gone: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM artists WHERE name = 'Akhenaton, Disiz'", [], |r| r.get(0),
-        ).unwrap();
+        let multi_gone: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM artists WHERE name = 'Akhenaton, Disiz'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(multi_gone, 0, "multi-artist row must be deleted");
     }
 
@@ -478,15 +646,37 @@ mod tests {
         let conn = env.pool.get().unwrap();
         let source = queries::insert_source(&conn, "s", SourceType::Disk, None).unwrap();
 
-        conn.execute("INSERT INTO artists (name) VALUES ('Earth, Wind & Fire')", []).unwrap();
+        conn.execute(
+            "INSERT INTO artists (name) VALUES ('Earth, Wind & Fire')",
+            [],
+        )
+        .unwrap();
         let band_id: i64 = conn.last_insert_rowid();
-        queries::insert_track(&conn, "T", None, band_id, source, &PathBuf::from("/t.flac"), 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        queries::insert_track(
+            &conn,
+            "T",
+            None,
+            band_id,
+            source,
+            &PathBuf::from("/t.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
 
         apply_migration_5_logic(&conn);
 
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM artists WHERE name = 'Earth, Wind & Fire'", [], |r| r.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM artists WHERE name = 'Earth, Wind & Fire'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 1, "band name containing '&' must not be split");
     }
 
@@ -497,18 +687,45 @@ mod tests {
         let source = queries::insert_source(&conn, "s", SourceType::Disk, None).unwrap();
 
         let jayz_id = queries::insert_artist(&conn, "Jay-Z", None).unwrap();
-        conn.execute("INSERT INTO artists (name) VALUES ('Jay-Z, Kanye West')", []).unwrap();
+        conn.execute(
+            "INSERT INTO artists (name) VALUES ('Jay-Z, Kanye West')",
+            [],
+        )
+        .unwrap();
         let multi_id: i64 = conn.last_insert_rowid();
-        queries::insert_track(&conn, "T", None, multi_id, source, &PathBuf::from("/t.flac"), 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        queries::insert_track(
+            &conn,
+            "T",
+            None,
+            multi_id,
+            source,
+            &PathBuf::from("/t.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
 
         apply_migration_5_logic(&conn);
 
-        let track_artist: i64 = conn.query_row("SELECT artist_id FROM tracks", [], |r| r.get(0)).unwrap();
-        assert_eq!(track_artist, jayz_id, "must reuse the existing Jay-Z row, not create a new one");
+        let track_artist: i64 = conn
+            .query_row("SELECT artist_id FROM tracks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            track_artist, jayz_id,
+            "must reuse the existing Jay-Z row, not create a new one"
+        );
 
-        let jayz_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM artists WHERE name = 'Jay-Z'", [], |r| r.get(0),
-        ).unwrap();
+        let jayz_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM artists WHERE name = 'Jay-Z'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(jayz_count, 1, "must not create a duplicate Jay-Z row");
     }
 
@@ -518,11 +735,31 @@ mod tests {
         let conn = env.pool.get().unwrap();
         let source = queries::insert_source(&conn, "s", SourceType::Disk, None).unwrap();
         let artist = queries::insert_artist(&conn, "Adele", None).unwrap();
-        queries::insert_track(&conn, "T", None, artist, source, &PathBuf::from("/t.flac"), 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        queries::insert_track(
+            &conn,
+            "T",
+            None,
+            artist,
+            source,
+            &PathBuf::from("/t.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
 
         apply_migration_5_logic(&conn);
 
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM artists WHERE name = 'Adele'", [], |r| r.get(0)).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM artists WHERE name = 'Adele'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 1, "artist with a single name must be untouched");
     }
 
@@ -532,23 +769,60 @@ mod tests {
     fn test_migration_6_assigns_various_artists_to_multi_artist_album() {
         let env = TestEnv::new();
         let conn = env.pool.get().unwrap();
-        let source  = queries::insert_source(&conn, "s", SourceType::Disk, None).unwrap();
+        let source = queries::insert_source(&conn, "s", SourceType::Disk, None).unwrap();
         let artist1 = queries::insert_artist(&conn, "Artist1", None).unwrap();
         let artist2 = queries::insert_artist(&conn, "Artist2", None).unwrap();
-        let album   = queries::insert_album(&conn, "Compilation", artist1, None).unwrap();
+        let album = queries::insert_album(&conn, "Compilation", artist1, None).unwrap();
 
-        queries::insert_track(&conn, "T1", Some(album), artist1, source, &PathBuf::from("/t1.flac"), 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
-        queries::insert_track(&conn, "T2", Some(album), artist2, source, &PathBuf::from("/t2.flac"), 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        queries::insert_track(
+            &conn,
+            "T1",
+            Some(album),
+            artist1,
+            source,
+            &PathBuf::from("/t1.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
+        queries::insert_track(
+            &conn,
+            "T2",
+            Some(album),
+            artist2,
+            source,
+            &PathBuf::from("/t2.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
 
         apply_migration_6_logic(&conn);
 
-        let va_id: i64 = conn.query_row(
-            "SELECT id FROM artists WHERE name = 'Various Artists'", [], |r| r.get(0),
-        ).unwrap();
-        let album_artist: i64 = conn.query_row(
-            "SELECT artist_id FROM albums WHERE id = ?1", [album], |r| r.get(0),
-        ).unwrap();
-        assert_eq!(album_artist, va_id, "compilation album must be assigned to Various Artists");
+        let va_id: i64 = conn
+            .query_row(
+                "SELECT id FROM artists WHERE name = 'Various Artists'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let album_artist: i64 = conn
+            .query_row("SELECT artist_id FROM albums WHERE id = ?1", [album], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            album_artist, va_id,
+            "compilation album must be assigned to Various Artists"
+        );
     }
 
     #[test]
@@ -557,47 +831,127 @@ mod tests {
         let conn = env.pool.get().unwrap();
         let source = queries::insert_source(&conn, "s", SourceType::Disk, None).unwrap();
         let artist = queries::insert_artist(&conn, "Solo Artist", None).unwrap();
-        let album  = queries::insert_album(&conn, "Solo Album", artist, None).unwrap();
+        let album = queries::insert_album(&conn, "Solo Album", artist, None).unwrap();
 
-        queries::insert_track(&conn, "T1", Some(album), artist, source, &PathBuf::from("/t1.flac"), 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
-        queries::insert_track(&conn, "T2", Some(album), artist, source, &PathBuf::from("/t2.flac"), 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        queries::insert_track(
+            &conn,
+            "T1",
+            Some(album),
+            artist,
+            source,
+            &PathBuf::from("/t1.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
+        queries::insert_track(
+            &conn,
+            "T2",
+            Some(album),
+            artist,
+            source,
+            &PathBuf::from("/t2.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
 
         apply_migration_6_logic(&conn);
 
-        let album_artist: i64 = conn.query_row(
-            "SELECT artist_id FROM albums WHERE id = ?1", [album], |r| r.get(0),
-        ).unwrap();
-        assert_eq!(album_artist, artist, "single-artist album must keep its original artist");
+        let album_artist: i64 = conn
+            .query_row("SELECT artist_id FROM albums WHERE id = ?1", [album], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            album_artist, artist,
+            "single-artist album must keep its original artist"
+        );
 
-        let va_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM artists WHERE name = 'Various Artists'", [], |r| r.get(0),
-        ).unwrap();
-        assert_eq!(va_count, 0, "Various Artists must not be created when there are no compilations");
+        let va_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM artists WHERE name = 'Various Artists'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            va_count, 0,
+            "Various Artists must not be created when there are no compilations"
+        );
     }
 
     #[test]
     fn test_migration_6_uses_existing_various_artists_row() {
         let env = TestEnv::new();
         let conn = env.pool.get().unwrap();
-        let source  = queries::insert_source(&conn, "s", SourceType::Disk, None).unwrap();
+        let source = queries::insert_source(&conn, "s", SourceType::Disk, None).unwrap();
         let artist1 = queries::insert_artist(&conn, "Artist1", None).unwrap();
         let artist2 = queries::insert_artist(&conn, "Artist2", None).unwrap();
-        let va_id   = queries::insert_artist(&conn, "Various Artists", None).unwrap();
-        let album   = queries::insert_album(&conn, "Mix", artist1, None).unwrap();
+        let va_id = queries::insert_artist(&conn, "Various Artists", None).unwrap();
+        let album = queries::insert_album(&conn, "Mix", artist1, None).unwrap();
 
-        queries::insert_track(&conn, "T1", Some(album), artist1, source, &PathBuf::from("/t1.flac"), 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
-        queries::insert_track(&conn, "T2", Some(album), artist2, source, &PathBuf::from("/t2.flac"), 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        queries::insert_track(
+            &conn,
+            "T1",
+            Some(album),
+            artist1,
+            source,
+            &PathBuf::from("/t1.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
+        queries::insert_track(
+            &conn,
+            "T2",
+            Some(album),
+            artist2,
+            source,
+            &PathBuf::from("/t2.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
 
         apply_migration_6_logic(&conn);
 
-        let va_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM artists WHERE name = 'Various Artists'", [], |r| r.get(0),
-        ).unwrap();
-        assert_eq!(va_count, 1, "must not create a duplicate Various Artists row");
+        let va_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM artists WHERE name = 'Various Artists'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            va_count, 1,
+            "must not create a duplicate Various Artists row"
+        );
 
-        let album_artist: i64 = conn.query_row(
-            "SELECT artist_id FROM albums WHERE id = ?1", [album], |r| r.get(0),
-        ).unwrap();
-        assert_eq!(album_artist, va_id, "must use the pre-existing Various Artists ID");
+        let album_artist: i64 = conn
+            .query_row("SELECT artist_id FROM albums WHERE id = ?1", [album], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            album_artist, va_id,
+            "must use the pre-existing Various Artists ID"
+        );
     }
 }

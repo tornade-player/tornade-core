@@ -1,16 +1,15 @@
 // HTTP clients for artwork fetching
 
+use crate::utils::MutexExt;
+use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use serde::Deserialize;
 
 /// Audio format/quality keywords that appear in file-tagger bracket annotations
 /// but are not part of the actual album title in MusicBrainz.
 const FORMAT_KEYWORDS: &[&str] = &[
-    "flac", "mp3", "aac", "ogg", "opus", "wav", "aiff", "dsd", "sacd",
-    "web", "mqa", "hires", "hi-res", "hdtracks",
-    "tidal", "qobuz", "deezer",
-    "kbps", "khz",
+    "flac", "mp3", "aac", "ogg", "opus", "wav", "aiff", "dsd", "sacd", "web", "mqa", "hires",
+    "hi-res", "hdtracks", "tidal", "qobuz", "deezer", "kbps", "khz",
 ];
 
 /// Remove `[...]` bracket groups whose content is a format/quality tag.
@@ -62,7 +61,7 @@ fn strip_disc_suffix(title: &str) -> &str {
     for marker in &["(disc ", "[disc ", "- disc ", "(cd "] {
         if let Some(pos) = lower.find(marker) {
             let after = &lower[pos + marker.len()..];
-            if after.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+            if after.chars().next().is_some_and(|c| c.is_ascii_digit()) {
                 return title[..pos].trim_end();
             }
         }
@@ -95,7 +94,13 @@ fn clean_artist_for_search(artist: &str) -> &str {
 fn sanitize_for_keyword_search(title: &str) -> String {
     title
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '\'' { c } else { ' ' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '\'' {
+                c
+            } else {
+                ' '
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -221,22 +226,28 @@ impl MusicBrainzClient {
     ///
     /// Title and artist are pre-cleaned: format tags stripped, disc numbers removed,
     /// and only the first artist is used for multi-artist strings.
-    pub async fn search_album_artwork(&self, album_title: &str, artist_name: &str) -> Result<Option<ArtworkSearchResult>, String> {
+    pub async fn search_album_artwork(
+        &self,
+        album_title: &str,
+        artist_name: &str,
+    ) -> Result<Option<ArtworkSearchResult>, String> {
         let clean_title = clean_album_title(album_title);
         let clean_artist = clean_artist_for_search(artist_name);
 
         let queries = [
-            format!("release:\"{}\" AND artist:\"{}\"", clean_title, clean_artist),
-            format!("release:\"{}\"", clean_title),
+            format!("release:\"{clean_title}\" AND artist:\"{clean_artist}\""),
+            format!("release:\"{clean_title}\""),
             // Unquoted keyword search: must sanitize Lucene special chars (colons, parens, etc.)
             // e.g. "Ministry of Sound: The Score" → "Ministry of Sound The Score"
             format!("release:{}", sanitize_for_keyword_search(&clean_title)),
         ];
 
         for query in &queries {
-            match self.try_search_query(query, artist_name, album_title).await? {
-                Some(result) => return Ok(Some(result)),
-                None => continue,
+            if let Some(result) = self
+                .try_search_query(query, artist_name, album_title)
+                .await?
+            {
+                return Ok(Some(result));
             }
         }
 
@@ -252,7 +263,7 @@ impl MusicBrainzClient {
         album_title: &str,
     ) -> Result<Option<ArtworkSearchResult>, String> {
         let wait_time = {
-            let mut limiter = self.rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
+            let mut limiter = self.rate_limiter.lock_infallible();
             limiter.calculate_wait()
         };
         if let Some(duration) = wait_time {
@@ -265,23 +276,30 @@ impl MusicBrainzClient {
             urlencoding::encode(query)
         );
 
-        log::debug!("Searching MusicBrainz: {}", url);
+        log::debug!("Searching MusicBrainz: {url}");
 
-        let response = self.http_client
+        let response = self
+            .http_client
             .get(&url)
-            .header("User-Agent", "Tornade-Music-Player/1.0 ( thomas@example.com )")
+            .header(
+                "User-Agent",
+                "Tornade-Music-Player/1.0 ( thomas@example.com )",
+            )
             .send()
             .await
-            .map_err(|e| format!("MusicBrainz search failed: {}", e))?;
+            .map_err(|e| format!("MusicBrainz search failed: {e}"))?;
 
         if !response.status().is_success() {
-            return Err(format!("MusicBrainz returned status: {}", response.status()));
+            return Err(format!(
+                "MusicBrainz returned status: {}",
+                response.status()
+            ));
         }
 
         let search_result: MBSearchResult = response
             .json()
             .await
-            .map_err(|e| format!("Failed to parse MusicBrainz response: {}", e))?;
+            .map_err(|e| format!("Failed to parse MusicBrainz response: {e}"))?;
 
         if search_result.releases.is_empty() {
             return Ok(None);
@@ -290,21 +308,28 @@ impl MusicBrainzClient {
         // Try all returned releases (up to 5), skipping low-confidence ones
         for release in search_result.releases.iter().take(5) {
             if release.score.unwrap_or(100) < 50 {
-                log::debug!("Skipping low-score release {} (score {:?})", release.id, release.score);
+                log::debug!(
+                    "Skipping low-score release {} (score {:?})",
+                    release.id,
+                    release.score
+                );
                 continue;
             }
 
             let wait_time = {
-                let mut limiter = self.rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
+                let mut limiter = self.rate_limiter.lock_infallible();
                 limiter.calculate_wait()
             };
             if let Some(duration) = wait_time {
                 tokio::time::sleep(duration).await;
             }
 
-            let artwork_url = format!("{}/release/{}/front-500", self.coverart_base_url, release.id);
+            let artwork_url = format!(
+                "{}/release/{}/front-500",
+                self.coverart_base_url, release.id
+            );
 
-            log::debug!("Trying Cover Art Archive: {}", artwork_url);
+            log::debug!("Trying Cover Art Archive: {artwork_url}");
 
             match self.http_client.get(&artwork_url).send().await {
                 Ok(resp) if resp.status().is_success() => {
@@ -318,7 +343,9 @@ impl MusicBrainzClient {
                                 bytes.len() / 1024
                             );
                             // Extract label name from first label-info entry
-                            let label = release.label_info.as_ref()
+                            let label = release
+                                .label_info
+                                .as_ref()
                                 .and_then(|info| info.first())
                                 .and_then(|li| li.label.as_ref())
                                 .map(|l| l.name.clone());
@@ -329,7 +356,9 @@ impl MusicBrainzClient {
                                 label,
                                 country: release.country.clone(),
                                 barcode: release.barcode.clone(),
-                                album_type: release.release_group.as_ref()
+                                album_type: release
+                                    .release_group
+                                    .as_ref()
                                     .and_then(|rg| rg.primary_type.clone()),
                                 release_status: release.status.clone(),
                                 mb_year: release.date.as_deref().and_then(year_from_mb_date),
@@ -344,7 +373,7 @@ impl MusicBrainzClient {
                             );
                         }
                         Err(e) => {
-                            log::warn!("Failed to download artwork bytes: {}", e);
+                            log::warn!("Failed to download artwork bytes: {e}");
                         }
                     }
                 }
@@ -369,9 +398,12 @@ impl MusicBrainzClient {
     /// Uses the free public API (key `2`) — no registration required.
     /// Returns an `ArtistSearchResult` with all available metadata plus image bytes when found.
     /// Returns `Ok(None)` only if the artist was not found in TheAudioDB at all.
-    pub async fn search_artist_photo(&self, artist_name: &str) -> Result<Option<ArtistSearchResult>, String> {
+    pub async fn search_artist_photo(
+        &self,
+        artist_name: &str,
+    ) -> Result<Option<ArtistSearchResult>, String> {
         let wait_time = {
-            let mut limiter = self.rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
+            let mut limiter = self.rate_limiter.lock_infallible();
             limiter.calculate_wait()
         };
         if let Some(duration) = wait_time {
@@ -384,13 +416,14 @@ impl MusicBrainzClient {
             urlencoding::encode(artist_name)
         );
 
-        log::debug!("Searching TheAudioDB for artist: {}", url);
+        log::debug!("Searching TheAudioDB for artist: {url}");
 
-        let response = self.http_client
+        let response = self
+            .http_client
             .get(&url)
             .send()
             .await
-            .map_err(|e| format!("TheAudioDB search failed: {}", e))?;
+            .map_err(|e| format!("TheAudioDB search failed: {e}"))?;
 
         if !response.status().is_success() {
             return Err(format!("TheAudioDB returned status: {}", response.status()));
@@ -399,14 +432,15 @@ impl MusicBrainzClient {
         let search_result: TADBSearchResult = response
             .json()
             .await
-            .map_err(|e| format!("Failed to parse TheAudioDB response: {}", e))?;
+            .map_err(|e| format!("Failed to parse TheAudioDB response: {e}"))?;
 
         // TheAudioDB returns `"artists": null` when nothing is found
-        let Some(artist) = search_result.artists
+        let Some(artist) = search_result
+            .artists
             .as_ref()
             .and_then(|artists| artists.first())
         else {
-            log::debug!("Artist not found in TheAudioDB: {}", artist_name);
+            log::debug!("Artist not found in TheAudioDB: {artist_name}");
             return Ok(None);
         };
 
@@ -418,9 +452,18 @@ impl MusicBrainzClient {
             genre: artist.genre.clone(),
             style: artist.style.clone(),
             mood: artist.mood.clone(),
-            formed_year: artist.formed_year.as_deref().and_then(|s| s.parse::<i64>().ok()),
-            born_year: artist.born_year.as_deref().and_then(|s| s.parse::<i64>().ok()),
-            died_year: artist.died_year.as_deref().and_then(|s| s.parse::<i64>().ok()),
+            formed_year: artist
+                .formed_year
+                .as_deref()
+                .and_then(|s| s.parse::<i64>().ok()),
+            born_year: artist
+                .born_year
+                .as_deref()
+                .and_then(|s| s.parse::<i64>().ok()),
+            died_year: artist
+                .died_year
+                .as_deref()
+                .and_then(|s| s.parse::<i64>().ok()),
             disbanded: artist.disbanded.clone(),
             musicbrainz_id: artist.musicbrainz_id.clone(),
             theaudiodb_id: artist.id.clone(),
@@ -429,21 +472,25 @@ impl MusicBrainzClient {
         // Download the thumbnail image if available
         if let Some(ref thumb_url) = artist.artist_thumb.clone() {
             let wait_time = {
-                let mut limiter = self.rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
+                let mut limiter = self.rate_limiter.lock_infallible();
                 limiter.calculate_wait()
             };
             if let Some(duration) = wait_time {
                 tokio::time::sleep(duration).await;
             }
 
-            log::debug!("Downloading artist photo: {}", thumb_url);
+            log::debug!("Downloading artist photo: {thumb_url}");
 
             match self.http_client.get(thumb_url).send().await {
                 Ok(img_response) if img_response.status().is_success() => {
                     const MAX_IMAGE_SIZE: usize = 5 * 1024 * 1024;
                     match img_response.bytes().await {
                         Ok(bytes) if bytes.len() <= MAX_IMAGE_SIZE => {
-                            log::info!("Found artist photo for {} ({} KB)", artist_name, bytes.len() / 1024);
+                            log::info!(
+                                "Found artist photo for {} ({} KB)",
+                                artist_name,
+                                bytes.len() / 1024
+                            );
                             result.image_data = Some(bytes.to_vec());
                         }
                         Ok(bytes) => {
@@ -454,7 +501,7 @@ impl MusicBrainzClient {
                             );
                         }
                         Err(e) => {
-                            log::warn!("Failed to read artist photo bytes for {}: {}", artist_name, e);
+                            log::warn!("Failed to read artist photo bytes for {artist_name}: {e}");
                         }
                     }
                 }
@@ -466,7 +513,7 @@ impl MusicBrainzClient {
                     );
                 }
                 Err(e) => {
-                    log::warn!("Artist photo download failed for {}: {}", artist_name, e);
+                    log::warn!("Artist photo download failed for {artist_name}: {e}");
                 }
             }
         }
@@ -558,8 +605,8 @@ struct TADBArtist {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::{MockServer, Mock, ResponseTemplate};
     use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     // ── clean_album_title ────────────────────────────────────────────────────
 
@@ -615,7 +662,10 @@ mod tests {
 
     #[test]
     fn test_clean_title_no_change_for_plain_title() {
-        assert_eq!(clean_album_title("The Dark Side of the Moon"), "The Dark Side of the Moon");
+        assert_eq!(
+            clean_album_title("The Dark Side of the Moon"),
+            "The Dark Side of the Moon"
+        );
     }
 
     #[test]
@@ -751,20 +801,22 @@ mod tests {
         }
         let items: Vec<serde_json::Value> = thumbs
             .iter()
-            .map(|thumb| serde_json::json!({
-                "idArtist": "111258",
-                "strArtistThumb": thumb,
-                "strBiographyEN": null,
-                "strCountry": null,
-                "strGenre": null,
-                "strStyle": null,
-                "strMood": null,
-                "intFormedYear": null,
-                "intBornYear": null,
-                "intDiedYear": null,
-                "strDisbanded": null,
-                "strMusicBrainzID": null
-            }))
+            .map(|thumb| {
+                serde_json::json!({
+                    "idArtist": "111258",
+                    "strArtistThumb": thumb,
+                    "strBiographyEN": null,
+                    "strCountry": null,
+                    "strGenre": null,
+                    "strStyle": null,
+                    "strMood": null,
+                    "intFormedYear": null,
+                    "intBornYear": null,
+                    "intDiedYear": null,
+                    "strDisbanded": null,
+                    "strMusicBrainzID": null
+                })
+            })
             .collect();
         serde_json::json!({ "artists": items })
     }
@@ -800,8 +852,12 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
-        let result = client.search_album_artwork("Unknown Album", "Unknown Artist").await.unwrap();
+        let client =
+            no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
+        let result = client
+            .search_album_artwork("Unknown Album", "Unknown Artist")
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 
@@ -812,7 +868,10 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/ws/2/release/"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(mb_releases_json(&[("release-abc", "The Wall")])))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(mb_releases_json(&[("release-abc", "The Wall")])),
+            )
             .mount(&mock_server)
             .await;
 
@@ -822,8 +881,12 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
-        let result = client.search_album_artwork("The Wall", "Pink Floyd").await.unwrap();
+        let client =
+            no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
+        let result = client
+            .search_album_artwork("The Wall", "Pink Floyd")
+            .await
+            .unwrap();
         assert!(result.is_some());
         let r = result.unwrap();
         assert_eq!(r.image_data, fake_image);
@@ -836,7 +899,10 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/ws/2/release/"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(mb_releases_json(&[("release-xyz", "Wish You Were Here")])))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(mb_releases_json(&[("release-xyz", "Wish You Were Here")])),
+            )
             .mount(&mock_server)
             .await;
 
@@ -846,8 +912,12 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
-        let result = client.search_album_artwork("Wish You Were Here", "Pink Floyd").await.unwrap();
+        let client =
+            no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
+        let result = client
+            .search_album_artwork("Wish You Were Here", "Pink Floyd")
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 
@@ -861,8 +931,11 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
-        let result = client.search_album_artwork("Abbey Road", "The Beatles").await;
+        let client =
+            no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
+        let result = client
+            .search_album_artwork("Abbey Road", "The Beatles")
+            .await;
         assert!(result.is_err());
     }
 
@@ -876,8 +949,11 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
-        let result = client.search_album_artwork("Abbey Road", "The Beatles").await;
+        let client =
+            no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
+        let result = client
+            .search_album_artwork("Abbey Road", "The Beatles")
+            .await;
         assert!(result.is_err());
     }
 
@@ -907,8 +983,12 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
-        let result = client.search_album_artwork("Animals", "Pink Floyd").await.unwrap();
+        let client =
+            no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
+        let result = client
+            .search_album_artwork("Animals", "Pink Floyd")
+            .await
+            .unwrap();
         assert!(result.is_some());
         let r = result.unwrap();
         assert_eq!(r.image_data, good_image);
@@ -927,7 +1007,8 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
+        let client =
+            no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
         let result = client.search_artist_photo("Unknown Artist").await.unwrap();
         assert!(result.is_none());
     }
@@ -940,9 +1021,13 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/api/v1/json/2/search.php"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(
-                tadb_artists_json(&[&format!("{}{}", mock_server.uri(), photo_path)])
-            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(tadb_artists_json(&[&format!(
+                    "{}{}",
+                    mock_server.uri(),
+                    photo_path
+                )])),
+            )
             .mount(&mock_server)
             .await;
 
@@ -952,7 +1037,8 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
+        let client =
+            no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
         let result = client.search_artist_photo("Pink Floyd").await.unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().image_data, Some(fake_photo));
@@ -967,9 +1053,13 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/api/v1/json/2/search.php"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(
-                tadb_artists_json(&[&format!("{}{}", mock_server.uri(), photo_path)])
-            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(tadb_artists_json(&[&format!(
+                    "{}{}",
+                    mock_server.uri(),
+                    photo_path
+                )])),
+            )
             .mount(&mock_server)
             .await;
 
@@ -979,7 +1069,8 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
+        let client =
+            no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
         let result = client.search_artist_photo("Some Artist").await.unwrap();
         // Artist was found — result should be Some, but image_data should be None
         assert!(result.is_some());
@@ -995,7 +1086,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/v1/json/2/search.php"))
             .respond_with(ResponseTemplate::new(200).set_body_json(
-                tadb_artists_json_with_metadata(&format!("{}{}", mock_server.uri(), photo_path))
+                tadb_artists_json_with_metadata(&format!("{}{}", mock_server.uri(), photo_path)),
             ))
             .mount(&mock_server)
             .await;
@@ -1006,12 +1097,16 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
+        let client =
+            no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
         let result = client.search_artist_photo("ABBA").await.unwrap();
         assert!(result.is_some());
         let r = result.unwrap();
         assert_eq!(r.image_data, Some(fake_photo));
-        assert_eq!(r.bio.as_deref(), Some("ABBA was a Swedish pop/rock group..."));
+        assert_eq!(
+            r.bio.as_deref(),
+            Some("ABBA was a Swedish pop/rock group...")
+        );
         assert_eq!(r.country.as_deref(), Some("Stockholm, Sweden"));
         assert_eq!(r.genre.as_deref(), Some("Pop"));
         assert_eq!(r.style.as_deref(), Some("Rock/Pop"));
@@ -1020,7 +1115,10 @@ mod tests {
         assert_eq!(r.born_year, None);
         assert_eq!(r.died_year, None);
         assert_eq!(r.disbanded, None);
-        assert_eq!(r.musicbrainz_id.as_deref(), Some("d87e52c5-bb8d-4da8-b941-9f4928627dc8"));
+        assert_eq!(
+            r.musicbrainz_id.as_deref(),
+            Some("d87e52c5-bb8d-4da8-b941-9f4928627dc8")
+        );
         assert_eq!(r.theaudiodb_id.as_deref(), Some("111258"));
     }
 
@@ -1034,7 +1132,8 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
+        let client =
+            no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
         let result = client.search_artist_photo("Pink Floyd").await;
         assert!(result.is_err());
     }
@@ -1049,7 +1148,8 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
+        let client =
+            no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
         let result = client.search_artist_photo("Pink Floyd").await;
         assert!(result.is_err());
     }
@@ -1069,7 +1169,10 @@ mod tests {
 
         let result = client.search_artist_photo("ABBA").await;
         if let Ok(Some(ref a)) = result {
-            println!("image: {:?}", a.image_data.as_ref().map(|d| format!("{} bytes", d.len())));
+            println!(
+                "image: {:?}",
+                a.image_data.as_ref().map(|d| format!("{} bytes", d.len()))
+            );
             println!("country: {:?}", a.country);
             println!("genre: {:?}", a.genre);
             println!("bio: {:?}", a.bio.as_deref().map(|s| &s[..50.min(s.len())]));

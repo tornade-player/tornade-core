@@ -1,14 +1,14 @@
 // Library management service
 
-use crate::db::{queries, DbPool};
-use crate::models::{Track, Album, Artist, Source, AudioFormat};
+use crate::db::{DbPool, queries};
+use crate::models::{Album, Artist, AudioFormat, Source, Track};
 use crate::services::error::LibraryError;
-use crate::services::events::{ScanProgress, ScanResult, ScanError};
+use crate::services::events::{ScanError, ScanProgress, ScanResult};
 use crate::services::metadata::MetadataService;
 use crate::services::reports::ScanReport;
 use crate::utils::AppPaths;
 use chrono::Local;
-use log::{info, warn, error};
+use log::{error, info, warn};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -48,8 +48,8 @@ pub struct LibraryService {
 impl LibraryService {
     pub fn new(pool: DbPool, app_paths: AppPaths) -> Self {
         LibraryService {
-            pool: pool.clone(),
-            app_paths: app_paths.clone(),
+            pool,
+            app_paths: app_paths.clone(), // clone: value also moved into MetadataService below
             metadata_service: MetadataService::new(app_paths),
             scan_progress: Arc::new(Mutex::new(None)),
             scan_cancelled: Arc::new(Mutex::new(false)),
@@ -62,24 +62,24 @@ impl LibraryService {
 
     /// Scan a directory and add tracks to the library
     pub fn scan_directory(&self, path: &Path, source_id: i64) -> Result<ScanResult> {
-        info!("Starting library scan: {:?}", path);
+        info!("Starting library scan: {path:?}");
         let start_time = Instant::now();
         let scan_start_time = Local::now();
 
         // Validate directory exists and is accessible (T135)
         if !path.exists() {
-            error!("Library folder does not exist: {:?}", path);
+            error!("Library folder does not exist: {path:?}");
             return Err(LibraryError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                format!("Library folder not found: {:?}", path)
+                format!("Library folder not found: {path:?}"),
             )));
         }
 
         if !path.is_dir() {
-            error!("Library path is not a directory: {:?}", path);
+            error!("Library path is not a directory: {path:?}");
             return Err(LibraryError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!("Path is not a directory: {:?}", path)
+                format!("Path is not a directory: {path:?}"),
             )));
         }
 
@@ -91,27 +91,29 @@ impl LibraryService {
         let mut tracks_skipped = 0u32;
         let mut errors = Vec::new();
 
-        // Collect all audio files
-        let audio_files: Vec<PathBuf> = WalkDir::new(path)
+        // Helper: returns true for supported audio extensions
+        let is_audio = |e: &walkdir::DirEntry| -> bool {
+            e.file_type().is_file()
+                && e.path()
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| {
+                        matches!(
+                            s.to_lowercase().as_str(),
+                            "flac" | "mp3" | "aac" | "m4a" | "alac"
+                        )
+                    })
+        };
+
+        // Pass 1: count files for progress reporting (lightweight, no PathBuf allocation)
+        let total_files = WalkDir::new(path)
             .follow_links(true)
             .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-            .filter(|e| {
-                if let Some(ext) = e.path().extension() {
-                    matches!(
-                        ext.to_str().unwrap_or("").to_lowercase().as_str(),
-                        "flac" | "mp3" | "aac" | "m4a" | "alac"
-                    )
-                } else {
-                    false
-                }
-            })
-            .map(|e| e.path().to_path_buf())
-            .collect();
+            .filter_map(std::result::Result::ok)
+            .filter(|e| is_audio(e))
+            .count() as u32;
 
-        let total_files = audio_files.len() as u32;
-        info!("Found {} audio files to process", total_files);
+        info!("Found {total_files} audio files to process");
 
         // Update initial progress
         {
@@ -124,56 +126,99 @@ impl LibraryService {
             });
         }
 
-        // T130: Process files in batches with transactions for better performance
+        // Pass 2: stream files and process in batches — only BATCH_SIZE paths in RAM at a time
         const BATCH_SIZE: usize = 50;
+        let mut batch: Vec<PathBuf> = Vec::with_capacity(BATCH_SIZE);
+        let mut processed = 0u32;
 
-        for (batch_idx, batch) in audio_files.chunks(BATCH_SIZE).enumerate() {
-            // Check for cancellation
+        let walker = WalkDir::new(path)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(std::result::Result::ok)
+            .filter(|e| is_audio(e));
+
+        for entry in walker {
+            batch.push(entry.path().to_path_buf());
+
+            if batch.len() >= BATCH_SIZE {
+                // Check for cancellation between batches
+                if *self.scan_cancelled.lock().unwrap() {
+                    warn!("Library scan cancelled by user");
+                    return Err(LibraryError::ScanCancelled);
+                }
+
+                let conn = self.pool.get()?;
+                let tx = conn
+                    .unchecked_transaction()
+                    .map_err(LibraryError::Database)?;
+
+                for file_path in &batch {
+                    {
+                        let mut progress = self.scan_progress.lock().unwrap();
+                        if let Some(ref mut p) = *progress {
+                            p.processed_files = processed;
+                            p.current_file = Some(file_path.clone());
+                            p.tracks_added = tracks_added;
+                        }
+                    }
+
+                    match self.process_audio_file_with_conn(&tx, file_path, source_id) {
+                        Ok(_track_id) => tracks_added += 1,
+                        Err(e) => {
+                            warn!("Skipping file {file_path:?}: {e}");
+                            error!("Corrupted or invalid file: {file_path:?} - {e}");
+                            errors.push(ScanError {
+                                path: file_path.clone(),
+                                error: format!("Corrupted/invalid file: {e}"),
+                            });
+                            tracks_skipped += 1;
+                        }
+                    }
+                    processed += 1;
+                }
+
+                tx.commit().map_err(LibraryError::Database)?;
+                batch.clear();
+            }
+        }
+
+        // Process remaining files (last partial batch)
+        if !batch.is_empty() {
             if *self.scan_cancelled.lock().unwrap() {
                 warn!("Library scan cancelled by user");
                 return Err(LibraryError::ScanCancelled);
             }
 
-            // Get connection for this batch
-            let conn = self.pool.get().map_err(|e| {
-                LibraryError::Database(rusqlite::Error::InvalidPath(
-                    PathBuf::from(format!("Pool error: {}", e))
-                ))
-            })?;
+            let conn = self.pool.get()?;
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(LibraryError::Database)?;
 
-            // Process batch within a transaction
-            let tx = conn.unchecked_transaction().map_err(LibraryError::Database)?;
-
-            for (file_idx, file_path) in batch.iter().enumerate() {
-                let overall_idx = batch_idx * BATCH_SIZE + file_idx;
-
-                // Update progress
+            for file_path in &batch {
                 {
                     let mut progress = self.scan_progress.lock().unwrap();
                     if let Some(ref mut p) = *progress {
-                        p.processed_files = overall_idx as u32;
+                        p.processed_files = processed;
                         p.current_file = Some(file_path.clone());
                         p.tracks_added = tracks_added;
                     }
                 }
 
-                // T134: Process the file with proper error handling for corrupted files
                 match self.process_audio_file_with_conn(&tx, file_path, source_id) {
                     Ok(_track_id) => tracks_added += 1,
                     Err(e) => {
-                        // Log corrupted/invalid files and continue processing
-                        warn!("Skipping file {:?}: {}", file_path, e);
-                        error!("Corrupted or invalid file: {:?} - {}", file_path, e);
+                        warn!("Skipping file {file_path:?}: {e}");
+                        error!("Corrupted or invalid file: {file_path:?} - {e}");
                         errors.push(ScanError {
                             path: file_path.clone(),
-                            error: format!("Corrupted/invalid file: {}", e),
+                            error: format!("Corrupted/invalid file: {e}"),
                         });
                         tracks_skipped += 1;
                     }
                 }
+                processed += 1;
             }
 
-            // Commit the batch transaction
             tx.commit().map_err(LibraryError::Database)?;
         }
 
@@ -185,28 +230,27 @@ impl LibraryService {
 
         let duration = start_time.elapsed();
         info!(
-            "Library scan complete: {} added, {} updated, {} skipped in {:?}",
-            tracks_added, tracks_updated, tracks_skipped, duration
+            "Library scan complete: {tracks_added} added, {tracks_updated} updated, {tracks_skipped} skipped in {duration:?}"
         );
 
         if !errors.is_empty() {
-            info!("Encountered {} errors during scan (see log for details)", errors.len());
+            info!(
+                "Encountered {} errors during scan (see log for details)",
+                errors.len()
+            );
         }
 
         // Generate scan report
-        let mut report = ScanReport::new(
-            path.to_string_lossy().to_string(),
-            scan_start_time
-        );
+        let mut report = ScanReport::new(path.to_string_lossy().into_owned(), scan_start_time);
         report.end_time = Local::now();
         report.total_files = total_files as usize;
         report.tracks_added = tracks_added as usize;
-        report.errors = errors.iter().map(|e| format!("{:?}", e)).collect();
+        report.errors = errors.iter().map(|e| format!("{e:?}")).collect();
 
         // Try to save report (non-fatal if it fails)
         match report.save(&self.app_paths.reports_dir()) {
-            Ok(path) => info!("Scan report saved to: {:?}", path),
-            Err(e) => warn!("Failed to save scan report: {}", e),
+            Ok(path) => info!("Scan report saved to: {path:?}"),
+            Err(e) => warn!("Failed to save scan report: {e}"),
         }
 
         Ok(ScanResult {
@@ -218,30 +262,18 @@ impl LibraryService {
         })
     }
 
-    /// Process a single audio file (legacy method, uses pool connection)
-    #[allow(dead_code)]
-    fn _process_audio_file(&self, path: &Path, source_id: i64) -> Result<i64> {
-        let conn = self.pool.get().map_err(|e| {
-            LibraryError::Database(rusqlite::Error::InvalidPath(
-                PathBuf::from(format!("Pool error: {}", e))
-            ))
-        })?;
-
-        self.process_audio_file_with_conn(&conn, path, source_id)
-    }
-
     /// Process a single audio file with provided connection/transaction (T130, T134)
     fn process_audio_file_with_conn<C: std::ops::Deref<Target = rusqlite::Connection>>(
         &self,
         conn: &C,
         path: &Path,
-        source_id: i64
+        source_id: i64,
     ) -> Result<i64> {
         // T134: Validate file exists and is readable
         if !path.exists() {
             return Err(LibraryError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                "File not found"
+                "File not found",
             )));
         }
 
@@ -250,10 +282,9 @@ impl LibraryService {
             Ok(m) => m,
             Err(e) => {
                 // Log and skip corrupted files instead of stopping the scan
-                warn!("Failed to read metadata from {:?}: {}", path, e);
+                warn!("Failed to read metadata from {path:?}: {e}");
                 return Err(LibraryError::Metadata(format!(
-                    "Corrupted or invalid audio file: {}",
-                    e
+                    "Corrupted or invalid audio file: {e}"
                 )));
             }
         };
@@ -285,7 +316,12 @@ impl LibraryService {
         let album_id = if let Some(ref album_title) = metadata.album {
             if metadata.album_artist.is_some() {
                 // ALBUMARTIST is set: use it, create per (title, artist) as normal
-                Some(queries::insert_album(conn, album_title, album_artist_id, metadata.year)?)
+                Some(queries::insert_album(
+                    conn,
+                    album_title,
+                    album_artist_id,
+                    metadata.year,
+                )?)
             } else {
                 // No ALBUMARTIST: reuse any existing album with this title to avoid duplicates
                 match queries::find_album_by_title(conn, album_title)? {
@@ -300,7 +336,12 @@ impl LibraryService {
                         }
                         Some(existing_id)
                     }
-                    None => Some(queries::insert_album(conn, album_title, album_artist_id, metadata.year)?),
+                    None => Some(queries::insert_album(
+                        conn,
+                        album_title,
+                        album_artist_id,
+                        metadata.year,
+                    )?),
                 }
             }
         } else {
@@ -313,9 +354,7 @@ impl LibraryService {
             .ok_or_else(|| LibraryError::Metadata("Unknown file format".to_string()))?;
 
         // Get file size
-        let file_size = std::fs::metadata(path)
-            .map_err(LibraryError::Io)?
-            .len();
+        let file_size = std::fs::metadata(path).map_err(LibraryError::Io)?.len();
 
         // Insert/update track
         let track_id = queries::insert_track(
@@ -324,7 +363,7 @@ impl LibraryService {
             album_id,
             artist_id,
             source_id,
-            &path.to_path_buf(),
+            path,
             metadata.duration.as_millis() as i64,
             metadata.track_number,
             metadata.sample_rate,
@@ -350,19 +389,19 @@ impl LibraryService {
         // Collect all audio files from the provided paths
         for path in paths {
             if path.is_file() {
-                if let Some(ext) = path.extension() {
-                    if matches!(
+                if let Some(ext) = path.extension()
+                    && matches!(
                         ext.to_str().unwrap_or("").to_lowercase().as_str(),
                         "flac" | "mp3" | "aac" | "m4a" | "alac"
-                    ) {
-                        all_audio_files.push(path.clone());
-                    }
+                    )
+                {
+                    all_audio_files.push(path.clone());
                 }
             } else if path.is_dir() {
                 let files: Vec<PathBuf> = WalkDir::new(path)
                     .follow_links(true)
                     .into_iter()
-                    .filter_map(|e| e.ok())
+                    .filter_map(std::result::Result::ok)
                     .filter(|e| e.file_type().is_file())
                     .filter(|e| {
                         if let Some(ext) = e.path().extension() {
@@ -390,7 +429,8 @@ impl LibraryService {
         use std::collections::HashMap;
         let mut source_map: HashMap<PathBuf, i64> = HashMap::new();
         for file_path in &all_audio_files {
-            let parent_dir = file_path.parent()
+            let parent_dir = file_path
+                .parent()
                 .unwrap_or(file_path.as_path())
                 .to_path_buf();
             if !source_map.contains_key(&parent_dir) {
@@ -405,16 +445,15 @@ impl LibraryService {
         const BATCH_SIZE: usize = 50;
 
         for batch in all_audio_files.chunks(BATCH_SIZE) {
-            let conn = self.pool.get().map_err(|e| {
-                LibraryError::Database(rusqlite::Error::InvalidPath(
-                    PathBuf::from(format!("Pool error: {}", e))
-                ))
-            })?;
+            let conn = self.pool.get()?;
 
-            let tx = conn.unchecked_transaction().map_err(LibraryError::Database)?;
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(LibraryError::Database)?;
 
             for file_path in batch {
-                let parent_dir = file_path.parent()
+                let parent_dir = file_path
+                    .parent()
                     .unwrap_or(file_path.as_path())
                     .to_path_buf();
                 let source_id = *source_map.get(&parent_dir).unwrap();
@@ -422,7 +461,7 @@ impl LibraryService {
                 match self.process_audio_file_with_conn(&tx, file_path, source_id) {
                     Ok(track_id) => track_ids.push(track_id),
                     Err(e) => {
-                        warn!("import_paths: skipping {:?}: {}", file_path, e);
+                        warn!("import_paths: skipping {file_path:?}: {e}");
                     }
                 }
             }
@@ -447,38 +486,27 @@ impl LibraryService {
     // ========================================================================
 
     pub fn list_sources(&self) -> Result<Vec<Source>> {
-        let conn = self.pool.get().map_err(|e| {
-            LibraryError::Database(rusqlite::Error::InvalidPath(
-                PathBuf::from(format!("Pool error: {}", e))
-            ))
-        })?;
+        let conn = self.pool.get()?;
 
         queries::list_sources(&conn).map_err(LibraryError::Database)
     }
 
     pub fn add_source(&self, name: &str, path: &Path) -> Result<Source> {
-        let conn = self.pool.get().map_err(|e| {
-            LibraryError::Database(rusqlite::Error::InvalidPath(
-                PathBuf::from(format!("Pool error: {}", e))
-            ))
-        })?;
+        let conn = self.pool.get()?;
 
         // Check if a source with this path already exists
         if let Some(existing_source) = self.find_source_by_path(path)? {
-            info!("Source with path {:?} already exists (id: {}), returning existing source", path, existing_source.id);
+            info!(
+                "Source with path {:?} already exists (id: {}), returning existing source",
+                path, existing_source.id
+            );
             return Ok(existing_source);
         }
 
         use crate::models::source::SourceType;
-        let source_id = queries::insert_source(
-            &conn,
-            name,
-            SourceType::Disk,
-            Some(&path.to_path_buf()),
-        )?;
+        let source_id = queries::insert_source(&conn, name, SourceType::Disk, Some(path))?;
 
-        queries::get_source(&conn, source_id)?
-            .ok_or(LibraryError::SourceNotFound(source_id))
+        queries::get_source(&conn, source_id)?.ok_or(LibraryError::SourceNotFound(source_id))
     }
 
     /// Find a source by its path (to avoid duplicate sources)
@@ -487,7 +515,9 @@ impl LibraryService {
         for source in sources {
             if let Some(ref source_path) = source.path {
                 // Compare canonical paths to handle symlinks and relative paths
-                let source_canonical = source_path.canonicalize().unwrap_or_else(|_| source_path.clone());
+                let source_canonical = source_path
+                    .canonicalize()
+                    .unwrap_or_else(|_| source_path.clone());
                 let path_canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
 
                 if source_canonical == path_canonical {
@@ -528,21 +558,13 @@ impl LibraryService {
     // ========================================================================
 
     pub fn get_track(&self, id: i64) -> Result<Option<Track>> {
-        let conn = self.pool.get().map_err(|e| {
-            LibraryError::Database(rusqlite::Error::InvalidPath(
-                PathBuf::from(format!("Pool error: {}", e))
-            ))
-        })?;
+        let conn = self.pool.get()?;
 
         queries::get_track(&conn, id).map_err(LibraryError::Database)
     }
 
     pub fn get_album_tracks(&self, album_id: i64) -> Result<Vec<Track>> {
-        let conn = self.pool.get().map_err(|e| {
-            LibraryError::Database(rusqlite::Error::InvalidPath(
-                PathBuf::from(format!("Pool error: {}", e))
-            ))
-        })?;
+        let conn = self.pool.get()?;
 
         queries::get_album_tracks(&conn, album_id).map_err(LibraryError::Database)
     }
@@ -552,14 +574,9 @@ impl LibraryService {
             return Err(LibraryError::InvalidRating(rating));
         }
 
-        let conn = self.pool.get().map_err(|e| {
-            LibraryError::Database(rusqlite::Error::InvalidPath(
-                PathBuf::from(format!("Pool error: {}", e))
-            ))
-        })?;
+        let conn = self.pool.get()?;
 
-        queries::update_track_rating(&conn, track_id, rating)
-            .map_err(LibraryError::Database)
+        queries::update_track_rating(&conn, track_id, rating).map_err(LibraryError::Database)
     }
 
     // ========================================================================
@@ -567,11 +584,7 @@ impl LibraryService {
     // ========================================================================
 
     pub fn get_album(&self, id: i64) -> Result<Option<Album>> {
-        let conn = self.pool.get().map_err(|e| {
-            LibraryError::Database(rusqlite::Error::InvalidPath(
-                PathBuf::from(format!("Pool error: {}", e))
-            ))
-        })?;
+        let conn = self.pool.get()?;
 
         queries::get_album(&conn, id).map_err(LibraryError::Database)
     }
@@ -584,25 +597,16 @@ impl LibraryService {
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> Result<Vec<Album>> {
-        let conn = self.pool.get().map_err(|e| {
-            LibraryError::Database(rusqlite::Error::InvalidPath(
-                PathBuf::from(format!("Pool error: {}", e))
-            ))
-        })?;
+        let conn = self.pool.get()?;
 
         queries::list_albums(&conn, artist_id, genre_id, min_rating, limit, offset)
             .map_err(LibraryError::Database)
     }
 
     pub fn get_artist_albums(&self, artist_id: i64) -> Result<Vec<Album>> {
-        let conn = self.pool.get().map_err(|e| {
-            LibraryError::Database(rusqlite::Error::InvalidPath(
-                PathBuf::from(format!("Pool error: {}", e))
-            ))
-        })?;
+        let conn = self.pool.get()?;
 
-        queries::get_artist_albums(&conn, artist_id)
-            .map_err(LibraryError::Database)
+        queries::get_artist_albums(&conn, artist_id).map_err(LibraryError::Database)
     }
 
     pub fn rate_album(&self, album_id: i64, rating: u8) -> Result<()> {
@@ -610,14 +614,9 @@ impl LibraryService {
             return Err(LibraryError::InvalidRating(rating));
         }
 
-        let conn = self.pool.get().map_err(|e| {
-            LibraryError::Database(rusqlite::Error::InvalidPath(
-                PathBuf::from(format!("Pool error: {}", e))
-            ))
-        })?;
+        let conn = self.pool.get()?;
 
-        queries::update_album_rating(&conn, album_id, rating)
-            .map_err(LibraryError::Database)
+        queries::update_album_rating(&conn, album_id, rating).map_err(LibraryError::Database)
     }
 
     // ========================================================================
@@ -625,34 +624,21 @@ impl LibraryService {
     // ========================================================================
 
     pub fn get_artist(&self, id: i64) -> Result<Option<Artist>> {
-        let conn = self.pool.get().map_err(|e| {
-            LibraryError::Database(rusqlite::Error::InvalidPath(
-                PathBuf::from(format!("Pool error: {}", e))
-            ))
-        })?;
+        let conn = self.pool.get()?;
 
         queries::get_artist(&conn, id).map_err(LibraryError::Database)
     }
 
     pub fn list_artists(&self) -> Result<Vec<Artist>> {
-        let conn = self.pool.get().map_err(|e| {
-            LibraryError::Database(rusqlite::Error::InvalidPath(
-                PathBuf::from(format!("Pool error: {}", e))
-            ))
-        })?;
+        let conn = self.pool.get()?;
 
         queries::list_artists(&conn).map_err(LibraryError::Database)
     }
 
     pub fn get_genre_artists(&self, genre_id: i64) -> Result<Vec<Artist>> {
-        let conn = self.pool.get().map_err(|e| {
-            LibraryError::Database(rusqlite::Error::InvalidPath(
-                PathBuf::from(format!("Pool error: {}", e))
-            ))
-        })?;
+        let conn = self.pool.get()?;
 
-        queries::get_genre_artists(&conn, genre_id)
-            .map_err(LibraryError::Database)
+        queries::get_genre_artists(&conn, genre_id).map_err(LibraryError::Database)
     }
 
     // ========================================================================
@@ -660,57 +646,42 @@ impl LibraryService {
     // ========================================================================
 
     pub fn list_genres(&self) -> Result<Vec<(crate::models::Genre, u32, u32)>> {
-        let conn = self.pool.get().map_err(|e| {
-            LibraryError::Database(rusqlite::Error::InvalidPath(
-                PathBuf::from(format!("Pool error: {}", e))
-            ))
-        })?;
+        let conn = self.pool.get()?;
 
-        queries::list_genres_with_count(&conn)
-            .map_err(LibraryError::Database)
+        queries::list_genres_with_count(&conn).map_err(LibraryError::Database)
     }
 
     pub fn get_genre_tracks(&self, genre_id: i64) -> Result<Vec<Track>> {
-        let conn = self.pool.get().map_err(|e| {
-            LibraryError::Database(rusqlite::Error::InvalidPath(
-                PathBuf::from(format!("Pool error: {}", e))
-            ))
-        })?;
+        let conn = self.pool.get()?;
 
-        queries::get_genre_tracks(&conn, genre_id)
-            .map_err(LibraryError::Database)
+        queries::get_genre_tracks(&conn, genre_id).map_err(LibraryError::Database)
     }
 
     pub fn get_source_tracks(&self, source_id: i64) -> Result<Vec<Track>> {
-        let conn = self.pool.get().map_err(|e| {
-            LibraryError::Database(rusqlite::Error::InvalidPath(
-                PathBuf::from(format!("Pool error: {}", e))
-            ))
-        })?;
+        let conn = self.pool.get()?;
 
-        queries::get_source_tracks(&conn, source_id)
-            .map_err(LibraryError::Database)
+        queries::get_source_tracks(&conn, source_id).map_err(LibraryError::Database)
     }
 
     // ========================================================================
     // Search
     // ========================================================================
 
-    pub fn search(&self, query: &str, limit: usize) -> Result<(Vec<Track>, Vec<Album>, Vec<Artist>)> {
-        let conn = self.pool.get().map_err(|e| {
-            LibraryError::Database(rusqlite::Error::InvalidPath(
-                PathBuf::from(format!("Pool error: {}", e))
-            ))
-        })?;
+    pub fn search(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<(Vec<Track>, Vec<Album>, Vec<Artist>)> {
+        let conn = self.pool.get()?;
 
-        queries::search_library(&conn, query, limit)
-            .map_err(LibraryError::Database)
+        queries::search_library(&conn, query, limit).map_err(LibraryError::Database)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::Rating;
     use crate::test_helpers::TestEnv;
 
     // ── primary_artist ────────────────────────────────────────────────────────
@@ -757,8 +728,7 @@ mod tests {
 
     // Minimal valid FLAC file with STREAMINFO + VORBIS_COMMENT (title/artist/album).
     // Generated by make_fixture.py; verified parseable by lofty 0.21.
-    const MINIMAL_FLAC: &[u8] =
-        include_bytes!("../../tests/fixtures/minimal.flac");
+    const MINIMAL_FLAC: &[u8] = include_bytes!("../../tests/fixtures/minimal.flac");
 
     fn setup() -> (TestEnv, LibraryService) {
         let env = TestEnv::new();
@@ -786,7 +756,10 @@ mod tests {
         let (_env, svc) = setup();
         let bogus = PathBuf::from("/nonexistent/path/does/not/exist.flac");
         let result = svc.import_paths(&[bogus]).unwrap();
-        assert!(result.is_empty(), "nonexistent paths must be skipped gracefully");
+        assert!(
+            result.is_empty(),
+            "nonexistent paths must be skipped gracefully"
+        );
     }
 
     #[test]
@@ -907,10 +880,14 @@ mod tests {
 
         let sources = svc.list_sources().unwrap();
         assert!(
-            sources.iter().any(|s| s.path.as_ref().map(|p| {
-                p.canonicalize().unwrap_or_else(|_| p.clone())
-                    == tmp.path().canonicalize().unwrap()
-            }).unwrap_or(false)),
+            sources.iter().any(|s| s
+                .path
+                .as_ref()
+                .map(|p| {
+                    p.canonicalize().unwrap_or_else(|_| p.clone())
+                        == tmp.path().canonicalize().unwrap()
+                })
+                .unwrap_or(false)),
             "a source should have been created for the parent directory"
         );
         drop(env);
@@ -924,7 +901,7 @@ mod tests {
         let (_, _, _, _, t1, _) = env.seed_basic_library();
         svc.rate_track(t1, 4).unwrap();
         let track = svc.get_track(t1).unwrap().unwrap();
-        assert_eq!(track.rating, 4);
+        assert_eq!(track.rating, Rating(4));
     }
 
     #[test]
@@ -941,7 +918,7 @@ mod tests {
         let (_, _, _, _, t1, _) = env.seed_basic_library();
         svc.rate_track(t1, 0).unwrap();
         let track = svc.get_track(t1).unwrap().unwrap();
-        assert_eq!(track.rating, 0);
+        assert_eq!(track.rating, Rating(0));
     }
 
     // ── Various Artists upgrade ───────────────────────────────────────────────
@@ -953,18 +930,34 @@ mod tests {
         let env = TestEnv::new();
         let conn = env.pool.get().unwrap();
 
-        let source_id = queries::insert_source(&conn, "Test", crate::models::source::SourceType::Disk, None).unwrap();
+        let source_id =
+            queries::insert_source(&conn, "Test", crate::models::source::SourceType::Disk, None)
+                .unwrap();
         let artist1 = queries::insert_artist(&conn, "Akhenaton", None).unwrap();
         let artist2 = queries::insert_artist(&conn, "Kool Shen", None).unwrap();
 
         // First track: album created and owned by artist1
         let album_id = queries::insert_album(&conn, "70s Mixtape", artist1, None).unwrap();
-        queries::insert_track(&conn, "Track 1", Some(album_id), artist1, source_id,
-            &PathBuf::from("/music/t1.flac"), 200_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        queries::insert_track(
+            &conn,
+            "Track 1",
+            Some(album_id),
+            artist1,
+            source_id,
+            &PathBuf::from("/music/t1.flac"),
+            200_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
 
         // Simulate second track import (different artist, same album title, no ALBUMARTIST)
         let (existing_id, existing_artist_id) = queries::find_album_by_title(&conn, "70s Mixtape")
-            .unwrap().unwrap();
+            .unwrap()
+            .unwrap();
         assert_eq!(existing_id, album_id);
         assert_eq!(existing_artist_id, artist1);
 
@@ -978,7 +971,9 @@ mod tests {
 
         // Album should now belong to "Various Artists"
         let album = queries::get_album(&conn, album_id).unwrap().unwrap();
-        let va = queries::get_artist(&conn, album.artist_id).unwrap().unwrap();
+        let va = queries::get_artist(&conn, album.artist_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(va.name, "Various Artists");
     }
 
@@ -988,21 +983,40 @@ mod tests {
         let env = TestEnv::new();
         let conn = env.pool.get().unwrap();
 
-        let source_id = queries::insert_source(&conn, "Test", crate::models::source::SourceType::Disk, None).unwrap();
+        let source_id =
+            queries::insert_source(&conn, "Test", crate::models::source::SourceType::Disk, None)
+                .unwrap();
         let artist_id = queries::insert_artist(&conn, "Akhenaton", None).unwrap();
         let album_id = queries::insert_album(&conn, "Sol Invictus", artist_id, None).unwrap();
-        queries::insert_track(&conn, "Track 1", Some(album_id), artist_id, source_id,
-            &PathBuf::from("/music/t1.flac"), 200_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        queries::insert_track(
+            &conn,
+            "Track 1",
+            Some(album_id),
+            artist_id,
+            source_id,
+            &PathBuf::from("/music/t1.flac"),
+            200_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
 
         // Same artist on second track — no upgrade
         let (existing_id, existing_artist_id) = queries::find_album_by_title(&conn, "Sol Invictus")
-            .unwrap().unwrap();
+            .unwrap()
+            .unwrap();
 
         // artist IDs match → no upgrade
         assert_eq!(existing_artist_id, artist_id);
 
         let album = queries::get_album(&conn, existing_id).unwrap().unwrap();
-        assert_eq!(album.artist_id, artist_id, "album should still belong to Akhenaton");
+        assert_eq!(
+            album.artist_id, artist_id,
+            "album should still belong to Akhenaton"
+        );
     }
 
     #[test]
@@ -1011,7 +1025,7 @@ mod tests {
         let (_, _, album_id, _, _, _) = env.seed_basic_library();
         svc.rate_album(album_id, 5).unwrap();
         let album = svc.get_album(album_id).unwrap().unwrap();
-        assert_eq!(album.rating, 5);
+        assert_eq!(album.rating, Rating(5));
     }
 
     #[test]
@@ -1036,7 +1050,9 @@ mod tests {
     fn test_list_albums_filtered_by_artist() {
         let (env, svc) = setup();
         let (_, artist_id, _, _, _, _) = env.seed_basic_library();
-        let albums = svc.list_albums(Some(artist_id), None, None, None, None).unwrap();
+        let albums = svc
+            .list_albums(Some(artist_id), None, None, None, None)
+            .unwrap();
         assert_eq!(albums.len(), 1);
         assert_eq!(albums[0].artist_id, artist_id);
     }
@@ -1123,7 +1139,10 @@ mod tests {
         let file_path = write_flac(tmp.path(), "track.flac");
         let (_env, svc) = setup();
         let result = svc.scan_directory(&file_path, 1);
-        assert!(result.is_err(), "scanning a file path (not a dir) must fail");
+        assert!(
+            result.is_err(),
+            "scanning a file path (not a dir) must fail"
+        );
     }
 
     #[test]
@@ -1165,7 +1184,10 @@ mod tests {
         let source = svc.add_source("Test", tmp.path()).unwrap();
         let result = svc.scan_directory(tmp.path(), source.id).unwrap();
 
-        assert_eq!(result.tracks_added, 1, "only .flac counted; wav/jpg/txt skipped");
+        assert_eq!(
+            result.tracks_added, 1,
+            "only .flac counted; wav/jpg/txt skipped"
+        );
     }
 
     #[test]
@@ -1184,7 +1206,10 @@ mod tests {
         let source = svc.add_source("Test", tmp.path()).unwrap();
         let result = svc.scan_directory(tmp.path(), source.id).unwrap();
 
-        assert_eq!(result.tracks_added, 3, "should recurse into all subdirectories");
+        assert_eq!(
+            result.tracks_added, 3,
+            "should recurse into all subdirectories"
+        );
     }
 
     #[test]
@@ -1237,7 +1262,8 @@ mod tests {
     #[test]
     fn test_validate_sources_nonexistent_dir_is_invalid() {
         let (_env, svc) = setup();
-        svc.add_source("Dead Library", &PathBuf::from("/nowhere/xyz123abc")).unwrap();
+        svc.add_source("Dead Library", &PathBuf::from("/nowhere/xyz123abc"))
+            .unwrap();
 
         let results = svc.validate_sources().unwrap();
         assert_eq!(results.len(), 1);
@@ -1249,7 +1275,8 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let (_env, svc) = setup();
         svc.add_source("Good", tmp.path()).unwrap();
-        svc.add_source("Bad", &PathBuf::from("/nowhere/xyz999abc")).unwrap();
+        svc.add_source("Bad", &PathBuf::from("/nowhere/xyz999abc"))
+            .unwrap();
 
         let results = svc.validate_sources().unwrap();
         assert_eq!(results.len(), 2);
@@ -1264,7 +1291,9 @@ mod tests {
     #[test]
     fn test_find_source_by_path_returns_none_when_not_found() {
         let (_env, svc) = setup();
-        let result = svc.find_source_by_path(&PathBuf::from("/some/path/not/in/db")).unwrap();
+        let result = svc
+            .find_source_by_path(&PathBuf::from("/some/path/not/in/db"))
+            .unwrap();
         assert!(result.is_none());
     }
 

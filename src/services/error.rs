@@ -10,6 +10,9 @@ pub enum LibraryError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[error("Connection pool error: {0}")]
+    Pool(#[from] r2d2::Error),
+
     #[error("Metadata error: {0}")]
     Metadata(String),
 
@@ -52,12 +55,15 @@ pub enum PlaylistError {
     #[error("Database error: {0}")]
     Database(#[from] rusqlite::Error),
 
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("Connection pool error: {0}")]
+    Pool(#[from] r2d2::Error),
+
     #[error("Playlist not found: {0}")]
     PlaylistNotFound(i64),
 
     #[error("Invalid M3U file: {0}")]
     InvalidM3u(String),
-
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
 }

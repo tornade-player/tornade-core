@@ -2,7 +2,7 @@
 
 use crate::db::DbPool;
 use crate::db::queries;
-use crate::models::{Track, Album, Artist};
+use crate::models::{Album, Artist, Track};
 use crate::services::error::LibraryError;
 use std::path::PathBuf;
 
@@ -31,19 +31,23 @@ impl SearchService {
             });
         }
 
-        let conn = self.pool.get()
-            .map_err(|e| LibraryError::Database(rusqlite::Error::ToSqlConversionFailure(Box::new(e))))?;
+        let conn = self.pool.get().map_err(|e| {
+            LibraryError::Database(rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+        })?;
 
         // Search tracks using FTS5
-        let mut stmt = conn.prepare(
-            "SELECT t.id FROM tracks t
+        let mut stmt = conn
+            .prepare(
+                "SELECT t.id FROM tracks t
              JOIN tracks_fts fts ON fts.rowid = t.id
              WHERE tracks_fts MATCH ?1
              ORDER BY rank
-             LIMIT 50"
-        ).map_err(LibraryError::Database)?;
+             LIMIT 50",
+            )
+            .map_err(LibraryError::Database)?;
 
-        let track_ids: Vec<i64> = stmt.query_map([query], |row| row.get(0))
+        let track_ids: Vec<i64> = stmt
+            .query_map([query], |row| row.get(0))
             .map_err(LibraryError::Database)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(LibraryError::Database)?;
@@ -57,68 +61,74 @@ impl SearchService {
         }
 
         // Search albums by title using pattern matching
-        let album_pattern = format!("%{}%", query);
-        let mut stmt = conn.prepare(
-            "SELECT a.id, a.title, a.artist_id, ar.name as artist_name, a.year, a.rating,
+        let album_pattern = format!("%{query}%");
+        let mut stmt = conn
+            .prepare(
+                "SELECT a.id, a.title, a.artist_id, ar.name as artist_name, a.year, a.rating,
                     a.artwork_path, a.online_artwork_path, a.description,
                     a.musicbrainz_id, a.label, a.country, a.barcode, a.album_type, a.release_status
              FROM albums a
              JOIN artists ar ON ar.id = a.artist_id
-             WHERE a.title LIKE ?1 LIMIT 20"
-        ).map_err(LibraryError::Database)?;
+             WHERE a.title LIKE ?1 LIMIT 20",
+            )
+            .map_err(LibraryError::Database)?;
 
-        let albums: Vec<Album> = stmt.query_map([&album_pattern], |row| {
-            Ok(Album {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                artist_id: row.get(2)?,
-                artist_name: row.get(3)?,
-                year: row.get(4)?,
-                rating: row.get(5)?,
-                artwork_path: row.get::<_, Option<String>>(6)?.map(PathBuf::from),
-                online_artwork_path: row.get::<_, Option<String>>(7)?.map(PathBuf::from),
-                description: row.get(8)?,
-                musicbrainz_id: row.get(9)?,
-                label: row.get(10)?,
-                country: row.get(11)?,
-                barcode: row.get(12)?,
-                album_type: row.get(13)?,
-                release_status: row.get(14)?,
+        let albums: Vec<Album> = stmt
+            .query_map([&album_pattern], |row| {
+                Ok(Album {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    artist_id: row.get(2)?,
+                    artist_name: row.get(3)?,
+                    year: row.get(4)?,
+                    rating: row.get(5)?,
+                    artwork_path: row.get::<_, Option<String>>(6)?.map(PathBuf::from),
+                    online_artwork_path: row.get::<_, Option<String>>(7)?.map(PathBuf::from),
+                    description: row.get(8)?,
+                    musicbrainz_id: row.get(9)?,
+                    label: row.get(10)?,
+                    country: row.get(11)?,
+                    barcode: row.get(12)?,
+                    album_type: row.get(13)?,
+                    release_status: row.get(14)?,
+                })
             })
-        })
-        .map_err(LibraryError::Database)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(LibraryError::Database)?;
+            .map_err(LibraryError::Database)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(LibraryError::Database)?;
 
         // Search artists by name using pattern matching
-        let artist_pattern = format!("%{}%", query);
-        let mut stmt = conn.prepare(
-            "SELECT id, name, name_sort, bio, country, genre, style, mood,
+        let artist_pattern = format!("%{query}%");
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, name, name_sort, bio, country, genre, style, mood,
                     formed_year, born_year, died_year, disbanded, musicbrainz_id, theaudiodb_id
-             FROM artists WHERE name LIKE ?1 LIMIT 20"
-        ).map_err(LibraryError::Database)?;
+             FROM artists WHERE name LIKE ?1 LIMIT 20",
+            )
+            .map_err(LibraryError::Database)?;
 
-        let artists: Vec<Artist> = stmt.query_map([&artist_pattern], |row| {
-            Ok(Artist {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                name_sort: row.get(2)?,
-                bio: row.get(3)?,
-                country: row.get(4)?,
-                genre: row.get(5)?,
-                style: row.get(6)?,
-                mood: row.get(7)?,
-                formed_year: row.get(8)?,
-                born_year: row.get(9)?,
-                died_year: row.get(10)?,
-                disbanded: row.get(11)?,
-                musicbrainz_id: row.get(12)?,
-                theaudiodb_id: row.get(13)?,
+        let artists: Vec<Artist> = stmt
+            .query_map([&artist_pattern], |row| {
+                Ok(Artist {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    name_sort: row.get(2)?,
+                    bio: row.get(3)?,
+                    country: row.get(4)?,
+                    genre: row.get(5)?,
+                    style: row.get(6)?,
+                    mood: row.get(7)?,
+                    formed_year: row.get(8)?,
+                    born_year: row.get(9)?,
+                    died_year: row.get(10)?,
+                    disbanded: row.get(11)?,
+                    musicbrainz_id: row.get(12)?,
+                    theaudiodb_id: row.get(13)?,
+                })
             })
-        })
-        .map_err(LibraryError::Database)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(LibraryError::Database)?;
+            .map_err(LibraryError::Database)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(LibraryError::Database)?;
 
         Ok(SearchResults {
             tracks,
@@ -190,7 +200,10 @@ mod tests {
         let service = SearchService::new(env.pool.clone());
         // FTS index is populated via trigger on INSERT; "Track" matches both seeded tracks
         let results = service.search("Track").unwrap();
-        assert!(!results.tracks.is_empty(), "FTS5 search must find tracks by title token");
+        assert!(
+            !results.tracks.is_empty(),
+            "FTS5 search must find tracks by title token"
+        );
     }
 
     #[test]
@@ -199,7 +212,11 @@ mod tests {
         env.seed_basic_library();
         let service = SearchService::new(env.pool.clone());
         let results = service.search("One").unwrap();
-        assert_eq!(results.tracks.len(), 1, "only 'Track One' contains the token 'One'");
+        assert_eq!(
+            results.tracks.len(),
+            1,
+            "only 'Track One' contains the token 'One'"
+        );
         assert_eq!(results.tracks[0].title, "Track One");
     }
 
@@ -210,7 +227,10 @@ mod tests {
         let service = SearchService::new(env.pool.clone());
         // FTS artist_name column is populated from the artist table via trigger
         let results = service.search("Artist").unwrap();
-        assert!(!results.tracks.is_empty(), "FTS5 must find tracks by artist name token");
+        assert!(
+            !results.tracks.is_empty(),
+            "FTS5 must find tracks by artist name token"
+        );
     }
 
     // ── FTS5 special characters — must not panic ──────────────────────────
@@ -264,7 +284,10 @@ mod tests {
         // This test documents the current behaviour as a regression checkpoint.
         // Ideal future behaviour: sanitise the query and return Ok(empty).
         let result = service.search("%");
-        assert!(result.is_err(), "current behaviour: '%' causes an FTS5 syntax error");
+        assert!(
+            result.is_err(),
+            "current behaviour: '%' causes an FTS5 syntax error"
+        );
     }
 
     #[test]
@@ -290,9 +313,18 @@ mod tests {
         env.seed_basic_library(); // 2 tracks, 1 album, 1 artist
         let service = SearchService::new(env.pool.clone());
         let results = service.search("Test").unwrap();
-        assert!(results.tracks.len()  <= 50, "track results must be capped at 50");
-        assert!(results.albums.len()  <= 20, "album results must be capped at 20");
-        assert!(results.artists.len() <= 20, "artist results must be capped at 20");
+        assert!(
+            results.tracks.len() <= 50,
+            "track results must be capped at 50"
+        );
+        assert!(
+            results.albums.len() <= 20,
+            "album results must be capped at 20"
+        );
+        assert!(
+            results.artists.len() <= 20,
+            "artist results must be capped at 20"
+        );
     }
 
     #[test]

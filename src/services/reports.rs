@@ -1,8 +1,8 @@
 // Reports generation for scan and artwork operations
 
+use chrono::{DateTime, Local};
 use std::fs;
 use std::path::PathBuf;
-use chrono::{DateTime, Local};
 
 /// Scan report data
 #[derive(Debug, Clone)]
@@ -41,9 +41,9 @@ impl ScanReport {
         let remaining_seconds = seconds % 60;
 
         if minutes > 0 {
-            format!("{}m {}s", minutes, remaining_seconds)
+            format!("{minutes}m {remaining_seconds}s")
         } else {
-            format!("{}s", seconds)
+            format!("{seconds}s")
         }
     }
 
@@ -54,8 +54,14 @@ impl ScanReport {
         report.push_str("                  LIBRARY SCAN REPORT\n");
         report.push_str("═══════════════════════════════════════════════════════════\n\n");
 
-        report.push_str(&format!("Scan started:  {}\n", self.start_time.format("%Y-%m-%d %H:%M:%S")));
-        report.push_str(&format!("Scan finished: {}\n", self.end_time.format("%Y-%m-%d %H:%M:%S")));
+        report.push_str(&format!(
+            "Scan started:  {}\n",
+            self.start_time.format("%Y-%m-%d %H:%M:%S")
+        ));
+        report.push_str(&format!(
+            "Scan finished: {}\n",
+            self.end_time.format("%Y-%m-%d %H:%M:%S")
+        ));
         report.push_str(&format!("Duration:      {}\n\n", self.format_duration()));
 
         report.push_str(&format!("Folder scanned:\n  {}\n\n", self.folder_path));
@@ -65,7 +71,10 @@ impl ScanReport {
         report.push_str(&format!("📁 Files found:     {:>6}\n", self.total_files));
         report.push_str(&format!("🎵 Tracks added:    {:>6}\n", self.tracks_added));
         report.push_str(&format!("💿 Albums created:  {:>6}\n", self.albums_created));
-        report.push_str(&format!("👤 Artists created: {:>6}\n", self.artists_created));
+        report.push_str(&format!(
+            "👤 Artists created: {:>6}\n",
+            self.artists_created
+        ));
 
         if !self.errors.is_empty() {
             report.push_str(&format!("\n⚠️  ERRORS ({} total)\n", self.errors.len()));
@@ -74,12 +83,18 @@ impl ScanReport {
                 report.push_str(&format!("{}. {}\n", i + 1, error));
             }
             if self.errors.len() > 10 {
-                report.push_str(&format!("\n... and {} more errors\n", self.errors.len() - 10));
+                report.push_str(&format!(
+                    "\n... and {} more errors\n",
+                    self.errors.len() - 10
+                ));
             }
         }
 
         report.push_str("\n═══════════════════════════════════════════════════════════\n");
-        report.push_str(&format!("Report generated: {}\n", Local::now().format("%Y-%m-%d %H:%M:%S")));
+        report.push_str(&format!(
+            "Report generated: {}\n",
+            Local::now().format("%Y-%m-%d %H:%M:%S")
+        ));
         report.push_str("═══════════════════════════════════════════════════════════\n");
 
         report
@@ -90,10 +105,7 @@ impl ScanReport {
         fs::create_dir_all(reports_dir).map_err(|e| e.to_string())?;
 
         // Generate filename with timestamp
-        let filename = format!(
-            "scan_{}.txt",
-            self.start_time.format("%Y%m%d_%H%M%S")
-        );
+        let filename = format!("scan_{}.txt", self.start_time.format("%Y%m%d_%H%M%S"));
         let filepath = reports_dir.join(filename);
 
         // Write report
@@ -140,9 +152,9 @@ impl ArtworkReport {
         let remaining_seconds = seconds % 60;
 
         if minutes > 0 {
-            format!("{}m {}s", minutes, remaining_seconds)
+            format!("{minutes}m {remaining_seconds}s")
         } else {
-            format!("{}s", seconds)
+            format!("{seconds}s")
         }
     }
 
@@ -172,19 +184,34 @@ impl ArtworkReport {
         report.push_str("               ARTWORK SCRAPING REPORT\n");
         report.push_str("═══════════════════════════════════════════════════════════\n\n");
 
-        report.push_str(&format!("Scraping started:  {}\n", self.start_time.format("%Y-%m-%d %H:%M:%S")));
-        report.push_str(&format!("Scraping finished: {}\n", self.end_time.format("%Y-%m-%d %H:%M:%S")));
-        report.push_str(&format!("Duration:          {}\n\n", self.format_duration()));
+        report.push_str(&format!(
+            "Scraping started:  {}\n",
+            self.start_time.format("%Y-%m-%d %H:%M:%S")
+        ));
+        report.push_str(&format!(
+            "Scraping finished: {}\n",
+            self.end_time.format("%Y-%m-%d %H:%M:%S")
+        ));
+        report.push_str(&format!(
+            "Duration:          {}\n\n",
+            self.format_duration()
+        ));
 
         report.push_str("ALBUMS\n");
         report.push_str("───────────────────────────────────────────────────────────\n");
         report.push_str(&format!("Total albums:      {:>6}\n", self.total_albums));
-        report.push_str(&format!("✅ Successful:     {:>6}\n", self.albums_successful));
-        report.push_str(&format!("❌ Failed:         {:>6}\n", self.albums_failed_count()));
+        report.push_str(&format!(
+            "✅ Successful:     {:>6}\n",
+            self.albums_successful
+        ));
+        report.push_str(&format!(
+            "❌ Failed:         {:>6}\n",
+            self.albums_failed_count()
+        ));
 
         if self.total_albums > 0 {
             let rate = (self.albums_successful as f64 / self.total_albums as f64) * 100.0;
-            report.push_str(&format!("Success rate:      {:>5.1}%\n", rate));
+            report.push_str(&format!("Success rate:      {rate:>5.1}%\n"));
         }
 
         if !self.albums_failed.is_empty() {
@@ -193,19 +220,28 @@ impl ArtworkReport {
                 report.push_str(&format!("  {}. {} - {}\n", i + 1, name, reason));
             }
             if self.albums_failed.len() > 20 {
-                report.push_str(&format!("  ... and {} more\n", self.albums_failed.len() - 20));
+                report.push_str(&format!(
+                    "  ... and {} more\n",
+                    self.albums_failed.len() - 20
+                ));
             }
         }
 
         report.push_str("\nARTISTS\n");
         report.push_str("───────────────────────────────────────────────────────────\n");
         report.push_str(&format!("Total artists:     {:>6}\n", self.total_artists));
-        report.push_str(&format!("✅ Successful:     {:>6}\n", self.artists_successful));
-        report.push_str(&format!("❌ Failed:         {:>6}\n", self.artists_failed_count()));
+        report.push_str(&format!(
+            "✅ Successful:     {:>6}\n",
+            self.artists_successful
+        ));
+        report.push_str(&format!(
+            "❌ Failed:         {:>6}\n",
+            self.artists_failed_count()
+        ));
 
         if self.total_artists > 0 {
             let rate = (self.artists_successful as f64 / self.total_artists as f64) * 100.0;
-            report.push_str(&format!("Success rate:      {:>5.1}%\n", rate));
+            report.push_str(&format!("Success rate:      {rate:>5.1}%\n"));
         }
 
         if !self.artists_failed.is_empty() {
@@ -214,7 +250,10 @@ impl ArtworkReport {
                 report.push_str(&format!("  {}. {} - {}\n", i + 1, name, reason));
             }
             if self.artists_failed.len() > 20 {
-                report.push_str(&format!("  ... and {} more\n", self.artists_failed.len() - 20));
+                report.push_str(&format!(
+                    "  ... and {} more\n",
+                    self.artists_failed.len() - 20
+                ));
             }
         }
 
@@ -223,14 +262,20 @@ impl ArtworkReport {
         let total = self.total_albums + self.total_artists;
         let successful = self.albums_successful + self.artists_successful;
         let failed = self.albums_failed_count() + self.artists_failed_count();
-        report.push_str(&format!("Total items:       {:>6}\n", total));
-        report.push_str(&format!("✅ Successful:     {:>6}\n", successful));
-        report.push_str(&format!("❌ Failed:         {:>6}\n", failed));
-        report.push_str(&format!("Success rate:      {:>5.1}%\n", self.success_rate()));
+        report.push_str(&format!("Total items:       {total:>6}\n"));
+        report.push_str(&format!("✅ Successful:     {successful:>6}\n"));
+        report.push_str(&format!("❌ Failed:         {failed:>6}\n"));
+        report.push_str(&format!(
+            "Success rate:      {:>5.1}%\n",
+            self.success_rate()
+        ));
 
         report.push_str("\n═══════════════════════════════════════════════════════════\n");
         report.push_str("Source: MusicBrainz + Cover Art Archive (free, no API key)\n");
-        report.push_str(&format!("Report generated: {}\n", Local::now().format("%Y-%m-%d %H:%M:%S")));
+        report.push_str(&format!(
+            "Report generated: {}\n",
+            Local::now().format("%Y-%m-%d %H:%M:%S")
+        ));
         report.push_str("═══════════════════════════════════════════════════════════\n");
 
         report
@@ -241,10 +286,7 @@ impl ArtworkReport {
         fs::create_dir_all(reports_dir).map_err(|e| e.to_string())?;
 
         // Generate filename with timestamp
-        let filename = format!(
-            "artwork_{}.txt",
-            self.start_time.format("%Y%m%d_%H%M%S")
-        );
+        let filename = format!("artwork_{}.txt", self.start_time.format("%Y%m%d_%H%M%S"));
         let filepath = reports_dir.join(filename);
 
         // Write report

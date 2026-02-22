@@ -2,9 +2,7 @@
 
 /// Normalize a string for matching (lowercase, remove accents, trim)
 pub fn normalize(s: &str) -> String {
-    s.to_lowercase()
-        .trim()
-        .to_string()
+    s.to_lowercase().trim().to_string()
 }
 
 /// Calculate simple fuzzy match score between two strings
@@ -129,6 +127,9 @@ mod tests {
 
     #[test]
     fn test_normalize_lowercases() {
-        assert_eq!(normalize("THE DARK SIDE OF THE MOON"), "the dark side of the moon");
+        assert_eq!(
+            normalize("THE DARK SIDE OF THE MOON"),
+            "the dark side of the moon"
+        );
     }
 }
