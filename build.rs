@@ -1,3 +1,19 @@
+/// Copy `src` to `dst` only when the content differs (or `dst` doesn't exist).
+/// This avoids unnecessary writes — and sandbox violations — when the build
+/// script re-runs but `ffi.rs` hasn't actually changed.
+fn copy_if_changed(src: &str, dst: &str) {
+    let src_bytes = match std::fs::read(src) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+    if let Ok(dst_bytes) = std::fs::read(dst) {
+        if src_bytes == dst_bytes {
+            return;
+        }
+    }
+    let _ = std::fs::copy(src, dst);
+}
+
 fn main() {
     let out_dir = "./include";
     let pkg = env!("CARGO_PKG_NAME"); // "tornade-core"
@@ -29,28 +45,19 @@ fn main() {
 
     for dest in &destinations {
         let _ = std::fs::create_dir_all(dest);
-        let _ = std::fs::copy(
-            format!("{xcode_src}/{pkg}.swift"),
-            format!("{dest}/{pkg}.swift"),
-        );
-        let _ = std::fs::copy(format!("{xcode_src}/{pkg}.h"), format!("{dest}/{pkg}.h"));
-        let _ = std::fs::copy(
-            format!("{out_dir}/SwiftBridgeCore.swift"),
-            format!("{dest}/SwiftBridgeCore.swift"),
-        );
-        let _ = std::fs::copy(
-            format!("{out_dir}/SwiftBridgeCore.h"),
-            format!("{dest}/SwiftBridgeCore.h"),
-        );
+        copy_if_changed(&format!("{xcode_src}/{pkg}.swift"), &format!("{dest}/{pkg}.swift"));
+        copy_if_changed(&format!("{xcode_src}/{pkg}.h"),     &format!("{dest}/{pkg}.h"));
+        copy_if_changed(&format!("{out_dir}/SwiftBridgeCore.swift"), &format!("{dest}/SwiftBridgeCore.swift"));
+        copy_if_changed(&format!("{out_dir}/SwiftBridgeCore.h"),     &format!("{dest}/SwiftBridgeCore.h"));
     }
 
     // SwiftBridgeCore also lives at the Libraries root for the bridging header
-    let _ = std::fs::copy(
-        format!("{out_dir}/SwiftBridgeCore.swift"),
+    copy_if_changed(
+        &format!("{out_dir}/SwiftBridgeCore.swift"),
         "../TornadeUI-macOS/Libraries/SwiftBridgeCore.swift",
     );
-    let _ = std::fs::copy(
-        format!("{out_dir}/SwiftBridgeCore.h"),
+    copy_if_changed(
+        &format!("{out_dir}/SwiftBridgeCore.h"),
         "../TornadeUI-macOS/Libraries/SwiftBridgeCore.h",
     );
 }
