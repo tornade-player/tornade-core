@@ -137,21 +137,25 @@ impl PlayerService {
             // Track is now accessible — remove from unavailable set
             state.skipped_track_ids.remove(&track_id);
 
-            // Update current_index to match the track being played
-            if let Some(position) = state.queue.tracks.iter().position(|&id| id == track_id) {
-                // If shuffle is enabled, find position in shuffle_order
-                if state.queue.shuffle_enabled {
-                    // Find the index in shuffle_order that points to this track position
-                    if let Some(shuffle_idx) = state
-                        .queue
-                        .shuffle_order
-                        .iter()
-                        .position(|&idx| idx == position)
-                    {
-                        state.queue.current_index = shuffle_idx;
+            // Update current_index only when the caller has NOT already positioned
+            // it on this track. next() / previous() / jump_to_index() set
+            // current_index before calling play(), so we must not overwrite it —
+            // doing so would always snap to the *first* occurrence of a duplicated
+            // track and cause the queue to loop instead of advancing.
+            if state.queue.current_track() != Some(track_id) {
+                if let Some(position) = state.queue.tracks.iter().position(|&id| id == track_id) {
+                    if state.queue.shuffle_enabled {
+                        if let Some(shuffle_idx) = state
+                            .queue
+                            .shuffle_order
+                            .iter()
+                            .position(|&idx| idx == position)
+                        {
+                            state.queue.current_index = shuffle_idx;
+                        }
+                    } else {
+                        state.queue.current_index = position;
                     }
-                } else {
-                    state.queue.current_index = position;
                 }
             }
         }
@@ -438,13 +442,25 @@ impl PlayerService {
 
         while current < queue_len {
             let track_id = {
-                let state = self.state.lock().unwrap();
-                // Index directly into the raw tracks array — the caller passes the
-                // visual/display position, not a shuffle-order index.
-                // play() will update current_index correctly (remapping to
-                // shuffle_order position if shuffle is enabled).
-                state.queue.tracks.get(current).copied()
-                    .ok_or(PlayerError::EmptyQueue)?
+                let mut state = self.state.lock().unwrap();
+                let track_id = state.queue.tracks.get(current).copied()
+                    .ok_or(PlayerError::EmptyQueue)?;
+
+                // Set current_index to the exact visual position before calling
+                // play(), so that play()'s duplicate-guard leaves it untouched.
+                // With shuffle, map the raw position to its slot in shuffle_order.
+                if state.queue.shuffle_enabled {
+                    if let Some(shuffle_idx) = state.queue.shuffle_order
+                        .iter()
+                        .position(|&i| i == current)
+                    {
+                        state.queue.current_index = shuffle_idx;
+                    }
+                } else {
+                    state.queue.current_index = current;
+                }
+
+                track_id
             };
 
             match self.play(track_id) {
