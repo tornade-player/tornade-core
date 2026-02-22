@@ -438,9 +438,13 @@ impl PlayerService {
 
         while current < queue_len {
             let track_id = {
-                let mut state = self.state.lock().unwrap();
-                state.queue.current_index = current;
-                state.queue.current_track().ok_or(PlayerError::EmptyQueue)?
+                let state = self.state.lock().unwrap();
+                // Index directly into the raw tracks array — the caller passes the
+                // visual/display position, not a shuffle-order index.
+                // play() will update current_index correctly (remapping to
+                // shuffle_order position if shuffle is enabled).
+                state.queue.tracks.get(current).copied()
+                    .ok_or(PlayerError::EmptyQueue)?
             };
 
             match self.play(track_id) {
