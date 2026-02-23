@@ -15,6 +15,44 @@ use std::time::{Duration, Instant};
 
 type Result<T> = std::result::Result<T, PlayerError>;
 
+// ============================================================================
+// Network volume helper
+// ============================================================================
+
+/// On macOS, when a file lives under `/Volumes/<share>/...`, the connection to
+/// the NAS can be lost while the mount point still exists.  Accessing the
+/// volume root wakes `automountd` (or re-triggers the SMB/AFP reconnect), and
+/// after a brief pause the path is usually reachable again.
+///
+/// Returns `true` if the path exists after the probe (i.e. worth retrying),
+/// `false` otherwise.  On non-macOS platforms this is a no-op that always
+/// returns `false` so that the caller falls through to the normal error path.
+fn probe_volume_mount(path: &std::path::Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use std::path::PathBuf;
+        let mut components = path.components();
+        // path must start with  /  Volumes  <share-name>  …
+        components.next(); // /
+        if components.next().map(|c| c.as_os_str()) != Some(std::ffi::OsStr::new("Volumes")) {
+            return false;
+        }
+        if let Some(share) = components.next() {
+            let volume_root = PathBuf::from("/Volumes").join(share);
+            // Reading the directory wakes automountd / the SMB layer.
+            let _ = std::fs::read_dir(&volume_root);
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            return path.exists();
+        }
+        false
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        false
+    }
+}
+
 pub struct PlayerService {
     pool: DbPool,
     state: Arc<Mutex<PlayerState>>,
@@ -106,14 +144,27 @@ impl PlayerService {
         let sink = Sink::try_new(&stream_handle)
             .map_err(|e| PlayerError::Audio(format!("Failed to create sink: {e}")))?;
 
-        // Open and decode file
-        let file = File::open(&track.file_path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                PlayerError::FileNotFound(track.file_path.to_string_lossy().into_owned())
-            } else {
-                PlayerError::Audio(format!("Failed to open file: {e}"))
+        // Open and decode file — with one retry for network paths (NAS mounts)
+        let file = match File::open(&track.file_path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Probe the volume to wake automountd, then retry once.
+                if probe_volume_mount(&track.file_path) {
+                    File::open(&track.file_path).map_err(|e2| {
+                        if e2.kind() == std::io::ErrorKind::NotFound {
+                            PlayerError::FileNotFound(track.file_path.to_string_lossy().into_owned())
+                        } else {
+                            PlayerError::Audio(format!("Failed to open file: {e2}"))
+                        }
+                    })?
+                } else {
+                    return Err(PlayerError::FileNotFound(
+                        track.file_path.to_string_lossy().into_owned(),
+                    ));
+                }
             }
-        })?;
+            Err(e) => return Err(PlayerError::Audio(format!("Failed to open file: {e}"))),
+        };
 
         let source = Decoder::new(BufReader::new(file))
             .map_err(|e| PlayerError::Audio(format!("Failed to decode audio: {e}")))?;
@@ -275,14 +326,26 @@ impl PlayerService {
         // Get stream handle
         let stream_handle = self.ensure_audio_stream()?;
 
-        // Open and decode file
-        let file = File::open(&track.file_path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                PlayerError::FileNotFound(track.file_path.to_string_lossy().into_owned())
-            } else {
-                PlayerError::Audio(format!("Failed to open file: {e}"))
+        // Open and decode file — with one retry for network paths (NAS mounts)
+        let file = match File::open(&track.file_path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if probe_volume_mount(&track.file_path) {
+                    File::open(&track.file_path).map_err(|e2| {
+                        if e2.kind() == std::io::ErrorKind::NotFound {
+                            PlayerError::FileNotFound(track.file_path.to_string_lossy().into_owned())
+                        } else {
+                            PlayerError::Audio(format!("Failed to open file: {e2}"))
+                        }
+                    })?
+                } else {
+                    return Err(PlayerError::FileNotFound(
+                        track.file_path.to_string_lossy().into_owned(),
+                    ));
+                }
             }
-        })?;
+            Err(e) => return Err(PlayerError::Audio(format!("Failed to open file: {e}"))),
+        };
 
         let source = Decoder::new(BufReader::new(file))
             .map_err(|e| PlayerError::Audio(format!("Failed to decode audio: {e}")))?;
@@ -656,6 +719,14 @@ impl PlayerService {
             .iter()
             .copied()
             .collect()
+    }
+
+    /// Clear the set of unavailable (skipped) track IDs.
+    /// Call this after a network volume has been remounted so that previously
+    /// unreachable tracks are retried on the next playback attempt.
+    pub fn clear_skipped_tracks(&self) {
+        self.state.lock().unwrap().skipped_track_ids.clear();
+        info!("Cleared unavailable track list — network volume may have remounted");
     }
 
     // ========================================================================

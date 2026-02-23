@@ -203,6 +203,9 @@ mod ffi {
         fn toggle_repeat() -> String;
         fn set_repeat_mode(mode: &str) -> String;
 
+        // Network / NAS helpers
+        fn clear_unavailable_tracks() -> String;
+
         // Import Functions
         fn import_files(paths_json: &str) -> String;
 
@@ -1871,6 +1874,33 @@ fn set_repeat_mode(mode: &str) -> String {
                     })
                     .to_string(),
                 }
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "error": "Player service not initialized"
+                })
+                .to_string()
+            }
+        }
+        Err(e) => serde_json::json!({
+            "success": false,
+            "error": format!("FFI initialization failed: {}", e)
+        })
+        .to_string(),
+    }
+}
+
+fn clear_unavailable_tracks() -> String {
+    // Clear the set of skipped/unavailable track IDs so they are retried on
+    // the next playback attempt (e.g. after a NAS volume has remounted).
+    match get_or_init_player() {
+        Ok(()) => {
+            let player = PLAYER_SERVICE.lock().unwrap();
+            if let Some(ref wrapped) = *player {
+                let player_service = &wrapped.0;
+                player_service.clear_skipped_tracks();
+                serde_json::json!({ "success": true, "data": "Unavailable track list cleared" })
+                    .to_string()
             } else {
                 serde_json::json!({
                     "success": false,
