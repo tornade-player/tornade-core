@@ -6,10 +6,8 @@ fn copy_if_changed(src: &str, dst: &str) {
         Ok(b) => b,
         Err(_) => return,
     };
-    if let Ok(dst_bytes) = std::fs::read(dst) {
-        if src_bytes == dst_bytes {
-            return;
-        }
+    if let Ok(dst_bytes) = std::fs::read(dst) && src_bytes == dst_bytes {
+        return;
     }
     let _ = std::fs::copy(src, dst);
 }
