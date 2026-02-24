@@ -1,6 +1,5 @@
 // Application directory paths
 
-use std::env;
 use std::fs;
 use std::path::PathBuf;
 
@@ -15,15 +14,19 @@ pub struct AppPaths {
 impl AppPaths {
     /// Initialize application directories
     pub fn new() -> std::io::Result<Self> {
-        // Use ~/.config/tornade for all data (Unix-style)
-        let home_dir = env::var("HOME").map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "Could not determine HOME directory",
-            )
-        })?;
+        // Use <home>/.config/tornade for all data.
+        // `directories::BaseDirs` resolves the home directory cross-platform
+        // (HOME on Unix, USERPROFILE / FOLDERID_Profile on Windows).
+        let home_dir = directories::BaseDirs::new()
+            .map(|b| b.home_dir().to_path_buf())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Could not determine home directory",
+                )
+            })?;
 
-        let base_dir = PathBuf::from(home_dir).join(".config").join("tornade");
+        let base_dir = home_dir.join(".config").join("tornade");
 
         let config_dir = base_dir.clone();
         let data_dir = base_dir.clone();
