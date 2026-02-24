@@ -24,7 +24,9 @@ jobs:
       - name: Clippy
         run: cargo clippy -- -D warnings
       - name: Run tests
-        run: cargo test --all-features
+        # Skip player service tests on Linux: CI runners have no audio device (ALSA).
+        # Player tests run on macOS where audio hardware is available.
+        run: cargo test --all-features -- --skip services::player::tests
 
   test-macos:
     name: Test (macOS)
@@ -52,4 +54,6 @@ jobs:
       - name: Clippy
         run: cargo clippy -- -D warnings
       - name: Run tests
-        run: cargo test --all-features
+        # Skip player service tests on Windows: CI runners have no audio device.
+        # Player tests run on macOS where audio hardware is available.
+        run: cargo test --all-features -- --skip services::player::tests
