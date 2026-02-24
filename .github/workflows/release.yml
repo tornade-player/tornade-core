@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  repository_dispatch:
+    types: [release-triggered]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Publish Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version
+        id: version
+        run: echo "version=${{ github.event.client_payload.version }}" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push git tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${{ steps.version.outputs.version }}"
+          git push origin "${{ steps.version.outputs.version }}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.version.outputs.version }}" \
+            --title "tornade-core ${{ steps.version.outputs.version }}" \
+            --notes "Release ${{ steps.version.outputs.version }} — triggered by tornade-gui release orchestrator." \
+            --generate-notes
