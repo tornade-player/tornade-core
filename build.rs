@@ -45,10 +45,19 @@ fn main() {
 
     for dest in &destinations {
         let _ = std::fs::create_dir_all(dest);
-        copy_if_changed(&format!("{xcode_src}/{pkg}.swift"), &format!("{dest}/{pkg}.swift"));
-        copy_if_changed(&format!("{xcode_src}/{pkg}.h"),     &format!("{dest}/{pkg}.h"));
-        copy_if_changed(&format!("{out_dir}/SwiftBridgeCore.swift"), &format!("{dest}/SwiftBridgeCore.swift"));
-        copy_if_changed(&format!("{out_dir}/SwiftBridgeCore.h"),     &format!("{dest}/SwiftBridgeCore.h"));
+        copy_if_changed(
+            &format!("{xcode_src}/{pkg}.swift"),
+            &format!("{dest}/{pkg}.swift"),
+        );
+        copy_if_changed(&format!("{xcode_src}/{pkg}.h"), &format!("{dest}/{pkg}.h"));
+        copy_if_changed(
+            &format!("{out_dir}/SwiftBridgeCore.swift"),
+            &format!("{dest}/SwiftBridgeCore.swift"),
+        );
+        copy_if_changed(
+            &format!("{out_dir}/SwiftBridgeCore.h"),
+            &format!("{dest}/SwiftBridgeCore.h"),
+        );
     }
 
     // SwiftBridgeCore also lives at the Libraries root for the bridging header

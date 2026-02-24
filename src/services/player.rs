@@ -6,7 +6,7 @@ use crate::services::error::PlayerError;
 use crate::services::events::PlaybackState;
 use crate::utils::app_state::{self, PersistedState};
 use log::{info, warn};
-use rodio::{buffer::SamplesBuffer, Decoder, OutputStream, OutputStreamHandle, Sink, Source};
+use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source, buffer::SamplesBuffer};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::BufReader;
@@ -455,16 +455,19 @@ impl PlayerService {
         while current < queue_len {
             let track_id = {
                 let mut state = self.state.lock().unwrap();
-                let track_id = state.queue.tracks.get(current).copied()
+                let track_id = state
+                    .queue
+                    .tracks
+                    .get(current)
+                    .copied()
                     .ok_or(PlayerError::EmptyQueue)?;
 
                 // Set current_index to the exact visual position before calling
                 // play(), so that play()'s duplicate-guard leaves it untouched.
                 // With shuffle, map the raw position to its slot in shuffle_order.
                 if state.queue.shuffle_enabled {
-                    if let Some(shuffle_idx) = state.queue.shuffle_order
-                        .iter()
-                        .position(|&i| i == current)
+                    if let Some(shuffle_idx) =
+                        state.queue.shuffle_order.iter().position(|&i| i == current)
                     {
                         state.queue.current_index = shuffle_idx;
                     }
