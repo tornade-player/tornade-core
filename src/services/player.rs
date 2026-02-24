@@ -6,7 +6,7 @@ use crate::services::error::PlayerError;
 use crate::services::events::PlaybackState;
 use crate::utils::app_state::{self, PersistedState};
 use log::{info, warn};
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink};
+use rodio::{buffer::SamplesBuffer, Decoder, OutputStream, OutputStreamHandle, Sink, Source};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::BufReader;
@@ -115,8 +115,15 @@ impl PlayerService {
             }
         })?;
 
-        let source = Decoder::new(BufReader::new(file))
+        let decoder = Decoder::new(BufReader::new(file))
             .map_err(|e| PlayerError::Audio(format!("Failed to decode audio: {e}")))?;
+
+        // Pre-decode entire file to memory so the CoreAudio callback only reads
+        // plain f32 samples from RAM — no FLAC decoding on the real-time thread.
+        let channels = decoder.channels();
+        let sample_rate = decoder.sample_rate();
+        let samples: Vec<f32> = decoder.convert_samples().collect();
+        let source = SamplesBuffer::new(channels, sample_rate, samples);
 
         // Set volume
         let volume = self.state.lock().unwrap().volume;
@@ -284,12 +291,17 @@ impl PlayerService {
             }
         })?;
 
-        let source = Decoder::new(BufReader::new(file))
+        let decoder = Decoder::new(BufReader::new(file))
             .map_err(|e| PlayerError::Audio(format!("Failed to decode audio: {e}")))?;
 
-        // Skip to the desired position using rodio's skip_duration
-        use rodio::Source;
-        let source_at_position = source.skip_duration(clamped_position);
+        let channels = decoder.channels();
+        let sample_rate = decoder.sample_rate();
+        // Decode only the samples after the seek position — avoids real-time decode on the CoreAudio thread.
+        let samples: Vec<f32> = decoder
+            .skip_duration(clamped_position)
+            .convert_samples()
+            .collect();
+        let source_at_position = SamplesBuffer::new(channels, sample_rate, samples);
 
         // Create new sink
         let sink = Sink::try_new(&stream_handle)
