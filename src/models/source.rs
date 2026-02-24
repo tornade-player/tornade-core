@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SourceType {
     Disk,
     Ipod,
@@ -36,7 +36,7 @@ pub struct Source {
     pub source_type: SourceType,
     pub path: Option<PathBuf>,
     pub device_id: Option<String>,
-    pub last_scanned_at: Option<String>,  // ISO 8601
+    pub last_scanned_at: Option<String>, // ISO 8601
 }
 
 #[cfg(test)]

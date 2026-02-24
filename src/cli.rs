@@ -1,7 +1,9 @@
 // Interactive CLI for Tornade Music Player
 
 use crate::db::{self, DbPool};
-use crate::services::{LibraryService, PlayerService, PlaylistService, DuplicateService, ArtworkService};
+use crate::services::{
+    ArtworkService, DuplicateService, LibraryService, PlayerService, PlaylistService,
+};
 use crate::utils::AppPaths;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -42,9 +44,9 @@ impl TornadeCli {
         println!("=========================================\n");
 
         loop {
-            self.print_menu();
+            Self::print_menu();
 
-            let choice = self.read_input("Enter your choice: ")?;
+            let choice = Self::read_input("Enter your choice: ")?;
 
             match choice.trim() {
                 "1" => self.add_source()?,
@@ -76,7 +78,7 @@ impl TornadeCli {
         Ok(())
     }
 
-    fn print_menu(&self) {
+    fn print_menu() {
         println!("Main Menu:");
         println!("  1. Add music source");
         println!("  2. Scan library");
@@ -102,13 +104,13 @@ impl TornadeCli {
         println!("\n📁 Add Music Source");
         println!("==================");
 
-        let name = self.read_input("Source name: ")?;
-        let path = self.read_input("Path to music folder: ")?;
+        let name = Self::read_input("Source name: ")?;
+        let path = Self::read_input("Path to music folder: ")?;
 
         let path = PathBuf::from(path.trim());
 
         if !path.exists() {
-            println!("❌ Path does not exist: {:?}", path);
+            println!("❌ Path does not exist: {path:?}");
             return Ok(());
         }
 
@@ -119,7 +121,7 @@ impl TornadeCli {
                 println!("   Name: {}", source.name);
                 println!("   Path: {:?}", source.path);
             }
-            Err(e) => println!("❌ Failed to add source: {}", e),
+            Err(e) => println!("❌ Failed to add source: {e}"),
         }
 
         Ok(())
@@ -141,7 +143,7 @@ impl TornadeCli {
             println!("  {}. {} - {:?}", source.id, source.name, source.path);
         }
 
-        let source_id_str = self.read_input("\nEnter source ID to scan: ")?;
+        let source_id_str = Self::read_input("\nEnter source ID to scan: ")?;
         let source_id: i64 = source_id_str.trim().parse()?;
 
         // Find source
@@ -160,7 +162,10 @@ impl TornadeCli {
         println!("\n⏳ Scanning directory: {:?}", source.path);
         println!("This may take a while...\n");
 
-        match self.library.scan_directory(source.path.as_ref().unwrap(), source_id) {
+        match self
+            .library
+            .scan_directory(source.path.as_ref().unwrap(), source_id)
+        {
             Ok(result) => {
                 println!("✅ Scan complete!");
                 println!("   Tracks added: {}", result.tracks_added);
@@ -173,7 +178,7 @@ impl TornadeCli {
                     println!("   (Use verbose mode to see details)");
                 }
             }
-            Err(e) => println!("❌ Scan failed: {}", e),
+            Err(e) => println!("❌ Scan failed: {e}"),
         }
 
         Ok(())
@@ -196,12 +201,13 @@ impl TornadeCli {
             println!("  Type: {:?}", source.source_type);
             println!("  Path: {:?}", source.path.clone().unwrap_or_default());
             if let Some(ref scanned) = source.last_scanned_at {
-                println!("  Last scanned: {}", scanned);
+                println!("  Last scanned: {scanned}");
             }
         }
 
         // Option to filter by source
-        let choice = self.read_input("\nEnter source ID to view tracks (or press Enter to go back): ")?;
+        let choice =
+            Self::read_input("\nEnter source ID to view tracks (or press Enter to go back): ")?;
         if !choice.trim().is_empty() {
             let source_id: i64 = choice.trim().parse()?;
             self.show_source_tracks(source_id)?;
@@ -216,13 +222,9 @@ impl TornadeCli {
 
         // Get track count
         let conn = self.pool.get()?;
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM tracks",
-            [],
-            |row| row.get(0),
-        )?;
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))?;
 
-        println!("Total tracks in library: {}\n", count);
+        println!("Total tracks in library: {count}\n");
 
         if count == 0 {
             println!("No tracks in library. Please scan a source first.");
@@ -236,7 +238,7 @@ impl TornadeCli {
              JOIN artists a ON a.id = t.artist_id
              LEFT JOIN albums al ON al.id = t.album_id
              ORDER BY t.id DESC
-             LIMIT 20"
+             LIMIT 20",
         )?;
 
         let tracks = stmt.query_map([], |row| {
@@ -249,13 +251,17 @@ impl TornadeCli {
         })?;
 
         println!("Recent tracks:");
-        println!("{:<6} {:<40} {:<30} {:<30}", "ID", "Title", "Artist", "Album");
+        println!(
+            "{:<6} {:<40} {:<30} {:<30}",
+            "ID", "Title", "Artist", "Album"
+        );
         println!("{}", "-".repeat(110));
 
         for track in tracks {
             let (id, title, artist, album) = track?;
             let album_str = album.unwrap_or_else(|| "Unknown".to_string());
-            println!("{:<6} {:<40} {:<30} {:<30}",
+            println!(
+                "{:<6} {:<40} {:<30} {:<30}",
                 id,
                 truncate(&title, 40),
                 truncate(&artist, 30),
@@ -270,7 +276,7 @@ impl TornadeCli {
         println!("\n▶️  Play Track");
         println!("=============");
 
-        let track_id_str = self.read_input("Enter track ID to play: ")?;
+        let track_id_str = Self::read_input("Enter track ID to play: ")?;
         let track_id: i64 = track_id_str.trim().parse()?;
 
         match self.library.get_track(track_id)? {
@@ -281,7 +287,7 @@ impl TornadeCli {
                 println!("   Duration: {:?}", track.duration);
                 println!("   Format: {:?}", track.file_type);
                 if let Some(sr) = track.sample_rate {
-                    println!("   Sample rate: {} Hz", sr);
+                    println!("   Sample rate: {sr} Hz");
                 }
 
                 self.player.set_queue(vec![track_id])?;
@@ -300,7 +306,7 @@ impl TornadeCli {
         println!("===================");
 
         let state = self.player.get_state();
-        println!("Current state: {:?}", state);
+        println!("Current state: {state:?}");
 
         if let Some(track) = self.player.get_current_track() {
             println!("Current track: {} (ID: {})", track.title, track.id);
@@ -317,7 +323,7 @@ impl TornadeCli {
         println!("  8. Set repeat mode");
         println!("  9. Back");
 
-        let choice = self.read_input("\nEnter choice: ")?;
+        let choice = Self::read_input("\nEnter choice: ")?;
 
         match choice.trim() {
             "1" => {
@@ -341,10 +347,10 @@ impl TornadeCli {
                 println!("⏮️  Previous track");
             }
             "6" => {
-                let vol_str = self.read_input("Enter volume (0.0 - 1.0): ")?;
+                let vol_str = Self::read_input("Enter volume (0.0 - 1.0): ")?;
                 let vol: f32 = vol_str.trim().parse()?;
                 self.player.set_volume(vol)?;
-                println!("🔊 Volume set to {}", vol);
+                println!("🔊 Volume set to {vol}");
             }
             "7" => {
                 let enabled = !self.player.is_shuffle_enabled();
@@ -353,7 +359,7 @@ impl TornadeCli {
             }
             "8" => {
                 println!("Repeat modes: 0=Off, 1=All, 2=One");
-                let mode_str = self.read_input("Enter mode: ")?;
+                let mode_str = Self::read_input("Enter mode: ")?;
                 let mode = match mode_str.trim() {
                     "0" => crate::models::RepeatMode::Off,
                     "1" => crate::models::RepeatMode::All,
@@ -364,7 +370,7 @@ impl TornadeCli {
                     }
                 };
                 self.player.set_repeat(mode)?;
-                println!("🔁 Repeat mode: {:?}", mode);
+                println!("🔁 Repeat mode: {mode:?}");
             }
             _ => {}
         }
@@ -387,7 +393,10 @@ impl TornadeCli {
 
                 // Show queue with track details
                 let conn = self.pool.get()?;
-                println!("{:<4} {:<6} {:<40} {:<25}", "Pos", "ID", "Title", "Artist ID");
+                println!(
+                    "{:<4} {:<6} {:<40} {:<25}",
+                    "Pos", "ID", "Title", "Artist ID"
+                );
                 println!("{}", "-".repeat(78));
 
                 for (idx, track_id) in queue.iter().enumerate() {
@@ -395,7 +404,8 @@ impl TornadeCli {
 
                     // Try to get track details
                     if let Ok(Some(track)) = crate::db::queries::get_track(&conn, *track_id) {
-                        println!("{} {:<2} {:<6} {:<40} {:<25}",
+                        println!(
+                            "{} {:<2} {:<6} {:<40} {:<25}",
                             marker,
                             idx + 1,
                             track.id,
@@ -403,7 +413,8 @@ impl TornadeCli {
                             track.artist_id
                         );
                     } else {
-                        println!("{} {:<2} {:<6} {:<40} {:<25}",
+                        println!(
+                            "{} {:<2} {:<6} {:<40} {:<25}",
                             marker,
                             idx + 1,
                             track_id,
@@ -419,7 +430,8 @@ impl TornadeCli {
             // Shuffle and repeat status
             let shuffle = self.player.is_shuffle_enabled();
             let repeat = self.player.get_repeat_mode();
-            println!("\n🔀 Shuffle: {} | 🔁 Repeat: {:?}",
+            println!(
+                "\n🔀 Shuffle: {} | 🔁 Repeat: {:?}",
                 if shuffle { "ON" } else { "OFF" },
                 repeat
             );
@@ -434,17 +446,17 @@ impl TornadeCli {
             println!("  7. Play track from queue");
             println!("  8. Back");
 
-            let choice = self.read_input("\nEnter choice: ")?;
+            let choice = Self::read_input("\nEnter choice: ")?;
 
             match choice.trim() {
                 "1" => {
-                    let track_id_str = self.read_input("Enter track ID: ")?;
+                    let track_id_str = Self::read_input("Enter track ID: ")?;
                     let track_id: i64 = track_id_str.trim().parse()?;
                     self.player.add_to_queue(vec![track_id])?;
                     println!("✅ Track added to queue");
                 }
                 "2" => {
-                    let album_id_str = self.read_input("Enter album ID: ")?;
+                    let album_id_str = Self::read_input("Enter album ID: ")?;
                     let album_id: i64 = album_id_str.trim().parse()?;
                     let tracks = self.library.get_album_tracks(album_id)?;
                     let track_ids: Vec<i64> = tracks.iter().map(|t| t.id).collect();
@@ -457,7 +469,7 @@ impl TornadeCli {
                         continue;
                     }
                     let prompt = format!("Enter position to remove (1-{}): ", queue.len());
-                    let pos_str = self.read_input(&prompt)?;
+                    let pos_str = Self::read_input(&prompt)?;
                     let pos: usize = pos_str.trim().parse()?;
                     if pos > 0 && pos <= queue.len() {
                         self.player.remove_from_queue(pos - 1)?;
@@ -472,9 +484,9 @@ impl TornadeCli {
                         continue;
                     }
                     let prompt_from = format!("Move from position (1-{}): ", queue.len());
-                    let from_str = self.read_input(&prompt_from)?;
+                    let from_str = Self::read_input(&prompt_from)?;
                     let prompt_to = format!("Move to position (1-{}): ", queue.len());
-                    let to_str = self.read_input(&prompt_to)?;
+                    let to_str = Self::read_input(&prompt_to)?;
                     let from: usize = from_str.trim().parse()?;
                     let to: usize = to_str.trim().parse()?;
                     if from > 0 && from <= queue.len() && to > 0 && to <= queue.len() {
@@ -485,7 +497,7 @@ impl TornadeCli {
                     }
                 }
                 "5" => {
-                    let confirm = self.read_input("Clear queue? (y/n): ")?;
+                    let confirm = Self::read_input("Clear queue? (y/n): ")?;
                     if confirm.trim().to_lowercase() == "y" {
                         self.player.clear_queue()?;
                         println!("✅ Queue cleared");
@@ -500,11 +512,11 @@ impl TornadeCli {
                         continue;
                     }
                     let prompt = format!("Enter position to play (1-{}): ", queue.len());
-                    let pos_str = self.read_input(&prompt)?;
+                    let pos_str = Self::read_input(&prompt)?;
                     let pos: usize = pos_str.trim().parse()?;
                     if pos > 0 && pos <= queue.len() {
                         self.player.play(queue[pos - 1])?;
-                        println!("▶️  Playing track at position {}", pos);
+                        println!("▶️  Playing track at position {pos}");
                     } else {
                         println!("❌ Invalid position");
                     }
@@ -523,34 +535,38 @@ impl TornadeCli {
             return Ok(());
         }
 
-        let query = self.read_input("Search query: ")?;
+        let query = Self::read_input("Search query: ")?;
         let query = query.trim().to_lowercase();
 
         println!("\n🔍 Search Results in Queue:");
-        println!("{:<4} {:<6} {:<40} {:<25}", "Pos", "ID", "Title", "Artist ID");
+        println!(
+            "{:<4} {:<6} {:<40} {:<25}",
+            "Pos", "ID", "Title", "Artist ID"
+        );
         println!("{}", "-".repeat(78));
 
         let conn = self.pool.get()?;
         let mut found = 0;
 
         for (idx, track_id) in queue.iter().enumerate() {
-            if let Ok(Some(track)) = crate::db::queries::get_track(&conn, *track_id) {
-                if track.title.to_lowercase().contains(&query) {
-                    println!("{:<4} {:<6} {:<40} {:<25}",
-                        idx + 1,
-                        track.id,
-                        truncate(&track.title, 40),
-                        track.artist_id
-                    );
-                    found += 1;
-                }
+            if let Ok(Some(track)) = crate::db::queries::get_track(&conn, *track_id)
+                && track.title.to_lowercase().contains(&query)
+            {
+                println!(
+                    "{:<4} {:<6} {:<40} {:<25}",
+                    idx + 1,
+                    track.id,
+                    truncate(&track.title, 40),
+                    track.artist_id
+                );
+                found += 1;
             }
         }
 
         if found == 0 {
             println!("No matches found");
         } else {
-            println!("\nFound {} match(es)", found);
+            println!("\nFound {found} match(es)");
         }
 
         Ok(())
@@ -562,41 +578,26 @@ impl TornadeCli {
 
         let conn = self.pool.get()?;
 
-        let track_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM tracks",
-            [],
-            |row| row.get(0),
-        )?;
+        let track_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))?;
 
-        let album_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM albums",
-            [],
-            |row| row.get(0),
-        )?;
+        let album_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM albums", [], |row| row.get(0))?;
 
-        let artist_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM artists",
-            [],
-            |row| row.get(0),
-        )?;
+        let artist_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM artists", [], |row| row.get(0))?;
 
-        let genre_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM genres",
-            [],
-            |row| row.get(0),
-        )?;
+        let genre_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM genres", [], |row| row.get(0))?;
 
-        let source_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM sources",
-            [],
-            |row| row.get(0),
-        )?;
+        let source_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM sources", [], |row| row.get(0))?;
 
-        println!("  Tracks:  {}", track_count);
-        println!("  Albums:  {}", album_count);
-        println!("  Artists: {}", artist_count);
-        println!("  Genres:  {}", genre_count);
-        println!("  Sources: {}", source_count);
+        println!("  Tracks:  {track_count}");
+        println!("  Albums:  {album_count}");
+        println!("  Artists: {artist_count}");
+        println!("  Genres:  {genre_count}");
+        println!("  Sources: {source_count}");
 
         // Top rated tracks
         if track_count > 0 {
@@ -607,7 +608,7 @@ impl TornadeCli {
                  JOIN artists a ON a.id = t.artist_id
                  WHERE t.rating > 0
                  ORDER BY t.rating DESC, t.title
-                 LIMIT 5"
+                 LIMIT 5",
             )?;
 
             let tracks = stmt.query_map([], |row| {
@@ -621,15 +622,15 @@ impl TornadeCli {
             for track in tracks {
                 let (title, artist, rating) = track?;
                 let stars = "⭐".repeat(rating as usize);
-                println!("  {} - {} {}", title, artist, stars);
+                println!("  {title} - {artist} {stars}");
             }
         }
 
         Ok(())
     }
 
-    fn read_input(&self, prompt: &str) -> Result<String, Box<dyn std::error::Error>> {
-        print!("{}", prompt);
+    fn read_input(prompt: &str) -> Result<String, Box<dyn std::error::Error>> {
+        print!("{prompt}");
         io::stdout().flush()?;
 
         let mut input = String::new();
@@ -649,18 +650,24 @@ impl TornadeCli {
             return Ok(());
         }
 
-        println!("\n{:<6} {:<40} {:<30} {:<6} {:<8}", "ID", "Album", "Artist ID", "Year", "Rating");
+        println!(
+            "\n{:<6} {:<40} {:<30} {:<6} {:<8}",
+            "ID", "Album", "Artist ID", "Year", "Rating"
+        );
         println!("{}", "-".repeat(95));
 
         for album in &albums {
-            let year_str = album.year.map(|y| y.to_string()).unwrap_or_else(|| "-".to_string());
-            let rating_str = if album.rating > 0 {
-                "⭐".repeat(album.rating as usize)
+            let year_str = album
+                .year
+                .map_or_else(|| "-".to_string(), |y| y.to_string());
+            let rating_str = if album.rating.0 > 0 {
+                "⭐".repeat(album.rating.0 as usize)
             } else {
                 "-".to_string()
             };
 
-            println!("{:<6} {:<40} {:<30} {:<6} {}",
+            println!(
+                "{:<6} {:<40} {:<30} {:<6} {}",
                 album.id,
                 truncate(&album.title, 40),
                 album.artist_id,
@@ -672,7 +679,8 @@ impl TornadeCli {
         println!("\nTotal: {} albums", albums.len());
 
         // Option to view album details
-        let choice = self.read_input("\nEnter album ID for details (or press Enter to go back): ")?;
+        let choice =
+            Self::read_input("\nEnter album ID for details (or press Enter to go back): ")?;
         if !choice.trim().is_empty() {
             let album_id: i64 = choice.trim().parse()?;
             self.show_album_details(album_id)?;
@@ -689,10 +697,10 @@ impl TornadeCli {
                 println!("Title: {}", album.title);
                 println!("Artist ID: {}", album.artist_id);
                 if let Some(year) = album.year {
-                    println!("Year: {}", year);
+                    println!("Year: {year}");
                 }
-                if album.rating > 0 {
-                    println!("Rating: {}", "⭐".repeat(album.rating as usize));
+                if album.rating.0 > 0 {
+                    println!("Rating: {}", "⭐".repeat(album.rating.0 as usize));
                 }
 
                 // Get tracks
@@ -702,12 +710,14 @@ impl TornadeCli {
                 println!("{}", "-".repeat(58));
 
                 for track in tracks {
-                    let track_num = track.track_number.map(|n| format!("{:2}", n))
-                        .unwrap_or_else(|| "--".to_string());
+                    let track_num = track
+                        .track_number
+                        .map_or_else(|| "--".to_string(), |n| format!("{n:2}"));
                     let duration_secs = track.duration.as_secs();
                     let duration_str = format!("{}:{:02}", duration_secs / 60, duration_secs % 60);
 
-                    println!("{:<4} {:<40} {:>10}",
+                    println!(
+                        "{:<4} {:<40} {:>10}",
                         track_num,
                         truncate(&track.title, 40),
                         duration_str
@@ -720,7 +730,7 @@ impl TornadeCli {
                 println!("  2. Rate album");
                 println!("  3. Back");
 
-                let choice = self.read_input("\nEnter choice: ")?;
+                let choice = Self::read_input("\nEnter choice: ")?;
                 match choice.trim() {
                     "1" => {
                         let tracks = self.library.get_album_tracks(album_id)?;
@@ -732,7 +742,7 @@ impl TornadeCli {
                         }
                     }
                     "2" => {
-                        let rating_str = self.read_input("Enter rating (0-5): ")?;
+                        let rating_str = Self::read_input("Enter rating (0-5): ")?;
                         let rating: u8 = rating_str.trim().parse()?;
                         self.library.rate_album(album_id, rating)?;
                         println!("✅ Album rated: {}", "⭐".repeat(rating as usize));
@@ -761,16 +771,14 @@ impl TornadeCli {
         println!("{}", "-".repeat(58));
 
         for artist in &artists {
-            println!("{:<6} {:<50}",
-                artist.id,
-                truncate(&artist.name, 50)
-            );
+            println!("{:<6} {:<50}", artist.id, truncate(&artist.name, 50));
         }
 
         println!("\nTotal: {} artists", artists.len());
 
         // Option to view artist details
-        let choice = self.read_input("\nEnter artist ID for details (or press Enter to go back): ")?;
+        let choice =
+            Self::read_input("\nEnter artist ID for details (or press Enter to go back): ")?;
         if !choice.trim().is_empty() {
             let artist_id: i64 = choice.trim().parse()?;
             self.show_artist_details(artist_id)?;
@@ -793,14 +801,17 @@ impl TornadeCli {
                 println!("{}", "-".repeat(70));
 
                 for album in albums {
-                    let year_str = album.year.map(|y| y.to_string()).unwrap_or_else(|| "-".to_string());
-                    let rating_str = if album.rating > 0 {
-                        "⭐".repeat(album.rating as usize)
+                    let year_str = album
+                        .year
+                        .map_or_else(|| "-".to_string(), |y| y.to_string());
+                    let rating_str = if album.rating.0 > 0 {
+                        "⭐".repeat(album.rating.0 as usize)
                     } else {
                         "-".to_string()
                     };
 
-                    println!("{:<6} {:<45} {:<6} {}",
+                    println!(
+                        "{:<6} {:<45} {:<6} {}",
                         album.id,
                         truncate(&album.title, 45),
                         year_str,
@@ -825,11 +836,15 @@ impl TornadeCli {
             return Ok(());
         }
 
-        println!("\n{:<6} {:<35} {:>10} {:>10}", "ID", "Genre", "Tracks", "Albums");
+        println!(
+            "\n{:<6} {:<35} {:>10} {:>10}",
+            "ID", "Genre", "Tracks", "Albums"
+        );
         println!("{}", "-".repeat(65));
 
         for (genre, track_count, album_count) in &genres {
-            println!("{:<6} {:<35} {:>10} {:>10}",
+            println!(
+                "{:<6} {:<35} {:>10} {:>10}",
                 genre.id,
                 truncate(&genre.name, 35),
                 track_count,
@@ -840,7 +855,7 @@ impl TornadeCli {
         println!("\nTotal: {} genres", genres.len());
 
         // Option to filter by genre
-        let choice = self.read_input("\nEnter genre ID to filter (or press Enter to go back): ")?;
+        let choice = Self::read_input("\nEnter genre ID to filter (or press Enter to go back): ")?;
         if !choice.trim().is_empty() {
             let genre_id: i64 = choice.trim().parse()?;
             self.show_genre_tracks(genre_id)?;
@@ -860,14 +875,18 @@ impl TornadeCli {
             return Ok(());
         }
 
-        println!("\n{:<6} {:<40} {:<25} {:>10}", "ID", "Title", "Artist ID", "Duration");
+        println!(
+            "\n{:<6} {:<40} {:<25} {:>10}",
+            "ID", "Title", "Artist ID", "Duration"
+        );
         println!("{}", "-".repeat(85));
 
         for track in &tracks {
             let duration_secs = track.duration.as_secs();
             let duration_str = format!("{}:{:02}", duration_secs / 60, duration_secs % 60);
 
-            println!("{:<6} {:<40} {:<25} {:>10}",
+            println!(
+                "{:<6} {:<40} {:<25} {:>10}",
                 track.id,
                 truncate(&track.title, 40),
                 track.artist_id,
@@ -878,7 +897,7 @@ impl TornadeCli {
         println!("\nTotal: {} tracks", tracks.len());
 
         // Option to play all
-        let choice = self.read_input("\nPlay all tracks? (y/n): ")?;
+        let choice = Self::read_input("\nPlay all tracks? (y/n): ")?;
         if choice.trim().to_lowercase() == "y" {
             let track_ids: Vec<i64> = tracks.iter().map(|t| t.id).collect();
             self.player.set_queue(track_ids.clone())?;
@@ -902,14 +921,18 @@ impl TornadeCli {
             return Ok(());
         }
 
-        println!("\n{:<6} {:<40} {:<25} {:>10}", "ID", "Title", "Artist ID", "Duration");
+        println!(
+            "\n{:<6} {:<40} {:<25} {:>10}",
+            "ID", "Title", "Artist ID", "Duration"
+        );
         println!("{}", "-".repeat(85));
 
         for track in &tracks {
             let duration_secs = track.duration.as_secs();
             let duration_str = format!("{}:{:02}", duration_secs / 60, duration_secs % 60);
 
-            println!("{:<6} {:<40} {:<25} {:>10}",
+            println!(
+                "{:<6} {:<40} {:<25} {:>10}",
                 track.id,
                 truncate(&track.title, 40),
                 track.artist_id,
@@ -926,7 +949,7 @@ impl TornadeCli {
         println!("\n🔍 Search Library");
         println!("=================");
 
-        let query = self.read_input("Enter search query: ")?;
+        let query = Self::read_input("Enter search query: ")?;
         let query = query.trim();
 
         if query.is_empty() {
@@ -934,7 +957,7 @@ impl TornadeCli {
             return Ok(());
         }
 
-        println!("\nSearching for: \"{}\"...\n", query);
+        println!("\nSearching for: \"{query}\"...\n");
 
         let (tracks, albums, artists) = self.library.search(query, 10)?;
 
@@ -943,7 +966,8 @@ impl TornadeCli {
             println!("{:<6} {:<35} {:<25}", "ID", "Title", "Artist ID");
             println!("{}", "-".repeat(70));
             for track in &tracks {
-                println!("{:<6} {:<35} {:<25}",
+                println!(
+                    "{:<6} {:<35} {:<25}",
                     track.id,
                     truncate(&track.title, 35),
                     track.artist_id
@@ -957,7 +981,8 @@ impl TornadeCli {
             println!("{:<6} {:<35} {:<25}", "ID", "Title", "Artist ID");
             println!("{}", "-".repeat(70));
             for album in &albums {
-                println!("{:<6} {:<35} {:<25}",
+                println!(
+                    "{:<6} {:<35} {:<25}",
                     album.id,
                     truncate(&album.title, 35),
                     album.artist_id
@@ -971,10 +996,7 @@ impl TornadeCli {
             println!("{:<6} {:<50}", "ID", "Name");
             println!("{}", "-".repeat(58));
             for artist in &artists {
-                println!("{:<6} {:<50}",
-                    artist.id,
-                    truncate(&artist.name, 50)
-                );
+                println!("{:<6} {:<50}", artist.id, truncate(&artist.name, 50));
             }
             println!();
         }
@@ -1004,7 +1026,7 @@ impl TornadeCli {
             println!("  0. Back to main menu");
             println!();
 
-            let choice = self.read_input("Enter your choice: ")?;
+            let choice = Self::read_input("Enter your choice: ")?;
 
             match choice.trim() {
                 "1" => self.list_playlists()?,
@@ -1034,22 +1056,27 @@ impl TornadeCli {
             return Ok(());
         }
 
-        println!("\n{:<6} {:<40} {:>10} {:<20}", "ID", "Name", "Tracks", "Updated");
+        println!(
+            "\n{:<6} {:<40} {:>10} {:<20}",
+            "ID", "Name", "Tracks", "Updated"
+        );
         println!("{}", "-".repeat(80));
 
         for playlist in &playlists {
-            println!("{:<6} {:<40} {:>10} {:<20}",
+            println!(
+                "{:<6} {:<40} {:>10} {:<20}",
                 playlist.id,
                 truncate(&playlist.name, 40),
                 playlist.tracks.len(),
-                &playlist.updated_at[..19]  // Trim to datetime
+                &playlist.updated_at[..19] // Trim to datetime
             );
         }
 
         println!("\nTotal: {} playlists", playlists.len());
 
         // Option to view playlist details
-        let choice = self.read_input("\nEnter playlist ID to view details (or press Enter to go back): ")?;
+        let choice =
+            Self::read_input("\nEnter playlist ID to view details (or press Enter to go back): ")?;
         if !choice.trim().is_empty() {
             let playlist_id: i64 = choice.trim().parse()?;
             self.show_playlist_details(playlist_id)?;
@@ -1069,17 +1096,24 @@ impl TornadeCli {
         let playlist = playlist.unwrap();
 
         println!("\n📋 Playlist: {}", playlist.name);
-        println!("Description: {}", playlist.description.as_deref().unwrap_or("None"));
+        println!(
+            "Description: {}",
+            playlist.description.as_deref().unwrap_or("None")
+        );
         println!("Created: {}", &playlist.created_at[..19]);
         println!("Updated: {}", &playlist.updated_at[..19]);
-        println!("\n{:<6} {:<6} {:<40} {:<25}", "Pos", "ID", "Title", "Artist ID");
+        println!(
+            "\n{:<6} {:<6} {:<40} {:<25}",
+            "Pos", "ID", "Title", "Artist ID"
+        );
         println!("{}", "-".repeat(80));
 
         for (pos, track_id) in playlist.tracks.iter().enumerate() {
             // Fetch track details
             let conn = self.pool.get()?;
             if let Ok(Some(track)) = crate::db::queries::get_track(&conn, *track_id) {
-                println!("{:<6} {:<6} {:<40} {:<25}",
+                println!(
+                    "{:<6} {:<6} {:<40} {:<25}",
                     pos,
                     track.id,
                     truncate(&track.title, 40),
@@ -1091,7 +1125,7 @@ impl TornadeCli {
         println!("\nTotal: {} tracks", playlist.tracks.len());
 
         // Option to play playlist
-        let choice = self.read_input("\nPlay playlist? (y/n): ")?;
+        let choice = Self::read_input("\nPlay playlist? (y/n): ")?;
         if choice.trim().to_lowercase() == "y" {
             self.player.set_queue(playlist.tracks.clone())?;
             if !playlist.tracks.is_empty() {
@@ -1107,8 +1141,8 @@ impl TornadeCli {
         println!("\n📝 Create New Playlist");
         println!("=====================");
 
-        let name = self.read_input("Playlist name: ")?;
-        let description = self.read_input("Description (optional): ")?;
+        let name = Self::read_input("Playlist name: ")?;
+        let description = Self::read_input("Description (optional): ")?;
 
         let description = if description.trim().is_empty() {
             None
@@ -1122,7 +1156,7 @@ impl TornadeCli {
                 println!("   ID: {}", playlist.id);
                 println!("   Name: {}", playlist.name);
             }
-            Err(e) => println!("❌ Failed to create playlist: {}", e),
+            Err(e) => println!("❌ Failed to create playlist: {e}"),
         }
 
         Ok(())
@@ -1141,13 +1175,18 @@ impl TornadeCli {
 
         println!("Available playlists:");
         for playlist in &playlists {
-            println!("  {}. {} ({} tracks)", playlist.id, playlist.name, playlist.tracks.len());
+            println!(
+                "  {}. {} ({} tracks)",
+                playlist.id,
+                playlist.name,
+                playlist.tracks.len()
+            );
         }
 
-        let playlist_id_str = self.read_input("\nEnter playlist ID: ")?;
+        let playlist_id_str = Self::read_input("\nEnter playlist ID: ")?;
         let playlist_id: i64 = playlist_id_str.trim().parse()?;
 
-        let track_ids_str = self.read_input("Enter track IDs (comma-separated): ")?;
+        let track_ids_str = Self::read_input("Enter track IDs (comma-separated): ")?;
         let track_ids: Vec<i64> = track_ids_str
             .split(',')
             .filter_map(|s| s.trim().parse().ok())
@@ -1159,8 +1198,8 @@ impl TornadeCli {
         }
 
         match self.playlist.add_tracks(playlist_id, track_ids.clone()) {
-            Ok(_) => println!("✅ Added {} track(s) to playlist", track_ids.len()),
-            Err(e) => println!("❌ Failed to add tracks: {}", e),
+            Ok(()) => println!("✅ Added {} track(s) to playlist", track_ids.len()),
+            Err(e) => println!("❌ Failed to add tracks: {e}"),
         }
 
         Ok(())
@@ -1178,18 +1217,23 @@ impl TornadeCli {
 
         println!("Available playlists:");
         for playlist in &playlists {
-            println!("  {}. {} ({} tracks)", playlist.id, playlist.name, playlist.tracks.len());
+            println!(
+                "  {}. {} ({} tracks)",
+                playlist.id,
+                playlist.name,
+                playlist.tracks.len()
+            );
         }
 
-        let playlist_id_str = self.read_input("\nEnter playlist ID: ")?;
+        let playlist_id_str = Self::read_input("\nEnter playlist ID: ")?;
         let playlist_id: i64 = playlist_id_str.trim().parse()?;
 
-        let position_str = self.read_input("Enter track position to remove: ")?;
+        let position_str = Self::read_input("Enter track position to remove: ")?;
         let position: usize = position_str.trim().parse()?;
 
         match self.playlist.remove_track(playlist_id, position) {
-            Ok(_) => println!("✅ Track removed from playlist"),
-            Err(e) => println!("❌ Failed to remove track: {}", e),
+            Ok(()) => println!("✅ Track removed from playlist"),
+            Err(e) => println!("❌ Failed to remove track: {e}"),
         }
 
         Ok(())
@@ -1207,21 +1251,26 @@ impl TornadeCli {
 
         println!("Available playlists:");
         for playlist in &playlists {
-            println!("  {}. {} ({} tracks)", playlist.id, playlist.name, playlist.tracks.len());
+            println!(
+                "  {}. {} ({} tracks)",
+                playlist.id,
+                playlist.name,
+                playlist.tracks.len()
+            );
         }
 
-        let playlist_id_str = self.read_input("\nEnter playlist ID: ")?;
+        let playlist_id_str = Self::read_input("\nEnter playlist ID: ")?;
         let playlist_id: i64 = playlist_id_str.trim().parse()?;
 
-        let from_str = self.read_input("From position: ")?;
+        let from_str = Self::read_input("From position: ")?;
         let from: usize = from_str.trim().parse()?;
 
-        let to_str = self.read_input("To position: ")?;
+        let to_str = Self::read_input("To position: ")?;
         let to: usize = to_str.trim().parse()?;
 
         match self.playlist.move_track(playlist_id, from, to) {
-            Ok(_) => println!("✅ Track moved in playlist"),
-            Err(e) => println!("❌ Failed to move track: {}", e),
+            Ok(()) => println!("✅ Track moved in playlist"),
+            Err(e) => println!("❌ Failed to move track: {e}"),
         }
 
         Ok(())
@@ -1242,14 +1291,14 @@ impl TornadeCli {
             println!("  {}. {}", playlist.id, playlist.name);
         }
 
-        let playlist_id_str = self.read_input("\nEnter playlist ID: ")?;
+        let playlist_id_str = Self::read_input("\nEnter playlist ID: ")?;
         let playlist_id: i64 = playlist_id_str.trim().parse()?;
 
-        let new_name = self.read_input("New name: ")?;
+        let new_name = Self::read_input("New name: ")?;
 
         match self.playlist.rename_playlist(playlist_id, &new_name) {
-            Ok(_) => println!("✅ Playlist renamed successfully"),
-            Err(e) => println!("❌ Failed to rename playlist: {}", e),
+            Ok(()) => println!("✅ Playlist renamed successfully"),
+            Err(e) => println!("❌ Failed to rename playlist: {e}"),
         }
 
         Ok(())
@@ -1270,16 +1319,15 @@ impl TornadeCli {
             println!("  {}. {}", playlist.id, playlist.name);
         }
 
-        let playlist_id_str = self.read_input("\nEnter playlist ID: ")?;
+        let playlist_id_str = Self::read_input("\nEnter playlist ID: ")?;
         let playlist_id: i64 = playlist_id_str.trim().parse()?;
 
-        let confirm_msg = format!("Are you sure you want to delete this playlist? (y/n): ");
-        let confirm = self.read_input(&confirm_msg)?;
+        let confirm = Self::read_input("Are you sure you want to delete this playlist? (y/n): ")?;
 
         if confirm.trim().to_lowercase() == "y" {
             match self.playlist.delete_playlist(playlist_id) {
-                Ok(_) => println!("✅ Playlist deleted successfully"),
-                Err(e) => println!("❌ Failed to delete playlist: {}", e),
+                Ok(()) => println!("✅ Playlist deleted successfully"),
+                Err(e) => println!("❌ Failed to delete playlist: {e}"),
             }
         } else {
             println!("❌ Deletion cancelled");
@@ -1292,11 +1340,11 @@ impl TornadeCli {
         println!("\n📥 Import M3U Playlist");
         println!("=====================");
 
-        let path_str = self.read_input("Path to M3U file: ")?;
+        let path_str = Self::read_input("Path to M3U file: ")?;
         let path = PathBuf::from(path_str.trim());
 
         if !path.exists() {
-            println!("❌ File does not exist: {:?}", path);
+            println!("❌ File does not exist: {path:?}");
             return Ok(());
         }
 
@@ -1307,7 +1355,7 @@ impl TornadeCli {
                 println!("   Name: {}", playlist.name);
                 println!("   Tracks: {}", playlist.tracks.len());
             }
-            Err(e) => println!("❌ Failed to import M3U: {}", e),
+            Err(e) => println!("❌ Failed to import M3U: {e}"),
         }
 
         Ok(())
@@ -1325,20 +1373,25 @@ impl TornadeCli {
 
         println!("Available playlists:");
         for playlist in &playlists {
-            println!("  {}. {} ({} tracks)", playlist.id, playlist.name, playlist.tracks.len());
+            println!(
+                "  {}. {} ({} tracks)",
+                playlist.id,
+                playlist.name,
+                playlist.tracks.len()
+            );
         }
 
-        let playlist_id_str = self.read_input("\nEnter playlist ID: ")?;
+        let playlist_id_str = Self::read_input("\nEnter playlist ID: ")?;
         let playlist_id: i64 = playlist_id_str.trim().parse()?;
 
-        let path_str = self.read_input("Output path (e.g., /path/to/playlist.m3u): ")?;
+        let path_str = Self::read_input("Output path (e.g., /path/to/playlist.m3u): ")?;
         let path = PathBuf::from(path_str.trim());
 
         match self.playlist.export_m3u(playlist_id, &path) {
-            Ok(_) => {
-                println!("✅ Playlist exported successfully to: {:?}", path);
+            Ok(()) => {
+                println!("✅ Playlist exported successfully to: {path:?}");
             }
-            Err(e) => println!("❌ Failed to export M3U: {}", e),
+            Err(e) => println!("❌ Failed to export M3U: {e}"),
         }
 
         Ok(())
@@ -1360,12 +1413,16 @@ impl TornadeCli {
 
         for (idx, group) in duplicates.iter().enumerate() {
             println!("Group {} ({} tracks):", idx + 1, group.tracks.len());
-            println!("{:<6} {:<40} {:<25} {:<15} {:>10}", "ID", "Title", "Artist ID", "Format", "Size");
+            println!(
+                "{:<6} {:<40} {:<25} {:<15} {:>10}",
+                "ID", "Title", "Artist ID", "Format", "Size"
+            );
             println!("{}", "-".repeat(100));
 
             for track in &group.tracks {
                 let size_mb = track.file_size as f64 / 1_048_576.0;
-                println!("{:<6} {:<40} {:<25} {:<15} {:>9.2} MB",
+                println!(
+                    "{:<6} {:<40} {:<25} {:<15} {:>9.2} MB",
                     track.id,
                     truncate(&track.title, 40),
                     track.artist_id,
@@ -1378,18 +1435,20 @@ impl TornadeCli {
 
         // Get statistics
         let (num_groups, num_tracks) = self.duplicate.get_duplicate_stats()?;
-        println!("Total: {} duplicate groups with {} tracks", num_groups, num_tracks);
+        println!("Total: {num_groups} duplicate groups with {num_tracks} tracks");
 
         // Option to mark duplicates
-        let choice = self.read_input("\nMark a track as duplicate? Enter track ID (or press Enter to skip): ")?;
+        let choice = Self::read_input(
+            "\nMark a track as duplicate? Enter track ID (or press Enter to skip): ",
+        )?;
         if !choice.trim().is_empty() {
             let track_id: i64 = choice.trim().parse()?;
-            let original_id_str = self.read_input("Enter ID of original track to keep: ")?;
+            let original_id_str = Self::read_input("Enter ID of original track to keep: ")?;
             let original_id: i64 = original_id_str.trim().parse()?;
 
             match self.duplicate.hide_duplicate(track_id, original_id) {
-                Ok(_) => println!("✅ Track {} marked as duplicate of {}", track_id, original_id),
-                Err(e) => println!("❌ Failed to mark duplicate: {}", e),
+                Ok(()) => println!("✅ Track {track_id} marked as duplicate of {original_id}"),
+                Err(e) => println!("❌ Failed to mark duplicate: {e}"),
             }
         }
 
@@ -1407,7 +1466,7 @@ impl TornadeCli {
         println!("   - All statistics and ratings");
         println!();
 
-        let confirm = self.read_input("Type 'DELETE' to confirm: ")?;
+        let confirm = Self::read_input("Type 'DELETE' to confirm: ")?;
 
         if confirm.trim() != "DELETE" {
             println!("❌ Reset cancelled.");
@@ -1417,12 +1476,12 @@ impl TornadeCli {
         println!("\n🗑️  Resetting library...");
 
         match crate::db::reset_database(&self.pool) {
-            Ok(_) => {
+            Ok(()) => {
                 println!("✅ Library reset complete!");
                 println!("   Database is now empty and ready to use.");
             }
             Err(e) => {
-                println!("❌ Failed to reset library: {}", e);
+                println!("❌ Failed to reset library: {e}");
                 return Err(Box::new(e));
             }
         }
@@ -1440,7 +1499,7 @@ impl TornadeCli {
         println!("  3. Cancel");
         println!();
 
-        let choice = self.read_input("Enter your choice: ")?;
+        let choice = Self::read_input("Enter your choice: ")?;
 
         let fetch_artists = match choice.trim() {
             "1" => false,
@@ -1467,29 +1526,26 @@ impl TornadeCli {
 
         runtime.block_on(async move {
             match artwork_service.fetch_all_artwork(fetch_artists).await {
-                Ok(_) => {
+                Ok(()) => {
                     // Poll for progress until complete
-                    loop {
-                        if let Some(progress) = artwork_service.get_progress() {
-                            // Clear line and print progress
-                            print!("\r  Progress: {}/{} | ✓ {} | ✗ {} | Current: {}                    ",
-                                progress.processed_items,
-                                progress.total_items,
-                                progress.successful,
-                                progress.failed,
-                                truncate(&progress.current_item, 40)
-                            );
-                            std::io::stdout().flush().unwrap();
+                    while let Some(progress) = artwork_service.get_progress() {
+                        // Clear line and print progress
+                        print!(
+                            "\r  Progress: {}/{} | ✓ {} | ✗ {} | Current: {}                    ",
+                            progress.processed_items,
+                            progress.total_items,
+                            progress.successful,
+                            progress.failed,
+                            truncate(&progress.current_item, 40)
+                        );
+                        std::io::stdout().flush().unwrap();
 
-                            if progress.processed_items >= progress.total_items {
-                                println!("\n");
-                                break;
-                            }
-
-                            tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
-                        } else {
+                        if progress.processed_items >= progress.total_items {
+                            println!("\n");
                             break;
                         }
+
+                        tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
                     }
 
                     if let Some(final_progress) = artwork_service.get_progress() {
@@ -1500,7 +1556,7 @@ impl TornadeCli {
                     }
                 }
                 Err(e) => {
-                    println!("\n❌ Failed to fetch artwork: {}", e);
+                    println!("\n❌ Failed to fetch artwork: {e}");
                 }
             }
         });

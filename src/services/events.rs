@@ -1,6 +1,6 @@
 // Service layer event types for UI subscription
 
-use crate::models::{Track, Playlist, RepeatMode};
+use crate::models::{Playlist, RepeatMode, Track};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 

@@ -1,8 +1,8 @@
 // Database layer
 
-pub mod schema;
 pub mod migrations;
 pub mod queries;
+pub mod schema;
 
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
@@ -11,21 +11,25 @@ use std::path::PathBuf;
 
 pub type DbPool = Pool<SqliteConnectionManager>;
 
+/// Convert an r2d2 pool error to a rusqlite error for functions whose return type is `rusqlite::Result`.
+fn pool_err(e: &r2d2::Error) -> rusqlite::Error {
+    rusqlite::Error::InvalidPath(PathBuf::from(e.to_string()))
+}
+
 /// Initialize database connection pool
 pub fn create_pool(db_path: PathBuf) -> Result<DbPool, r2d2::Error> {
-    let manager = SqliteConnectionManager::file(db_path);
-    let pool = Pool::builder()
-        .max_size(5)
-        .build(manager)?;
+    // Limit SQLite page cache to 2 MB per connection (default is ~8 MB).
+    // With 3 connections: 3 × 2 MB = 6 MB vs the default 3 × 8 MB = 24 MB.
+    let manager = SqliteConnectionManager::file(db_path)
+        .with_init(|conn| conn.execute_batch("PRAGMA cache_size = -2000;"));
+    let pool = Pool::builder().max_size(3).build(manager)?;
 
     Ok(pool)
 }
 
 /// Initialize database schema and FTS
 pub fn initialize_database(pool: &DbPool) -> Result<()> {
-    let conn = pool.get().map_err(|e| {
-        rusqlite::Error::InvalidPath(PathBuf::from(format!("Pool error: {}", e)))
-    })?;
+    let conn = pool.get().map_err(|e| pool_err(&e))?;
 
     schema::initialize_schema(&conn)?;
     schema::initialize_fts(&conn)?;
@@ -39,9 +43,7 @@ pub fn initialize_database(pool: &DbPool) -> Result<()> {
 
 /// Reset database by dropping all tables and recreating schema
 pub fn reset_database(pool: &DbPool) -> Result<()> {
-    let conn = pool.get().map_err(|e| {
-        rusqlite::Error::InvalidPath(PathBuf::from(format!("Pool error: {}", e)))
-    })?;
+    let conn = pool.get().map_err(|e| pool_err(&e))?;
 
     // Drop all tables in reverse order of dependencies
     conn.execute_batch(
@@ -57,7 +59,7 @@ pub fn reset_database(pool: &DbPool) -> Result<()> {
          DROP TABLE IF EXISTS app_state;
          DROP TRIGGER IF EXISTS tracks_ai;
          DROP TRIGGER IF EXISTS tracks_ad;
-         DROP TRIGGER IF EXISTS tracks_au;"
+         DROP TRIGGER IF EXISTS tracks_au;",
     )?;
 
     // Recreate schema

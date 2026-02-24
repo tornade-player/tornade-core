@@ -1,18 +1,27 @@
 // Database query operations
 
-use crate::models::{Track, Album, Artist, Genre, Source, Playlist, AudioFormat};
 use crate::models::source::SourceType;
-use rusqlite::{Connection, Result, params, OptionalExtension};
-use std::path::PathBuf;
+use crate::models::{Album, Artist, AudioFormat, Genre, Playlist, Source, Track};
+use rusqlite::{Connection, OptionalExtension, Result, params};
+use std::path::{Path, PathBuf};
 
 // ============================================================================
 // Source operations
 // ============================================================================
 
-pub fn insert_source(conn: &Connection, name: &str, source_type: SourceType, path: Option<&PathBuf>) -> Result<i64> {
+pub fn insert_source(
+    conn: &Connection,
+    name: &str,
+    source_type: SourceType,
+    path: Option<&Path>,
+) -> Result<i64> {
     conn.execute(
         "INSERT INTO sources (name, type, path) VALUES (?1, ?2, ?3)",
-        params![name, source_type.as_str(), path.map(|p| p.to_string_lossy().to_string())],
+        params![
+            name,
+            source_type.as_str(),
+            path.map(|p| p.to_string_lossy().into_owned())
+        ],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -31,12 +40,13 @@ pub fn get_source(conn: &Connection, id: i64) -> Result<Option<Source>> {
                 last_scanned_at: row.get(5)?,
             })
         },
-    ).optional()
+    )
+    .optional()
 }
 
 pub fn list_sources(conn: &Connection) -> Result<Vec<Source>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, type, path, device_id, last_scanned_at FROM sources ORDER BY name"
+        "SELECT id, name, type, path, device_id, last_scanned_at FROM sources ORDER BY name",
     )?;
 
     let sources = stmt.query_map([], |row| {
@@ -95,14 +105,20 @@ pub fn get_artist(conn: &Connection, id: i64) -> Result<Option<Artist>> {
                 theaudiodb_id: row.get(13)?,
             })
         },
-    ).optional()
+    )
+    .optional()
 }
 
 // ============================================================================
 // Album operations
 // ============================================================================
 
-pub fn insert_album(conn: &Connection, title: &str, artist_id: i64, year: Option<u16>) -> Result<i64> {
+pub fn insert_album(
+    conn: &Connection,
+    title: &str,
+    artist_id: i64,
+    year: Option<u16>,
+) -> Result<i64> {
     conn.execute(
         "INSERT INTO albums (title, artist_id, year) VALUES (?1, ?2, ?3) ON CONFLICT(title, artist_id) DO NOTHING",
         params![title, artist_id, year],
@@ -144,7 +160,8 @@ pub fn get_album(conn: &Connection, id: i64) -> Result<Option<Album>> {
                 release_status: row.get(14)?,
             })
         },
-    ).optional()
+    )
+    .optional()
 }
 
 /// Find any existing album with this exact title, regardless of artist.
@@ -157,7 +174,8 @@ pub fn find_album_by_title(conn: &Connection, title: &str) -> Result<Option<(i64
         "SELECT id, artist_id FROM albums WHERE title = ?1 LIMIT 1",
         params![title],
         |row| Ok((row.get(0)?, row.get(1)?)),
-    ).optional()
+    )
+    .optional()
 }
 
 pub fn update_album_artist(conn: &Connection, album_id: i64, artist_id: i64) -> Result<()> {
@@ -203,7 +221,8 @@ pub fn get_genre(conn: &Connection, id: i64) -> Result<Option<Genre>> {
                 name: row.get(1)?,
             })
         },
-    ).optional()
+    )
+    .optional()
 }
 
 // ============================================================================
@@ -216,7 +235,7 @@ pub fn insert_track(
     album_id: Option<i64>,
     artist_id: i64,
     source_id: i64,
-    file_path: &PathBuf,
+    file_path: &Path,
     duration_ms: i64,
     track_number: Option<u32>,
     sample_rate: Option<u32>,
@@ -241,7 +260,7 @@ pub fn insert_track(
             album_id,
             artist_id,
             source_id,
-            file_path.to_string_lossy().to_string(),
+            file_path.to_string_lossy().into_owned(),
             duration_ms,
             track_number,
             sample_rate,
@@ -285,7 +304,8 @@ pub fn get_track(conn: &Connection, id: i64) -> Result<Option<Track>> {
                 play_count: row.get::<_, i32>(18)? as u32,
             })
         },
-    ).optional()
+    )
+    .optional()
 }
 
 pub fn get_album_tracks(conn: &Connection, album_id: i64) -> Result<Vec<Track>> {
@@ -295,7 +315,7 @@ pub fn get_album_tracks(conn: &Connection, album_id: i64) -> Result<Vec<Track>> 
                 file_type, file_size, rating, fingerprint, is_duplicate,
                 duplicate_of, last_played_at, play_count
          FROM tracks WHERE album_id = ?1
-         ORDER BY disc_number, track_number"
+         ORDER BY disc_number, track_number",
     )?;
 
     let tracks = stmt.query_map(params![album_id], |row| {
@@ -363,8 +383,10 @@ pub fn count_albums(
     let mut params: Vec<Value> = Vec::new();
 
     if let Some(gid) = genre_id {
-        sql.push_str(" JOIN tracks t ON t.album_id = a.id
-                       JOIN track_genres tg ON tg.track_id = t.id");
+        sql.push_str(
+            " JOIN tracks t ON t.album_id = a.id
+                       JOIN track_genres tg ON tg.track_id = t.id",
+        );
         conditions.push("tg.genre_id = ?");
         params.push(Value::Integer(gid));
     }
@@ -374,7 +396,7 @@ pub fn count_albums(
     }
     if let Some(rating) = min_rating {
         conditions.push("a.rating >= ?");
-        params.push(Value::Integer(rating as i64));
+        params.push(Value::Integer(i64::from(rating)));
     }
 
     if !conditions.is_empty() {
@@ -402,15 +424,17 @@ pub fn list_albums(
                 a.artwork_path, a.online_artwork_path, a.description,
                 a.musicbrainz_id, a.label, a.country, a.barcode, a.album_type, a.release_status
          FROM albums a
-         JOIN artists ar ON ar.id = a.artist_id"
+         JOIN artists ar ON ar.id = a.artist_id",
     );
 
     let mut conditions = Vec::new();
     let mut params: Vec<Value> = Vec::new();
 
     if let Some(gid) = genre_id {
-        sql.push_str(" JOIN tracks t ON t.album_id = a.id
-                       JOIN track_genres tg ON tg.track_id = t.id");
+        sql.push_str(
+            " JOIN tracks t ON t.album_id = a.id
+                       JOIN track_genres tg ON tg.track_id = t.id",
+        );
         conditions.push("tg.genre_id = ?");
         params.push(Value::Integer(gid));
     }
@@ -420,7 +444,7 @@ pub fn list_albums(
     }
     if let Some(rating) = min_rating {
         conditions.push("a.rating >= ?");
-        params.push(Value::Integer(rating as i64));
+        params.push(Value::Integer(i64::from(rating)));
     }
 
     if !conditions.is_empty() {
@@ -431,10 +455,10 @@ pub fn list_albums(
     sql.push_str(" ORDER BY a.title");
 
     if let Some(lim) = limit {
-        sql.push_str(&format!(" LIMIT {}", lim));
+        sql.push_str(&format!(" LIMIT {lim}"));
     }
     if let Some(off) = offset {
-        sql.push_str(&format!(" OFFSET {}", off));
+        sql.push_str(&format!(" OFFSET {off}"));
     }
 
     let mut stmt = conn.prepare(&sql)?;
@@ -469,7 +493,7 @@ pub fn get_artist_albums(conn: &Connection, artist_id: i64) -> Result<Vec<Album>
          FROM albums a
          JOIN artists ar ON ar.id = a.artist_id
          WHERE a.artist_id = ?1
-         ORDER BY a.year DESC, a.title"
+         ORDER BY a.year DESC, a.title",
     )?;
 
     let albums = stmt.query_map(params![artist_id], |row| {
@@ -503,7 +527,7 @@ pub fn list_artists(conn: &Connection) -> Result<Vec<Artist>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, name_sort, bio, country, genre, style, mood,
                 formed_year, born_year, died_year, disbanded, musicbrainz_id, theaudiodb_id
-         FROM artists ORDER BY COALESCE(name_sort, name)"
+         FROM artists ORDER BY COALESCE(name_sort, name)",
     )?;
 
     let artists = stmt.query_map([], |row| {
@@ -538,7 +562,7 @@ pub fn get_genre_albums(conn: &Connection, genre_id: i64) -> Result<Vec<Album>> 
          JOIN tracks t ON t.album_id = a.id
          JOIN track_genres tg ON tg.track_id = t.id
          WHERE tg.genre_id = ?1
-         ORDER BY a.year DESC, a.title"
+         ORDER BY a.year DESC, a.title",
     )?;
 
     let albums = stmt.query_map(params![genre_id], |row| {
@@ -610,7 +634,7 @@ pub fn list_genres_with_count(conn: &Connection) -> Result<Vec<(Genre, u32, u32)
          LEFT JOIN track_genres tg ON tg.genre_id = g.id
          LEFT JOIN tracks t ON t.id = tg.track_id
          GROUP BY g.id, g.name
-         ORDER BY g.name"
+         ORDER BY g.name",
     )?;
 
     let genres = stmt.query_map([], |row| {
@@ -636,7 +660,7 @@ pub fn get_genre_tracks(conn: &Connection, genre_id: i64) -> Result<Vec<Track>> 
          FROM tracks t
          JOIN track_genres tg ON tg.track_id = t.id
          WHERE tg.genre_id = ?1
-         ORDER BY t.title"
+         ORDER BY t.title",
     )?;
 
     let tracks = stmt.query_map(params![genre_id], |row| {
@@ -673,7 +697,7 @@ pub fn get_album_genres(conn: &Connection, album_id: i64) -> Result<Vec<Genre>> 
          JOIN track_genres tg ON g.id = tg.genre_id
          JOIN tracks t ON tg.track_id = t.id
          WHERE t.album_id = ?1
-         ORDER BY g.name"
+         ORDER BY g.name",
     )?;
 
     let genres = stmt.query_map(params![album_id], |row| {
@@ -693,7 +717,7 @@ pub fn get_artist_genres(conn: &Connection, artist_id: i64) -> Result<Vec<Genre>
          JOIN track_genres tg ON g.id = tg.genre_id
          JOIN tracks t ON tg.track_id = t.id
          WHERE t.artist_id = ?1
-         ORDER BY g.name"
+         ORDER BY g.name",
     )?;
 
     let genres = stmt.query_map(params![artist_id], |row| {
@@ -714,7 +738,7 @@ pub fn get_source_tracks(conn: &Connection, source_id: i64) -> Result<Vec<Track>
                 duplicate_of, last_played_at, play_count
          FROM tracks
          WHERE source_id = ?1
-         ORDER BY title"
+         ORDER BY title",
     )?;
 
     let tracks = stmt.query_map(params![source_id], |row| {
@@ -748,7 +772,11 @@ pub fn get_source_tracks(conn: &Connection, source_id: i64) -> Result<Vec<Track>
 // Search operations
 // ============================================================================
 
-pub fn search_library(conn: &Connection, query: &str, limit: usize) -> Result<(Vec<Track>, Vec<Album>, Vec<Artist>)> {
+pub fn search_library(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+) -> Result<(Vec<Track>, Vec<Album>, Vec<Artist>)> {
     // Search tracks using FTS5
     let mut tracks = Vec::new();
     let mut stmt = conn.prepare(
@@ -759,7 +787,7 @@ pub fn search_library(conn: &Connection, query: &str, limit: usize) -> Result<(V
          FROM tracks_fts
          JOIN tracks t ON tracks_fts.rowid = t.id
          WHERE tracks_fts MATCH ?1
-         LIMIT ?2"
+         LIMIT ?2",
     )?;
 
     let track_results = stmt.query_map(params![query, limit], |row| {
@@ -799,10 +827,10 @@ pub fn search_library(conn: &Connection, query: &str, limit: usize) -> Result<(V
          FROM albums a
          JOIN artists ar ON ar.id = a.artist_id
          WHERE a.title LIKE ?1
-         LIMIT ?2"
+         LIMIT ?2",
     )?;
 
-    let search_pattern = format!("%{}%", query);
+    let search_pattern = format!("%{query}%");
     let album_results = stmt.query_map(params![search_pattern, limit], |row| {
         Ok(Album {
             id: row.get(0)?,
@@ -834,7 +862,7 @@ pub fn search_library(conn: &Connection, query: &str, limit: usize) -> Result<(V
                 formed_year, born_year, died_year, disbanded, musicbrainz_id, theaudiodb_id
          FROM artists
          WHERE name LIKE ?1
-         LIMIT ?2"
+         LIMIT ?2",
     )?;
 
     let artist_results = stmt.query_map(params![search_pattern, limit], |row| {
@@ -876,28 +904,28 @@ pub fn create_playlist(conn: &Connection, name: &str, description: Option<&str>)
 }
 
 pub fn get_playlist(conn: &Connection, id: i64) -> Result<Option<Playlist>> {
-    let playlist = conn.query_row(
-        "SELECT id, name, description, created_at, updated_at FROM playlists WHERE id = ?1",
-        params![id],
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-            ))
-        },
-    ).optional()?;
+    let playlist = conn
+        .query_row(
+            "SELECT id, name, description, created_at, updated_at FROM playlists WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .optional()?;
 
     if let Some((id, name, description, created_at, updated_at)) = playlist {
         // Get track IDs in order
         let mut stmt = conn.prepare(
-            "SELECT track_id FROM playlist_tracks WHERE playlist_id = ?1 ORDER BY position"
+            "SELECT track_id FROM playlist_tracks WHERE playlist_id = ?1 ORDER BY position",
         )?;
-        let tracks: Result<Vec<i64>> = stmt
-            .query_map(params![id], |row| row.get(0))?
-            .collect();
+        let tracks: Result<Vec<i64>> = stmt.query_map(params![id], |row| row.get(0))?.collect();
 
         Ok(Some(Playlist {
             id,
@@ -937,6 +965,7 @@ pub fn add_track_to_playlist(conn: &Connection, playlist_id: i64, track_id: i64)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::Rating;
     use crate::test_helpers::TestEnv;
 
     // ====================================================================
@@ -947,7 +976,13 @@ mod tests {
     fn test_insert_and_get_source() {
         let env = TestEnv::new();
         let conn = env.pool.get().unwrap();
-        let id = insert_source(&conn, "My Library", SourceType::Disk, Some(&PathBuf::from("/music"))).unwrap();
+        let id = insert_source(
+            &conn,
+            "My Library",
+            SourceType::Disk,
+            Some(&PathBuf::from("/music")),
+        )
+        .unwrap();
         assert!(id > 0);
         let source = get_source(&conn, id).unwrap().unwrap();
         assert_eq!(source.name, "My Library");
@@ -1122,7 +1157,7 @@ mod tests {
         let album_id = insert_album(&conn, "Album", artist_id, None).unwrap();
         update_album_rating(&conn, album_id, 4).unwrap();
         let album = get_album(&conn, album_id).unwrap().unwrap();
-        assert_eq!(album.rating, 4);
+        assert_eq!(album.rating, Rating(4));
     }
 
     // ====================================================================
@@ -1171,10 +1206,20 @@ mod tests {
         let artist_id = insert_artist(&conn, "Artist", None).unwrap();
         let album_id = insert_album(&conn, "Album", artist_id, None).unwrap();
         let track_id = insert_track(
-            &conn, "My Track", Some(album_id), artist_id, source_id,
-            &PathBuf::from("/music/track.flac"), 200_000, Some(1),
-            Some(44100), Some(16), AudioFormat::Flac, 10_000_000,
-        ).unwrap();
+            &conn,
+            "My Track",
+            Some(album_id),
+            artist_id,
+            source_id,
+            &PathBuf::from("/music/track.flac"),
+            200_000,
+            Some(1),
+            Some(44100),
+            Some(16),
+            AudioFormat::Flac,
+            10_000_000,
+        )
+        .unwrap();
         assert!(track_id > 0);
         let track = get_track(&conn, track_id).unwrap().unwrap();
         assert_eq!(track.title, "My Track");
@@ -1202,11 +1247,45 @@ mod tests {
         let artist_id = insert_artist(&conn, "Artist", None).unwrap();
         let path = PathBuf::from("/music/track.flac");
 
-        insert_track(&conn, "Old Title", None, artist_id, source_id, &path, 100_000, None, None, None, AudioFormat::Flac, 1_000).unwrap();
-        insert_track(&conn, "New Title", None, artist_id, source_id, &path, 200_000, None, None, None, AudioFormat::Flac, 2_000).unwrap();
+        insert_track(
+            &conn,
+            "Old Title",
+            None,
+            artist_id,
+            source_id,
+            &path,
+            100_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000,
+        )
+        .unwrap();
+        insert_track(
+            &conn,
+            "New Title",
+            None,
+            artist_id,
+            source_id,
+            &path,
+            200_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            2_000,
+        )
+        .unwrap();
 
         let conn2 = env.pool.get().unwrap();
-        let count: i64 = conn2.query_row("SELECT COUNT(*) FROM tracks WHERE source_id = ?1", [source_id], |r| r.get(0)).unwrap();
+        let count: i64 = conn2
+            .query_row(
+                "SELECT COUNT(*) FROM tracks WHERE source_id = ?1",
+                [source_id],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 1); // only one row (upserted)
     }
 
@@ -1216,7 +1295,8 @@ mod tests {
         let (source_id, _, _, _, _, _) = env.seed_basic_library();
         let conn = env.pool.get().unwrap();
 
-        conn.execute("DELETE FROM tracks WHERE source_id = ?1", [source_id]).unwrap();
+        conn.execute("DELETE FROM tracks WHERE source_id = ?1", [source_id])
+            .unwrap();
         let tracks = get_source_tracks(&conn, source_id).unwrap();
         assert!(tracks.is_empty());
     }
@@ -1229,10 +1309,20 @@ mod tests {
         let artist_id = insert_artist(&conn, "Artist", None).unwrap();
         let album_id = insert_album(&conn, "Album", artist_id, Some(2020)).unwrap();
         let track_id = insert_track(
-            &conn, "Full Track", Some(album_id), artist_id, source_id,
-            &PathBuf::from("/music/full.mp3"), 300_000, Some(5),
-            Some(48000), Some(24), AudioFormat::Mp3, 15_000_000,
-        ).unwrap();
+            &conn,
+            "Full Track",
+            Some(album_id),
+            artist_id,
+            source_id,
+            &PathBuf::from("/music/full.mp3"),
+            300_000,
+            Some(5),
+            Some(48000),
+            Some(24),
+            AudioFormat::Mp3,
+            15_000_000,
+        )
+        .unwrap();
         let track = get_track(&conn, track_id).unwrap().unwrap();
         assert_eq!(track.track_number, Some(5));
         assert_eq!(track.sample_rate, Some(48000));
@@ -1248,7 +1338,7 @@ mod tests {
         let conn = env.pool.get().unwrap();
         update_track_rating(&conn, track_id, 5).unwrap();
         let track = get_track(&conn, track_id).unwrap().unwrap();
-        assert_eq!(track.rating, 5);
+        assert_eq!(track.rating, Rating(5));
     }
 
     #[test]
@@ -1300,7 +1390,11 @@ mod tests {
         add_track_to_playlist(&conn, pl_id, t2).unwrap();
 
         // Remove first track (position 0)
-        conn.execute("DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND position = 0", [pl_id]).unwrap();
+        conn.execute(
+            "DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND position = 0",
+            [pl_id],
+        )
+        .unwrap();
         let pl = get_playlist(&conn, pl_id).unwrap().unwrap();
         assert_eq!(pl.tracks.len(), 1);
         assert_eq!(pl.tracks[0], t2);
@@ -1311,7 +1405,8 @@ mod tests {
         let env = TestEnv::new();
         let conn = env.pool.get().unwrap();
         let pl_id = create_playlist(&conn, "To Delete", None).unwrap();
-        conn.execute("DELETE FROM playlists WHERE id = ?1", [pl_id]).unwrap();
+        conn.execute("DELETE FROM playlists WHERE id = ?1", [pl_id])
+            .unwrap();
         let result = get_playlist(&conn, pl_id).unwrap();
         assert!(result.is_none());
     }
@@ -1566,11 +1661,44 @@ mod tests {
         let artist = insert_artist(&conn, "A", None).unwrap();
         let path = PathBuf::from("/music/x.flac");
 
-        insert_track(&conn, "Original", None, artist, source, &path, 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
-        insert_track(&conn, "Updated", None, artist, source, &path, 90_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        insert_track(
+            &conn,
+            "Original",
+            None,
+            artist,
+            source,
+            &path,
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
+        insert_track(
+            &conn,
+            "Updated",
+            None,
+            artist,
+            source,
+            &path,
+            90_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
 
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0)).unwrap();
-        assert_eq!(count, 1, "re-inserting same source+path must not create a duplicate row");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "re-inserting same source+path must not create a duplicate row"
+        );
     }
 
     #[test]
@@ -1581,11 +1709,44 @@ mod tests {
         let artist = insert_artist(&conn, "A", None).unwrap();
         let path = PathBuf::from("/music/x.flac");
 
-        insert_track(&conn, "Original Title", None, artist, source, &path, 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
-        insert_track(&conn, "Updated Title",  None, artist, source, &path, 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        insert_track(
+            &conn,
+            "Original Title",
+            None,
+            artist,
+            source,
+            &path,
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
+        insert_track(
+            &conn,
+            "Updated Title",
+            None,
+            artist,
+            source,
+            &path,
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
 
-        let title: String = conn.query_row("SELECT title FROM tracks", [], |r| r.get(0)).unwrap();
-        assert_eq!(title, "Updated Title", "upsert must update the title column");
+        let title: String = conn
+            .query_row("SELECT title FROM tracks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            title, "Updated Title",
+            "upsert must update the title column"
+        );
     }
 
     #[test]
@@ -1596,10 +1757,40 @@ mod tests {
         let artist = insert_artist(&conn, "A", None).unwrap();
         let path = PathBuf::from("/music/x.flac");
 
-        insert_track(&conn, "T", None, artist, source, &path,  60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
-        insert_track(&conn, "T", None, artist, source, &path, 180_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        insert_track(
+            &conn,
+            "T",
+            None,
+            artist,
+            source,
+            &path,
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
+        insert_track(
+            &conn,
+            "T",
+            None,
+            artist,
+            source,
+            &path,
+            180_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
 
-        let duration: i64 = conn.query_row("SELECT duration FROM tracks", [], |r| r.get(0)).unwrap();
+        let duration: i64 = conn
+            .query_row("SELECT duration FROM tracks", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(duration, 180_000, "upsert must update the duration column");
     }
 
@@ -1607,16 +1798,49 @@ mod tests {
     fn test_insert_track_upsert_updates_artist_id() {
         let env = TestEnv::new();
         let conn = env.pool.get().unwrap();
-        let source  = insert_source(&conn, "s", SourceType::Disk, None).unwrap();
+        let source = insert_source(&conn, "s", SourceType::Disk, None).unwrap();
         let artist1 = insert_artist(&conn, "Old Artist", None).unwrap();
         let artist2 = insert_artist(&conn, "New Artist", None).unwrap();
         let path = PathBuf::from("/music/x.flac");
 
-        insert_track(&conn, "T", None, artist1, source, &path, 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
-        insert_track(&conn, "T", None, artist2, source, &path, 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        insert_track(
+            &conn,
+            "T",
+            None,
+            artist1,
+            source,
+            &path,
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
+        insert_track(
+            &conn,
+            "T",
+            None,
+            artist2,
+            source,
+            &path,
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
 
-        let stored_artist: i64 = conn.query_row("SELECT artist_id FROM tracks", [], |r| r.get(0)).unwrap();
-        assert_eq!(stored_artist, artist2, "upsert must update the artist_id column");
+        let stored_artist: i64 = conn
+            .query_row("SELECT artist_id FROM tracks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            stored_artist, artist2,
+            "upsert must update the artist_id column"
+        );
     }
 
     // ====================================================================
@@ -1629,15 +1853,65 @@ mod tests {
         let conn = env.pool.get().unwrap();
         let source = insert_source(&conn, "s", SourceType::Disk, None).unwrap();
         let artist = insert_artist(&conn, "A", None).unwrap();
-        let album  = insert_album(&conn, "Album", artist, None).unwrap();
+        let album = insert_album(&conn, "Album", artist, None).unwrap();
 
         // Insert deliberately out of order
-        let t3 = insert_track(&conn, "T3", Some(album), artist, source, &PathBuf::from("/t3.flac"), 60_000, Some(3), None, None, AudioFormat::Flac, 1_000_000).unwrap();
-        let t1 = insert_track(&conn, "T1", Some(album), artist, source, &PathBuf::from("/t1.flac"), 60_000, Some(1), None, None, AudioFormat::Flac, 1_000_000).unwrap();
-        let t2 = insert_track(&conn, "T2", Some(album), artist, source, &PathBuf::from("/t2.flac"), 60_000, Some(2), None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        let t3 = insert_track(
+            &conn,
+            "T3",
+            Some(album),
+            artist,
+            source,
+            &PathBuf::from("/t3.flac"),
+            60_000,
+            Some(3),
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
+        let t1 = insert_track(
+            &conn,
+            "T1",
+            Some(album),
+            artist,
+            source,
+            &PathBuf::from("/t1.flac"),
+            60_000,
+            Some(1),
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
+        let t2 = insert_track(
+            &conn,
+            "T2",
+            Some(album),
+            artist,
+            source,
+            &PathBuf::from("/t2.flac"),
+            60_000,
+            Some(2),
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
 
-        let ids: Vec<i64> = get_album_tracks(&conn, album).unwrap().iter().map(|t| t.id).collect();
-        assert_eq!(ids, vec![t1, t2, t3], "tracks must be returned sorted by track_number ASC");
+        let ids: Vec<i64> = get_album_tracks(&conn, album)
+            .unwrap()
+            .iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![t1, t2, t3],
+            "tracks must be returned sorted by track_number ASC"
+        );
     }
 
     #[test]
@@ -1646,18 +1920,56 @@ mod tests {
         let conn = env.pool.get().unwrap();
         let source = insert_source(&conn, "s", SourceType::Disk, None).unwrap();
         let artist = insert_artist(&conn, "A", None).unwrap();
-        let album  = insert_album(&conn, "2xCD", artist, None).unwrap();
+        let album = insert_album(&conn, "2xCD", artist, None).unwrap();
 
         // Disc 2 track 1 inserted before Disc 1 track 5
-        let d2t1 = insert_track(&conn, "D2T1", Some(album), artist, source, &PathBuf::from("/d2t1.flac"), 60_000, Some(1), None, None, AudioFormat::Flac, 1_000_000).unwrap();
-        let d1t5 = insert_track(&conn, "D1T5", Some(album), artist, source, &PathBuf::from("/d1t5.flac"), 60_000, Some(5), None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        let d2t1 = insert_track(
+            &conn,
+            "D2T1",
+            Some(album),
+            artist,
+            source,
+            &PathBuf::from("/d2t1.flac"),
+            60_000,
+            Some(1),
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
+        let d1t5 = insert_track(
+            &conn,
+            "D1T5",
+            Some(album),
+            artist,
+            source,
+            &PathBuf::from("/d1t5.flac"),
+            60_000,
+            Some(5),
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
 
         // Set disc numbers via SQL (insert_track doesn't expose disc_number)
-        conn.execute("UPDATE tracks SET disc_number = 2 WHERE id = ?1", [d2t1]).unwrap();
-        conn.execute("UPDATE tracks SET disc_number = 1 WHERE id = ?1", [d1t5]).unwrap();
+        conn.execute("UPDATE tracks SET disc_number = 2 WHERE id = ?1", [d2t1])
+            .unwrap();
+        conn.execute("UPDATE tracks SET disc_number = 1 WHERE id = ?1", [d1t5])
+            .unwrap();
 
-        let ids: Vec<i64> = get_album_tracks(&conn, album).unwrap().iter().map(|t| t.id).collect();
-        assert_eq!(ids, vec![d1t5, d2t1], "Disc 1 Track 5 must precede Disc 2 Track 1");
+        let ids: Vec<i64> = get_album_tracks(&conn, album)
+            .unwrap()
+            .iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![d1t5, d2t1],
+            "Disc 1 Track 5 must precede Disc 2 Track 1"
+        );
     }
 
     // ====================================================================
@@ -1668,21 +1980,61 @@ mod tests {
     fn test_count_albums_genre_filter_alone() {
         let env = TestEnv::new();
         let conn = env.pool.get().unwrap();
-        let source     = insert_source(&conn, "s", SourceType::Disk, None).unwrap();
-        let artist     = insert_artist(&conn, "A", None).unwrap();
+        let source = insert_source(&conn, "s", SourceType::Disk, None).unwrap();
+        let artist = insert_artist(&conn, "A", None).unwrap();
         let genre_rock = insert_genre(&conn, "Rock").unwrap();
         let genre_jazz = insert_genre(&conn, "Jazz").unwrap();
         let album_rock = insert_album(&conn, "Rock Album", artist, None).unwrap();
         let album_jazz = insert_album(&conn, "Jazz Album", artist, None).unwrap();
 
-        let t_rock = insert_track(&conn, "R", Some(album_rock), artist, source, &PathBuf::from("/r.flac"), 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
-        let t_jazz = insert_track(&conn, "J", Some(album_jazz), artist, source, &PathBuf::from("/j.flac"), 60_000, None, None, None, AudioFormat::Flac, 1_000_000).unwrap();
+        let t_rock = insert_track(
+            &conn,
+            "R",
+            Some(album_rock),
+            artist,
+            source,
+            &PathBuf::from("/r.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
+        let t_jazz = insert_track(
+            &conn,
+            "J",
+            Some(album_jazz),
+            artist,
+            source,
+            &PathBuf::from("/j.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
         link_track_genre(&conn, t_rock, genre_rock).unwrap();
         link_track_genre(&conn, t_jazz, genre_jazz).unwrap();
 
-        assert_eq!(count_albums(&conn, None, Some(genre_rock), None).unwrap(), 1, "genre=rock must count 1");
-        assert_eq!(count_albums(&conn, None, Some(genre_jazz), None).unwrap(), 1, "genre=jazz must count 1");
-        assert_eq!(count_albums(&conn, None, None,             None).unwrap(), 2, "no filter must count all");
+        assert_eq!(
+            count_albums(&conn, None, Some(genre_rock), None).unwrap(),
+            1,
+            "genre=rock must count 1"
+        );
+        assert_eq!(
+            count_albums(&conn, None, Some(genre_jazz), None).unwrap(),
+            1,
+            "genre=jazz must count 1"
+        );
+        assert_eq!(
+            count_albums(&conn, None, None, None).unwrap(),
+            2,
+            "no filter must count all"
+        );
     }
 
     #[test]
@@ -1704,7 +2056,10 @@ mod tests {
         env.seed_basic_library(); // 1 album
         let conn = env.pool.get().unwrap();
         let albums = list_albums(&conn, None, None, None, Some(10), Some(999)).unwrap();
-        assert!(albums.is_empty(), "offset beyond total must return an empty list");
+        assert!(
+            albums.is_empty(),
+            "offset beyond total must return an empty list"
+        );
     }
 
     #[test]
@@ -1735,6 +2090,9 @@ mod tests {
 
         let p1_ids: std::collections::HashSet<i64> = page1.iter().map(|a| a.id).collect();
         let p2_ids: std::collections::HashSet<i64> = page2.iter().map(|a| a.id).collect();
-        assert!(p1_ids.is_disjoint(&p2_ids), "consecutive pages must not overlap");
+        assert!(
+            p1_ids.is_disjoint(&p2_ids),
+            "consecutive pages must not overlap"
+        );
     }
 }

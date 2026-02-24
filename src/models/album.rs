@@ -1,5 +1,6 @@
 // Album model
 
+use crate::models::track::Rating;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -10,7 +11,7 @@ pub struct Album {
     pub artist_id: i64,
     pub artist_name: String,
     pub year: Option<u16>,
-    pub rating: u8,  // 0-5
+    pub rating: Rating,
     pub artwork_path: Option<PathBuf>,
     pub online_artwork_path: Option<PathBuf>,
     pub description: Option<String>,

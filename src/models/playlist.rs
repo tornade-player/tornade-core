@@ -7,29 +7,23 @@ pub struct Playlist {
     pub id: i64,
     pub name: String,
     pub description: Option<String>,
-    pub tracks: Vec<i64>,  // Track IDs in order
-    pub created_at: String,  // ISO 8601
-    pub updated_at: String,  // ISO 8601
+    pub tracks: Vec<i64>,   // Track IDs in order
+    pub created_at: String, // ISO 8601
+    pub updated_at: String, // ISO 8601
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Queue {
-    pub tracks: Vec<i64>,        // Track IDs
+    pub tracks: Vec<i64>, // Track IDs
     pub current_index: usize,
     pub shuffle_enabled: bool,
     pub repeat_mode: RepeatMode,
-    pub shuffle_order: Vec<usize>,  // Shuffled indices
+    pub shuffle_order: Vec<usize>, // Shuffled indices
 }
 
 impl Queue {
     pub fn new() -> Self {
-        Queue {
-            tracks: Vec::new(),
-            current_index: 0,
-            shuffle_enabled: false,
-            repeat_mode: RepeatMode::Off,
-            shuffle_order: Vec::new(),
-        }
+        Self::default()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -55,9 +49,10 @@ impl Queue {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RepeatMode {
+    #[default]
     Off,
     All,
     One,
