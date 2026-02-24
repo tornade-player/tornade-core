@@ -149,20 +149,20 @@ impl PlayerService {
             // current_index before calling play(), so we must not overwrite it —
             // doing so would always snap to the *first* occurrence of a duplicated
             // track and cause the queue to loop instead of advancing.
-            if state.queue.current_track() != Some(track_id) {
-                if let Some(position) = state.queue.tracks.iter().position(|&id| id == track_id) {
-                    if state.queue.shuffle_enabled {
-                        if let Some(shuffle_idx) = state
-                            .queue
-                            .shuffle_order
-                            .iter()
-                            .position(|&idx| idx == position)
-                        {
-                            state.queue.current_index = shuffle_idx;
-                        }
-                    } else {
-                        state.queue.current_index = position;
+            if state.queue.current_track() != Some(track_id)
+                && let Some(position) = state.queue.tracks.iter().position(|&id| id == track_id)
+            {
+                if state.queue.shuffle_enabled {
+                    if let Some(shuffle_idx) = state
+                        .queue
+                        .shuffle_order
+                        .iter()
+                        .position(|&idx| idx == position)
+                    {
+                        state.queue.current_index = shuffle_idx;
                     }
+                } else {
+                    state.queue.current_index = position;
                 }
             }
         }
