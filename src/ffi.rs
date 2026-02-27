@@ -174,6 +174,7 @@ mod ffi {
         fn delete_playlist(playlist_id: i64) -> String;
         fn add_track_to_playlist(playlist_id: i64, track_id: i64) -> String;
         fn remove_track_from_playlist(playlist_id: i64, position: i64) -> String;
+        fn import_m3u_playlist(path: &str) -> String;
 
         // Playback Control Functions
         fn play_track(track_id: i64) -> String;
@@ -1072,6 +1073,33 @@ fn remove_track_from_playlist(playlist_id: i64, position: i64) -> String {
                 Err(e) => serde_json::json!({
                     "success": false,
                     "error": format!("Failed to remove track from playlist: {}", e)
+                })
+                .to_string(),
+            }
+        }
+        Err(e) => serde_json::json!({
+            "success": false,
+            "error": format!("FFI initialization failed: {}", e)
+        })
+        .to_string(),
+    }
+}
+
+fn import_m3u_playlist(path: &str) -> String {
+    // Import a .m3u file and create a new playlist from it
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let playlist_service = PlaylistService::new(pool.clone());
+            let file_path = std::path::Path::new(path);
+            match playlist_service.import_m3u(file_path) {
+                Ok(playlist) => serde_json::json!({
+                    "success": true,
+                    "data": playlist
+                })
+                .to_string(),
+                Err(e) => serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to import M3U: {}", e)
                 })
                 .to_string(),
             }
