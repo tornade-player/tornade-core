@@ -164,20 +164,6 @@ pub fn get_album(conn: &Connection, id: i64) -> Result<Option<Album>> {
     .optional()
 }
 
-/// Find any existing album with this exact title, regardless of artist.
-/// Used when no ALBUMARTIST tag is present to avoid creating a separate album
-/// entry for every featured artist in a compilation.
-/// Find an album by title, returning `(album_id, artist_id)`.
-/// Used when no ALBUMARTIST tag is present so we can detect multi-artist albums.
-pub fn find_album_by_title(conn: &Connection, title: &str) -> Result<Option<(i64, i64)>> {
-    conn.query_row(
-        "SELECT id, artist_id FROM albums WHERE title = ?1 LIMIT 1",
-        params![title],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )
-    .optional()
-}
-
 pub fn update_album_artist(conn: &Connection, album_id: i64, artist_id: i64) -> Result<()> {
     conn.execute(
         "UPDATE albums SET artist_id = ?1 WHERE id = ?2",
@@ -1158,23 +1144,6 @@ mod tests {
     }
 
     #[test]
-    fn test_find_album_by_title_returns_id_and_artist_id() {
-        let env = TestEnv::new();
-        let conn = env.pool.get().unwrap();
-        let artist_id = insert_artist(&conn, "Akhenaton", None).unwrap();
-        let album_id = insert_album(&conn, "Sol Invictus", artist_id, Some(2001)).unwrap();
-        let found = find_album_by_title(&conn, "Sol Invictus").unwrap();
-        assert_eq!(found, Some((album_id, artist_id)));
-    }
-
-    #[test]
-    fn test_find_album_by_title_returns_none_when_missing() {
-        let env = TestEnv::new();
-        let conn = env.pool.get().unwrap();
-        assert!(find_album_by_title(&conn, "Unknown").unwrap().is_none());
-    }
-
-    #[test]
     fn test_update_album_artist() {
         let env = TestEnv::new();
         let conn = env.pool.get().unwrap();
@@ -1182,8 +1151,8 @@ mod tests {
         let artist2 = insert_artist(&conn, "Various Artists", None).unwrap();
         let album_id = insert_album(&conn, "Compilation", artist1, None).unwrap();
         update_album_artist(&conn, album_id, artist2).unwrap();
-        let (_, returned_artist) = find_album_by_title(&conn, "Compilation").unwrap().unwrap();
-        assert_eq!(returned_artist, artist2);
+        let album = get_album(&conn, album_id).unwrap().unwrap();
+        assert_eq!(album.artist_id, artist2);
     }
 
     #[test]
