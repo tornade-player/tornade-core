@@ -6,7 +6,7 @@ use crate::services::error::PlayerError;
 use crate::services::events::PlaybackState;
 use crate::utils::app_state::{self, PersistedState};
 use log::{info, warn};
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source, buffer::SamplesBuffer};
+use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::BufReader;
@@ -115,22 +115,17 @@ impl PlayerService {
             }
         })?;
 
-        let decoder = Decoder::new(BufReader::new(file))
+        // Use a 1 MB read-ahead buffer — avoids hammering the NAS with tiny reads
+        // while still starting playback immediately (no full pre-decode).
+        let decoder = Decoder::new(BufReader::with_capacity(1024 * 1024, file))
             .map_err(|e| PlayerError::Audio(format!("Failed to decode audio: {e}")))?;
-
-        // Pre-decode entire file to memory so the CoreAudio callback only reads
-        // plain f32 samples from RAM — no FLAC decoding on the real-time thread.
-        let channels = decoder.channels();
-        let sample_rate = decoder.sample_rate();
-        let samples: Vec<f32> = decoder.convert_samples().collect();
-        let source = SamplesBuffer::new(channels, sample_rate, samples);
 
         // Set volume
         let volume = self.state.lock().unwrap().volume;
         sink.set_volume(volume);
 
-        // Play
-        sink.append(source);
+        // Stream directly — rodio decodes on its mixer thread, not on the CoreAudio callback.
+        sink.append(decoder.convert_samples::<f32>());
         sink.play();
 
         // Update state
@@ -291,24 +286,15 @@ impl PlayerService {
             }
         })?;
 
-        let decoder = Decoder::new(BufReader::new(file))
+        let decoder = Decoder::new(BufReader::with_capacity(1024 * 1024, file))
             .map_err(|e| PlayerError::Audio(format!("Failed to decode audio: {e}")))?;
-
-        let channels = decoder.channels();
-        let sample_rate = decoder.sample_rate();
-        // Decode only the samples after the seek position — avoids real-time decode on the CoreAudio thread.
-        let samples: Vec<f32> = decoder
-            .skip_duration(clamped_position)
-            .convert_samples()
-            .collect();
-        let source_at_position = SamplesBuffer::new(channels, sample_rate, samples);
 
         // Create new sink
         let sink = Sink::try_new(&stream_handle)
             .map_err(|e| PlayerError::Audio(format!("Failed to create sink: {e}")))?;
 
         sink.set_volume(volume);
-        sink.append(source_at_position);
+        sink.append(decoder.skip_duration(clamped_position).convert_samples::<f32>());
         sink.play();
 
         // Update state
