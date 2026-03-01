@@ -205,6 +205,9 @@ mod ffi {
         fn toggle_repeat() -> String;
         fn set_repeat_mode(mode: &str) -> String;
 
+        // Library Maintenance
+        fn clean_library() -> String;
+
         // Network / NAS helpers
         fn clear_unavailable_tracks() -> String;
 
@@ -289,6 +292,36 @@ fn get_library_stats() -> String {
             "error": format!("FFI initialization failed: {}", e)
         })
         .to_string(),
+    }
+}
+
+fn clean_library() -> String {
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let conn = match pool.get() {
+                Ok(c) => c,
+                Err(e) => {
+                    return serde_json::json!({ "success": false, "error": format!("{e}") })
+                        .to_string()
+                }
+            };
+            match crate::db::queries::clean_orphans(&conn) {
+                Ok(stats) => serde_json::json!({
+                    "success": true,
+                    "data": {
+                        "albums_deleted": stats.albums_deleted,
+                        "artists_deleted": stats.artists_deleted
+                    }
+                })
+                .to_string(),
+                Err(e) => {
+                    serde_json::json!({ "success": false, "error": format!("{e}") }).to_string()
+                }
+            }
+        }
+        Err(e) => {
+            serde_json::json!({ "success": false, "error": format!("{e}") }).to_string()
+        }
     }
 }
 

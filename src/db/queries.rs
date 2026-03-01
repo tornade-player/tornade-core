@@ -181,6 +181,40 @@ pub fn update_album_rating(conn: &Connection, album_id: i64, rating: u8) -> Resu
 }
 
 // ============================================================================
+// Library maintenance
+// ============================================================================
+
+pub struct CleanupStats {
+    pub albums_deleted: usize,
+    pub artists_deleted: usize,
+}
+
+/// Delete albums with no tracks, then artists with no tracks and no albums.
+/// Returns counts of deleted rows.
+pub fn clean_orphans(conn: &Connection) -> Result<CleanupStats> {
+    let albums_deleted = conn.execute(
+        "DELETE FROM albums WHERE id NOT IN (
+            SELECT DISTINCT album_id FROM tracks WHERE album_id IS NOT NULL
+         )",
+        [],
+    )?;
+
+    let artists_deleted = conn.execute(
+        "DELETE FROM artists WHERE id NOT IN (
+            SELECT DISTINCT artist_id FROM tracks
+         ) AND id NOT IN (
+            SELECT DISTINCT artist_id FROM albums
+         )",
+        [],
+    )?;
+
+    Ok(CleanupStats {
+        albums_deleted,
+        artists_deleted,
+    })
+}
+
+// ============================================================================
 // Genre operations
 // ============================================================================
 
