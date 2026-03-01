@@ -915,7 +915,10 @@ mod tests {
         let id1 = queries::insert_album(&conn, "Greatest Hits", artist1, None).unwrap();
         let id2 = queries::insert_album(&conn, "Greatest Hits", artist2, None).unwrap();
 
-        assert_ne!(id1, id2, "distinct artists must produce distinct album rows");
+        assert_ne!(
+            id1, id2,
+            "distinct artists must produce distinct album rows"
+        );
 
         let album1 = queries::get_album(&conn, id1).unwrap().unwrap();
         let album2 = queries::get_album(&conn, id2).unwrap().unwrap();
@@ -935,7 +938,10 @@ mod tests {
         let id1 = queries::insert_album(&conn, "Sol Invictus", artist_id, None).unwrap();
         let id2 = queries::insert_album(&conn, "Sol Invictus", artist_id, None).unwrap();
 
-        assert_eq!(id1, id2, "same title + same artist must reuse the existing album row");
+        assert_eq!(
+            id1, id2,
+            "same title + same artist must reuse the existing album row"
+        );
     }
 
     #[test]

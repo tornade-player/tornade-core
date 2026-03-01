@@ -302,7 +302,7 @@ fn clean_library() -> String {
                 Ok(c) => c,
                 Err(e) => {
                     return serde_json::json!({ "success": false, "error": format!("{e}") })
-                        .to_string()
+                        .to_string();
                 }
             };
             match crate::db::queries::clean_orphans(&conn) {
@@ -319,9 +319,7 @@ fn clean_library() -> String {
                 }
             }
         }
-        Err(e) => {
-            serde_json::json!({ "success": false, "error": format!("{e}") }).to_string()
-        }
+        Err(e) => serde_json::json!({ "success": false, "error": format!("{e}") }).to_string(),
     }
 }
 
