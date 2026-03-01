@@ -164,20 +164,6 @@ pub fn get_album(conn: &Connection, id: i64) -> Result<Option<Album>> {
     .optional()
 }
 
-/// Find any existing album with this exact title, regardless of artist.
-/// Used when no ALBUMARTIST tag is present to avoid creating a separate album
-/// entry for every featured artist in a compilation.
-/// Find an album by title, returning `(album_id, artist_id)`.
-/// Used when no ALBUMARTIST tag is present so we can detect multi-artist albums.
-pub fn find_album_by_title(conn: &Connection, title: &str) -> Result<Option<(i64, i64)>> {
-    conn.query_row(
-        "SELECT id, artist_id FROM albums WHERE title = ?1 LIMIT 1",
-        params![title],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )
-    .optional()
-}
-
 pub fn update_album_artist(conn: &Connection, album_id: i64, artist_id: i64) -> Result<()> {
     conn.execute(
         "UPDATE albums SET artist_id = ?1 WHERE id = ?2",
@@ -192,6 +178,40 @@ pub fn update_album_rating(conn: &Connection, album_id: i64, rating: u8) -> Resu
         params![rating, album_id],
     )?;
     Ok(())
+}
+
+// ============================================================================
+// Library maintenance
+// ============================================================================
+
+pub struct CleanupStats {
+    pub albums_deleted: usize,
+    pub artists_deleted: usize,
+}
+
+/// Delete albums with no tracks, then artists with no tracks and no albums.
+/// Returns counts of deleted rows.
+pub fn clean_orphans(conn: &Connection) -> Result<CleanupStats> {
+    let albums_deleted = conn.execute(
+        "DELETE FROM albums WHERE id NOT IN (
+            SELECT DISTINCT album_id FROM tracks WHERE album_id IS NOT NULL
+         )",
+        [],
+    )?;
+
+    let artists_deleted = conn.execute(
+        "DELETE FROM artists WHERE id NOT IN (
+            SELECT DISTINCT artist_id FROM tracks
+         ) AND id NOT IN (
+            SELECT DISTINCT artist_id FROM albums
+         )",
+        [],
+    )?;
+
+    Ok(CleanupStats {
+        albums_deleted,
+        artists_deleted,
+    })
 }
 
 // ============================================================================
@@ -487,12 +507,13 @@ pub fn list_albums(
 
 pub fn get_artist_albums(conn: &Connection, artist_id: i64) -> Result<Vec<Album>> {
     let mut stmt = conn.prepare(
-        "SELECT a.id, a.title, a.artist_id, ar.name as artist_name, a.year, a.rating,
+        "SELECT DISTINCT a.id, a.title, a.artist_id, ar.name as artist_name, a.year, a.rating,
                 a.artwork_path, a.online_artwork_path, a.description,
                 a.musicbrainz_id, a.label, a.country, a.barcode, a.album_type, a.release_status
          FROM albums a
          JOIN artists ar ON ar.id = a.artist_id
          WHERE a.artist_id = ?1
+            OR EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = a.id AND t.artist_id = ?1)
          ORDER BY a.year DESC, a.title",
     )?;
 
@@ -1072,6 +1093,42 @@ mod tests {
         assert_eq!(albums.len(), 2);
     }
 
+    #[test]
+    fn test_get_artist_albums_includes_track_artist() {
+        // Albums where the artist only appears as a track artist (not album artist)
+        // should also be returned — covers "feat." artists and VA-upgraded albums.
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source_id = insert_source(&conn, "Library", SourceType::Disk, None).unwrap();
+        let album_artist_id = insert_artist(&conn, "Album Artist", None).unwrap();
+        let feat_artist_id = insert_artist(&conn, "Featured Artist", None).unwrap();
+        let album_id = insert_album(&conn, "Collab Album", album_artist_id, Some(2022)).unwrap();
+        insert_track(
+            &conn,
+            "Collab Track",
+            Some(album_id),
+            feat_artist_id,
+            source_id,
+            std::path::Path::new("/music/collab.flac"),
+            180_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
+
+        // feat_artist_id is not the album artist but has a track on the album
+        let albums = get_artist_albums(&conn, feat_artist_id).unwrap();
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].title, "Collab Album");
+
+        // album_artist_id still gets the album too
+        let albums = get_artist_albums(&conn, album_artist_id).unwrap();
+        assert_eq!(albums.len(), 1);
+    }
+
     // ====================================================================
     // Album tests
     // ====================================================================
@@ -1121,23 +1178,6 @@ mod tests {
     }
 
     #[test]
-    fn test_find_album_by_title_returns_id_and_artist_id() {
-        let env = TestEnv::new();
-        let conn = env.pool.get().unwrap();
-        let artist_id = insert_artist(&conn, "Akhenaton", None).unwrap();
-        let album_id = insert_album(&conn, "Sol Invictus", artist_id, Some(2001)).unwrap();
-        let found = find_album_by_title(&conn, "Sol Invictus").unwrap();
-        assert_eq!(found, Some((album_id, artist_id)));
-    }
-
-    #[test]
-    fn test_find_album_by_title_returns_none_when_missing() {
-        let env = TestEnv::new();
-        let conn = env.pool.get().unwrap();
-        assert!(find_album_by_title(&conn, "Unknown").unwrap().is_none());
-    }
-
-    #[test]
     fn test_update_album_artist() {
         let env = TestEnv::new();
         let conn = env.pool.get().unwrap();
@@ -1145,8 +1185,8 @@ mod tests {
         let artist2 = insert_artist(&conn, "Various Artists", None).unwrap();
         let album_id = insert_album(&conn, "Compilation", artist1, None).unwrap();
         update_album_artist(&conn, album_id, artist2).unwrap();
-        let (_, returned_artist) = find_album_by_title(&conn, "Compilation").unwrap().unwrap();
-        assert_eq!(returned_artist, artist2);
+        let album = get_album(&conn, album_id).unwrap().unwrap();
+        assert_eq!(album.artist_id, artist2);
     }
 
     #[test]

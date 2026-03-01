@@ -158,6 +158,7 @@ mod ffi {
         // Artist Functions
         fn get_artists_page(offset: u32, limit: u32) -> String;
         fn get_artist_by_id(artist_id: i64) -> String;
+        fn get_artist_albums(artist_id: i64) -> String;
 
         // Genre Functions
         fn get_genres() -> String;
@@ -174,6 +175,7 @@ mod ffi {
         fn delete_playlist(playlist_id: i64) -> String;
         fn add_track_to_playlist(playlist_id: i64, track_id: i64) -> String;
         fn remove_track_from_playlist(playlist_id: i64, position: i64) -> String;
+        fn import_m3u_playlist(path: &str) -> String;
 
         // Playback Control Functions
         fn play_track(track_id: i64) -> String;
@@ -202,6 +204,9 @@ mod ffi {
         fn set_shuffle(enabled: bool) -> String;
         fn toggle_repeat() -> String;
         fn set_repeat_mode(mode: &str) -> String;
+
+        // Library Maintenance
+        fn clean_library() -> String;
 
         // Network / NAS helpers
         fn clear_unavailable_tracks() -> String;
@@ -287,6 +292,34 @@ fn get_library_stats() -> String {
             "error": format!("FFI initialization failed: {}", e)
         })
         .to_string(),
+    }
+}
+
+fn clean_library() -> String {
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let conn = match pool.get() {
+                Ok(c) => c,
+                Err(e) => {
+                    return serde_json::json!({ "success": false, "error": format!("{e}") })
+                        .to_string();
+                }
+            };
+            match crate::db::queries::clean_orphans(&conn) {
+                Ok(stats) => serde_json::json!({
+                    "success": true,
+                    "data": {
+                        "albums_deleted": stats.albums_deleted,
+                        "artists_deleted": stats.artists_deleted
+                    }
+                })
+                .to_string(),
+                Err(e) => {
+                    serde_json::json!({ "success": false, "error": format!("{e}") }).to_string()
+                }
+            }
+        }
+        Err(e) => serde_json::json!({ "success": false, "error": format!("{e}") }).to_string(),
     }
 }
 
@@ -809,6 +842,42 @@ fn get_artist_by_id(artist_id: i64) -> String {
     }
 }
 
+fn get_artist_albums(artist_id: i64) -> String {
+    // Get all albums for an artist (as album artist OR as track artist)
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let conn = match pool.get() {
+                Ok(conn) => conn,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get database connection: {}", e)
+                    })
+                    .to_string();
+                }
+            };
+
+            match crate::db::queries::get_artist_albums(&conn, artist_id) {
+                Ok(albums) => serde_json::json!({
+                    "success": true,
+                    "data": { "albums": albums }
+                })
+                .to_string(),
+                Err(e) => serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to get artist albums: {}", e)
+                })
+                .to_string(),
+            }
+        }
+        Err(e) => serde_json::json!({
+            "success": false,
+            "error": format!("Database pool error: {}", e)
+        })
+        .to_string(),
+    }
+}
+
 fn get_artists_page(offset: u32, limit: u32) -> String {
     // T018: Get paginated list of artists
     match get_or_init_pool() {
@@ -1072,6 +1141,33 @@ fn remove_track_from_playlist(playlist_id: i64, position: i64) -> String {
                 Err(e) => serde_json::json!({
                     "success": false,
                     "error": format!("Failed to remove track from playlist: {}", e)
+                })
+                .to_string(),
+            }
+        }
+        Err(e) => serde_json::json!({
+            "success": false,
+            "error": format!("FFI initialization failed: {}", e)
+        })
+        .to_string(),
+    }
+}
+
+fn import_m3u_playlist(path: &str) -> String {
+    // Import a .m3u file and create a new playlist from it
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let playlist_service = PlaylistService::new(pool.clone());
+            let file_path = std::path::Path::new(path);
+            match playlist_service.import_m3u(file_path) {
+                Ok(playlist) => serde_json::json!({
+                    "success": true,
+                    "data": playlist
+                })
+                .to_string(),
+                Err(e) => serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to import M3U: {}", e)
                 })
                 .to_string(),
             }
