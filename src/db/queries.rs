@@ -487,12 +487,13 @@ pub fn list_albums(
 
 pub fn get_artist_albums(conn: &Connection, artist_id: i64) -> Result<Vec<Album>> {
     let mut stmt = conn.prepare(
-        "SELECT a.id, a.title, a.artist_id, ar.name as artist_name, a.year, a.rating,
+        "SELECT DISTINCT a.id, a.title, a.artist_id, ar.name as artist_name, a.year, a.rating,
                 a.artwork_path, a.online_artwork_path, a.description,
                 a.musicbrainz_id, a.label, a.country, a.barcode, a.album_type, a.release_status
          FROM albums a
          JOIN artists ar ON ar.id = a.artist_id
          WHERE a.artist_id = ?1
+            OR EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = a.id AND t.artist_id = ?1)
          ORDER BY a.year DESC, a.title",
     )?;
 
@@ -1070,6 +1071,42 @@ mod tests {
         insert_album(&conn, "Album B", artist_id, Some(2021)).unwrap();
         let albums = get_artist_albums(&conn, artist_id).unwrap();
         assert_eq!(albums.len(), 2);
+    }
+
+    #[test]
+    fn test_get_artist_albums_includes_track_artist() {
+        // Albums where the artist only appears as a track artist (not album artist)
+        // should also be returned — covers "feat." artists and VA-upgraded albums.
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source_id = insert_source(&conn, "Library", SourceType::Disk, None).unwrap();
+        let album_artist_id = insert_artist(&conn, "Album Artist", None).unwrap();
+        let feat_artist_id = insert_artist(&conn, "Featured Artist", None).unwrap();
+        let album_id = insert_album(&conn, "Collab Album", album_artist_id, Some(2022)).unwrap();
+        insert_track(
+            &conn,
+            "Collab Track",
+            Some(album_id),
+            feat_artist_id,
+            source_id,
+            std::path::Path::new("/music/collab.flac"),
+            180_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
+
+        // feat_artist_id is not the album artist but has a track on the album
+        let albums = get_artist_albums(&conn, feat_artist_id).unwrap();
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].title, "Collab Album");
+
+        // album_artist_id still gets the album too
+        let albums = get_artist_albums(&conn, album_artist_id).unwrap();
+        assert_eq!(albums.len(), 1);
     }
 
     // ====================================================================
