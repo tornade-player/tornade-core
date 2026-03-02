@@ -1,6 +1,7 @@
 // Business logic and services
 
 pub mod artwork;
+pub mod background_decoder;
 pub mod duplicate;
 pub mod error;
 pub mod events;

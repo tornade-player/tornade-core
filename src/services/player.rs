@@ -2,6 +2,9 @@
 
 use crate::db::DbPool;
 use crate::models::{Queue, RepeatMode, Track};
+use crate::services::background_decoder::{
+    BackgroundDecoder, PLAY_PREBUFFER_SAMPLES, SEEK_PREBUFFER_SAMPLES,
+};
 use crate::services::error::PlayerError;
 use crate::services::events::PlaybackState;
 use crate::utils::app_state::{self, PersistedState};
@@ -115,8 +118,7 @@ impl PlayerService {
             }
         })?;
 
-        // Use a 1 MB read-ahead buffer — avoids hammering the NAS with tiny reads
-        // while still starting playback immediately (no full pre-decode).
+        // 1 MB read-ahead buffer reduces file-system round-trips on NAS mounts.
         let decoder = Decoder::new(BufReader::with_capacity(1024 * 1024, file))
             .map_err(|e| PlayerError::Audio(format!("Failed to decode audio: {e}")))?;
 
@@ -124,8 +126,14 @@ impl PlayerService {
         let volume = self.state.lock().unwrap().volume;
         sink.set_volume(volume);
 
-        // Stream directly — rodio decodes on its mixer thread, not on the CoreAudio callback.
-        sink.append(decoder.convert_samples::<f32>());
+        // Wrap the decoder in a background thread so FLAC/MP3 decompression never
+        // blocks the CoreAudio render callback.  Pre-buffer ~0.5 s before handing
+        // off to rodio: this absorbs the CPU pressure caused by album-navigation
+        // (artwork loads, DB queries) that happens concurrently with track-switching,
+        // preventing "HALC_ProxyIOContext: skipping cycle due to overload" dropouts.
+        let mut bg = BackgroundDecoder::new(decoder.convert_samples::<f32>());
+        bg.prebuffer(PLAY_PREBUFFER_SAMPLES);
+        sink.append(bg);
         sink.play();
 
         // Update state
@@ -294,7 +302,12 @@ impl PlayerService {
             .map_err(|e| PlayerError::Audio(format!("Failed to create sink: {e}")))?;
 
         sink.set_volume(volume);
-        sink.append(decoder.skip_duration(clamped_position).convert_samples::<f32>());
+        // Use a smaller pre-buffer after seek (seek is user-triggered, CPU
+        // contention is lower and we want minimal added latency — ~46 ms).
+        let mut bg =
+            BackgroundDecoder::new(decoder.skip_duration(clamped_position).convert_samples::<f32>());
+        bg.prebuffer(SEEK_PREBUFFER_SAMPLES);
+        sink.append(bg);
         sink.play();
 
         // Update state
