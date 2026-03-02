@@ -11,11 +11,11 @@ use std::time::Duration;
 /// Number of samples to pre-decode **synchronously** before handing the source to
 /// the sink when starting a new track.
 ///
-/// At 44 100 Hz stereo this equals ~0.5 s.  It guarantees the first batch of
+/// At 44 100 Hz stereo this equals ~2 s.  It guarantees the first batch of
 /// CoreAudio render callbacks always find data in the buffer, absorbing the CPU
 /// pressure caused by album-artwork fetching and database queries that happen
-/// concurrently with track-switching.
-pub const PLAY_PREBUFFER_SAMPLES: usize = 44_100;
+/// concurrently with track-switching, as well as brief OS scheduler starvation.
+pub const PLAY_PREBUFFER_SAMPLES: usize = 176_400; // 2 s at 44.1 kHz stereo
 
 /// Smaller pre-buffer used after a seek (the seek itself is user-triggered, so
 /// CPU contention is lower and we want minimal added latency).
@@ -25,17 +25,16 @@ pub const SEEK_PREBUFFER_SAMPLES: usize = 4_096;
 
 /// Samples per chunk sent from the decoder thread to the audio thread.
 ///
-/// 4 096 samples ≈ 46 ms at 44.1 kHz stereo.  Small enough for the sink to stop
-/// the decoder promptly when a track changes, large enough to keep channel
-/// overhead negligible.
-const CHUNK_SIZE: usize = 4_096;
+/// 16 384 samples ≈ 186 ms at 44.1 kHz stereo.  Larger chunks mean fewer
+/// channel operations per second, reducing synchronisation overhead.
+const CHUNK_SIZE: usize = 16_384;
 
 /// Maximum number of chunks buffered in the channel at once.
 ///
-/// 2 048 chunks × 4 096 samples = ~8 M samples ≈ 93 s at 44.1 kHz stereo.
+/// 512 chunks × 16 384 samples = ~8 M samples ≈ 93 s at 44.1 kHz stereo.
 /// The `sync_channel` back-pressure naturally throttles the decoder thread so it
 /// stays at most ~93 s ahead, preventing runaway memory use on long tracks.
-const CHANNEL_CAPACITY: usize = 2_048;
+const CHANNEL_CAPACITY: usize = 512;
 
 /// Wraps a rodio [`Source`] and moves decoding to a dedicated OS thread.
 ///
@@ -50,27 +49,34 @@ const CHANNEL_CAPACITY: usize = 2_048;
 /// …and skips the audio cycle, producing an audible dropout.
 ///
 /// `BackgroundDecoder` moves the heavy work to a thread named `"tornade-decoder"`.
-/// The render callback only calls `VecDeque::pop_front()`, which is O(1) and
-/// allocation-free — safe for a real-time audio context.
+/// The render callback only reads from a pre-filled queue of `Vec<f32>` chunks —
+/// no decoding, no disk I/O, no memcpy (chunks are *moved* from the channel,
+/// not copied).
 ///
 /// ## Usage
 ///
 /// ```no_run
 /// # use tornade_core::services::background_decoder::{BackgroundDecoder, PLAY_PREBUFFER_SAMPLES};
-/// // decoder: rodio::Decoder<_>, sink: rodio::Sink
 /// # fn example(decoder: rodio::Decoder<std::io::BufReader<std::fs::File>>, sink: rodio::Sink) {
 /// use rodio::Source;
 /// let mut bg = BackgroundDecoder::new(decoder.convert_samples::<f32>());
-/// bg.prebuffer(PLAY_PREBUFFER_SAMPLES); // fill ~0.5 s before first callback
+/// bg.prebuffer(PLAY_PREBUFFER_SAMPLES); // fill ~2 s before first callback
 /// sink.append(bg);
 /// # }
 /// ```
 pub struct BackgroundDecoder {
-    /// Receives decoded sample chunks from the background thread.
+    /// Receives fully-decoded sample chunks from the background thread.
     receiver: Receiver<Vec<f32>>,
-    /// Local sample queue served directly to the CoreAudio render callback.
-    /// Refilled from `receiver` whenever it drains.
-    pending: VecDeque<f32>,
+
+    /// Queue of received chunks waiting to be served to the audio thread.
+    ///
+    /// Each `Vec<f32>` is *moved* from the channel — no copying.
+    /// `VecDeque::pop_front` is O(1); `push_back` is amortised O(1).
+    chunk_queue: VecDeque<Vec<f32>>,
+
+    /// Index of the next sample to serve within `chunk_queue.front()`.
+    cursor: usize,
+
     channels: u16,
     sample_rate: u32,
     total_duration: Option<Duration>,
@@ -101,28 +107,54 @@ impl BackgroundDecoder {
 
         Self {
             receiver: rx,
-            pending: VecDeque::new(),
+            chunk_queue: VecDeque::new(),
+            cursor: 0,
             channels,
             sample_rate,
             total_duration,
         }
     }
 
-    /// Pre-fills the local sample buffer by blocking until at least
-    /// `target_samples` are available.
+    /// Pre-fills the chunk queue by blocking until at least `target_samples`
+    /// are available.
     ///
     /// Must be called before handing `self` to the sink.  Without this, the OS
     /// scheduler might not give the decoder thread any time to run before the
     /// first CoreAudio render callback fires, causing an immediate underrun.
     pub fn prebuffer(&mut self, target_samples: usize) {
-        while self.pending.len() < target_samples {
+        // Count samples already queued (minus already-consumed cursor offset in
+        // the front chunk).
+        let already_queued: usize = self
+            .chunk_queue
+            .iter()
+            .enumerate()
+            .map(|(i, c)| if i == 0 { c.len().saturating_sub(self.cursor) } else { c.len() })
+            .sum();
+
+        let mut total = already_queued;
+
+        while total < target_samples {
             match self.receiver.recv() {
-                Ok(chunk) => self.pending.extend(chunk),
+                Ok(chunk) => {
+                    total += chunk.len();
+                    // Chunks are moved into the queue — no copy.
+                    self.chunk_queue.push_back(chunk);
+                }
                 // Short track: decoder finished before we reached the target.
                 // That is fine — we will serve whatever we have.
                 Err(_) => break,
             }
         }
+    }
+
+    /// Number of samples currently queued (available without blocking).
+    #[cfg(test)]
+    pub fn buffered_samples(&self) -> usize {
+        self.chunk_queue
+            .iter()
+            .enumerate()
+            .map(|(i, c)| if i == 0 { c.len().saturating_sub(self.cursor) } else { c.len() })
+            .sum()
     }
 }
 
@@ -160,7 +192,7 @@ where
     if !chunk.is_empty() {
         let _ = tx.send(chunk); // ignore error — receiver may already be gone
     }
-    // `tx` is dropped here → once `rx` drains it, `try_recv` returns
+    // `tx` is dropped here → once `rx` drains all chunks, `try_recv` returns
     // `TryRecvError::Disconnected`, which `Iterator::next` maps to `None`.
 }
 
@@ -168,36 +200,49 @@ impl Iterator for BackgroundDecoder {
     type Item = f32;
 
     fn next(&mut self) -> Option<f32> {
-        // Fast path: serve from the local buffer without touching the channel.
-        // This is the common case and runs entirely in the calling thread
-        // (the CoreAudio render callback) with no synchronisation overhead.
-        if let Some(sample) = self.pending.pop_front() {
-            return Some(sample);
-        }
-
-        // Slow path: local buffer is empty — try to refill from the channel.
-        match self.receiver.try_recv() {
-            Ok(chunk) => {
-                self.pending.extend(chunk);
-                self.pending.pop_front()
+        loop {
+            // Fast path: serve the next sample from the front chunk.
+            // Just an array index + increment — O(1), no allocation, cache-friendly.
+            if let Some(front) = self.chunk_queue.front() {
+                if self.cursor < front.len() {
+                    let sample = front[self.cursor];
+                    self.cursor += 1;
+                    return Some(sample);
+                }
+                // Front chunk fully consumed — drop it and reset cursor.
+                // Vec::drop frees its allocation; this is the only point where
+                // memory is freed on the audio thread (~every 186 ms at 44.1 kHz).
+                self.chunk_queue.pop_front();
+                self.cursor = 0;
+                // Fall through to try the new front chunk in the next iteration.
+                continue;
             }
 
-            // Decoder thread is still running but has not sent the next chunk
-            // yet.  Return a silent sample rather than blocking the CoreAudio
-            // render callback (blocking would cause the same "skipping cycle"
-            // we are trying to prevent).
-            //
-            // With proper prebuffering and a 93 s channel this should be
-            // extremely rare — if it happens at all it means the decoder
-            // thread was starved for an extended period.
-            Err(mpsc::TryRecvError::Empty) => {
-                log::warn!("BackgroundDecoder: audio buffer underrun — decoder thread falling behind");
-                Some(0.0)
-            }
+            // Chunk queue empty — try to refill from the channel (non-blocking).
+            match self.receiver.try_recv() {
+                Ok(chunk) => {
+                    // Chunk is moved in — zero copy.
+                    self.chunk_queue.push_back(chunk);
+                    // Loop back to serve from the new chunk.
+                }
 
-            // Sender was dropped: the decoder thread finished and all chunks
-            // have been consumed.  Signal end-of-stream to rodio.
-            Err(mpsc::TryRecvError::Disconnected) => None,
+                // Decoder thread is still running but hasn't sent the next chunk
+                // yet.  Return a silent sample rather than blocking the CoreAudio
+                // render callback (blocking would cause the same "skipping cycle"
+                // we are trying to prevent).
+                //
+                // With a 2 s pre-buffer and a 93 s channel this should never
+                // happen under normal load.  If it does, it signals that the
+                // decoder thread was starved by the OS for an extended period.
+                Err(mpsc::TryRecvError::Empty) => {
+                    log::warn!("BackgroundDecoder: audio buffer underrun — decoder thread falling behind");
+                    return Some(0.0);
+                }
+
+                // Sender was dropped: the decoder thread finished and all chunks
+                // have been consumed.  Signal end-of-stream to rodio.
+                Err(mpsc::TryRecvError::Disconnected) => return None,
+            }
         }
     }
 }
