@@ -2,13 +2,11 @@
 
 use crate::db::DbPool;
 use crate::models::{Queue, RepeatMode, Track};
-use crate::services::background_decoder::{
-    BackgroundDecoder, PLAY_PREBUFFER_SAMPLES, SEEK_PREBUFFER_SAMPLES,
-};
 use crate::services::error::PlayerError;
 use crate::services::events::PlaybackState;
 use crate::utils::app_state::{self, PersistedState};
 use log::{info, warn};
+use rodio::buffer::SamplesBuffer;
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -107,20 +105,28 @@ impl PlayerService {
         let sink = Sink::try_new(&stream_handle)
             .map_err(|e| PlayerError::Audio(format!("Failed to create sink: {e}")))?;
 
-        // Read the entire file into memory in one shot.  This is the critical
-        // fix for "HALC_ProxyIOContext: skipping cycle due to overload" dropouts:
+        // Full pre-decode into a contiguous Vec<f32> served via SamplesBuffer.
         //
-        //   1. Eliminates ALL disk/NAS I/O during decode — the decoder works
-        //      from a Cursor<Vec<u8>> backed by RAM, not a File descriptor.
-        //   2. On NAS mounts a single large read is much faster than hundreds
-        //      of small BufReader round-trips (~50 MB FLAC → one read vs. 50+).
-        //   3. The BackgroundDecoder thread decodes from RAM at 20–50× real-time,
-        //      filling the 93 s channel buffer within a few seconds.
-        //   4. The CoreAudio render callback only reads from pre-filled chunks —
-        //      no I/O, no decompression, ever.
+        // This is the definitive fix for "HALC_ProxyIOContext: skipping cycle
+        // due to overload".  The CoreAudio render callback does ZERO work:
         //
-        // Memory cost: ~30–50 MB per track for compressed data (freed when the
-        // BackgroundDecoder's decoder thread finishes or the track changes).
+        //   • No disk / NAS I/O  (file loaded into RAM by std::fs::read)
+        //   • No decompression   (all samples pre-decoded by .collect())
+        //   • No channel / sync  (SamplesBuffer is a plain Vec + index)
+        //   • No memory alloc    (Vec is pre-allocated, never grows)
+        //   • No memory free     (Vec lives until track changes — on the
+        //                         calling thread, not the audio thread)
+        //
+        // SamplesBuffer::next() is a single array-index + increment per sample.
+        //
+        // Previously tried: BackgroundDecoder with a sync_channel of chunks.
+        // Failed because Vec::drop() on consumed chunks called free() on the
+        // CoreAudio real-time thread, which can block on the allocator lock
+        // under high system load (load avg 22+).
+        //
+        // Memory: ~100 MB per 5-min track (decoded f32 PCM) + ~30–50 MB
+        // transient for the compressed file data (freed after collect()).
+        // Decode time from RAM: ~0.3–0.5 s (runs on Task.detached, not UI).
         let file_data = std::fs::read(&track.file_path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 PlayerError::FileNotFound(track.file_path.to_string_lossy().into_owned())
@@ -131,17 +137,18 @@ impl PlayerService {
 
         let decoder = Decoder::new(std::io::Cursor::new(file_data))
             .map_err(|e| PlayerError::Audio(format!("Failed to decode audio: {e}")))?;
+        let channels = decoder.channels();
+        let sample_rate = decoder.sample_rate();
+
+        // Decode every sample into a contiguous Vec<f32>.  The compressed
+        // file data (Cursor<Vec<u8>>) is freed when collect() finishes.
+        let samples: Vec<f32> = decoder.convert_samples::<f32>().collect();
 
         // Set volume
         let volume = self.state.lock().unwrap().volume;
         sink.set_volume(volume);
 
-        // Decode in a background thread so FLAC/MP3 decompression never blocks
-        // the CoreAudio render callback.  Pre-buffer ~2 s before handing off to
-        // rodio — since the file is fully in RAM, this takes only ~20–100 ms.
-        let mut bg = BackgroundDecoder::new(decoder.convert_samples::<f32>());
-        bg.prebuffer(PLAY_PREBUFFER_SAMPLES);
-        sink.append(bg);
+        sink.append(SamplesBuffer::new(channels, sample_rate, samples));
         sink.play();
 
         // Update state
@@ -293,8 +300,7 @@ impl PlayerService {
         // Get stream handle
         let stream_handle = self.ensure_audio_stream()?;
 
-        // Read entire file into memory (same rationale as play() — zero I/O
-        // during decode prevents CoreAudio render-callback overload).
+        // Full pre-decode (same rationale as play() — zero work on audio thread).
         let file_data = std::fs::read(&track.file_path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 PlayerError::FileNotFound(track.file_path.to_string_lossy().into_owned())
@@ -305,19 +311,19 @@ impl PlayerService {
 
         let decoder = Decoder::new(std::io::Cursor::new(file_data))
             .map_err(|e| PlayerError::Audio(format!("Failed to decode audio: {e}")))?;
+        let channels = decoder.channels();
+        let sample_rate = decoder.sample_rate();
+        let samples: Vec<f32> = decoder
+            .skip_duration(clamped_position)
+            .convert_samples::<f32>()
+            .collect();
 
         // Create new sink
         let sink = Sink::try_new(&stream_handle)
             .map_err(|e| PlayerError::Audio(format!("Failed to create sink: {e}")))?;
 
         sink.set_volume(volume);
-        // Smaller pre-buffer after seek: user-triggered so CPU contention is
-        // lower, and we want minimal added latency (~46 ms).  File is already
-        // in RAM so skip_duration + prebuffer completes in milliseconds.
-        let mut bg =
-            BackgroundDecoder::new(decoder.skip_duration(clamped_position).convert_samples::<f32>());
-        bg.prebuffer(SEEK_PREBUFFER_SAMPLES);
-        sink.append(bg);
+        sink.append(SamplesBuffer::new(channels, sample_rate, samples));
         sink.play();
 
         // Update state
