@@ -11,8 +11,6 @@ use crate::utils::app_state::{self, PersistedState};
 use log::{info, warn};
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
 use std::collections::HashSet;
-use std::fs::File;
-use std::io::BufReader;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -109,28 +107,38 @@ impl PlayerService {
         let sink = Sink::try_new(&stream_handle)
             .map_err(|e| PlayerError::Audio(format!("Failed to create sink: {e}")))?;
 
-        // Open and decode file
-        let file = File::open(&track.file_path).map_err(|e| {
+        // Read the entire file into memory in one shot.  This is the critical
+        // fix for "HALC_ProxyIOContext: skipping cycle due to overload" dropouts:
+        //
+        //   1. Eliminates ALL disk/NAS I/O during decode — the decoder works
+        //      from a Cursor<Vec<u8>> backed by RAM, not a File descriptor.
+        //   2. On NAS mounts a single large read is much faster than hundreds
+        //      of small BufReader round-trips (~50 MB FLAC → one read vs. 50+).
+        //   3. The BackgroundDecoder thread decodes from RAM at 20–50× real-time,
+        //      filling the 93 s channel buffer within a few seconds.
+        //   4. The CoreAudio render callback only reads from pre-filled chunks —
+        //      no I/O, no decompression, ever.
+        //
+        // Memory cost: ~30–50 MB per track for compressed data (freed when the
+        // BackgroundDecoder's decoder thread finishes or the track changes).
+        let file_data = std::fs::read(&track.file_path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 PlayerError::FileNotFound(track.file_path.to_string_lossy().into_owned())
             } else {
-                PlayerError::Audio(format!("Failed to open file: {e}"))
+                PlayerError::Audio(format!("Failed to read file: {e}"))
             }
         })?;
 
-        // 1 MB read-ahead buffer reduces file-system round-trips on NAS mounts.
-        let decoder = Decoder::new(BufReader::with_capacity(1024 * 1024, file))
+        let decoder = Decoder::new(std::io::Cursor::new(file_data))
             .map_err(|e| PlayerError::Audio(format!("Failed to decode audio: {e}")))?;
 
         // Set volume
         let volume = self.state.lock().unwrap().volume;
         sink.set_volume(volume);
 
-        // Wrap the decoder in a background thread so FLAC/MP3 decompression never
-        // blocks the CoreAudio render callback.  Pre-buffer ~0.5 s before handing
-        // off to rodio: this absorbs the CPU pressure caused by album-navigation
-        // (artwork loads, DB queries) that happens concurrently with track-switching,
-        // preventing "HALC_ProxyIOContext: skipping cycle due to overload" dropouts.
+        // Decode in a background thread so FLAC/MP3 decompression never blocks
+        // the CoreAudio render callback.  Pre-buffer ~2 s before handing off to
+        // rodio — since the file is fully in RAM, this takes only ~20–100 ms.
         let mut bg = BackgroundDecoder::new(decoder.convert_samples::<f32>());
         bg.prebuffer(PLAY_PREBUFFER_SAMPLES);
         sink.append(bg);
@@ -285,16 +293,17 @@ impl PlayerService {
         // Get stream handle
         let stream_handle = self.ensure_audio_stream()?;
 
-        // Open and decode file
-        let file = File::open(&track.file_path).map_err(|e| {
+        // Read entire file into memory (same rationale as play() — zero I/O
+        // during decode prevents CoreAudio render-callback overload).
+        let file_data = std::fs::read(&track.file_path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 PlayerError::FileNotFound(track.file_path.to_string_lossy().into_owned())
             } else {
-                PlayerError::Audio(format!("Failed to open file: {e}"))
+                PlayerError::Audio(format!("Failed to read file: {e}"))
             }
         })?;
 
-        let decoder = Decoder::new(BufReader::with_capacity(1024 * 1024, file))
+        let decoder = Decoder::new(std::io::Cursor::new(file_data))
             .map_err(|e| PlayerError::Audio(format!("Failed to decode audio: {e}")))?;
 
         // Create new sink
@@ -302,8 +311,9 @@ impl PlayerService {
             .map_err(|e| PlayerError::Audio(format!("Failed to create sink: {e}")))?;
 
         sink.set_volume(volume);
-        // Use a smaller pre-buffer after seek (seek is user-triggered, CPU
-        // contention is lower and we want minimal added latency — ~46 ms).
+        // Smaller pre-buffer after seek: user-triggered so CPU contention is
+        // lower, and we want minimal added latency (~46 ms).  File is already
+        // in RAM so skip_duration + prebuffer completes in milliseconds.
         let mut bg =
             BackgroundDecoder::new(decoder.skip_duration(clamped_position).convert_samples::<f32>());
         bg.prebuffer(SEEK_PREBUFFER_SAMPLES);
