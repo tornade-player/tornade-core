@@ -75,6 +75,10 @@ tornade-core/
 - [tornade-tui](https://github.com/tornade-player/tornade-tui) — Terminal UI frontend (MIT)
 - [tornade-gui](https://github.com/tornade-player/tornade-gui) — Native GUI apps for macOS, Windows, Linux (proprietary)
 
+## Architecture
+
+- [docs/audio-architecture.md](docs/audio-architecture.md) — Why the audio engine is built the way it is: CoreAudio buffer sizing, real-time callback constraints, NAS latency handling, and sample rate strategy.
+
 ## Contributing
 
 Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
