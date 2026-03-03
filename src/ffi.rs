@@ -15,8 +15,8 @@ static DB_POOL: Lazy<Mutex<Option<db::DbPool>>> = Lazy::new(|| Mutex::new(None))
 
 /// Bounds the unsafe surface required to make `PlayerService` usable across threads.
 ///
-/// `rodio`'s `OutputStream` / `Sink` are `!Send + !Sync`, so they cannot be placed in a
-/// `Lazy<Mutex<…>>` directly. `FfiPlayerService` asserts the safety invariant that all
+/// `AudioEngine` owns a `cpal::Stream` which is `!Send` on macOS (CoreAudio
+/// requirement). `FfiPlayerService` asserts the safety invariant that all
 /// access is serialized by `PLAYER_SERVICE` Mutex, so no concurrent `&PlayerService`
 /// reference is ever exposed.
 mod ffi_bridge {
@@ -27,8 +27,8 @@ mod ffi_bridge {
     /// # Safety
     ///
     /// All access to `FfiPlayerService` is serialized through `PLAYER_SERVICE` Mutex.
-    /// `OutputStream` and `Sink` (rodio internals held by `PlayerService`) never cross thread
-    /// boundaries directly — they are always accessed while holding the `PLAYER_SERVICE` lock.
+    /// `AudioEngine` (holding the cpal Stream) never crosses thread boundaries
+    /// directly — it is always accessed while holding the `PLAYER_SERVICE` lock.
     unsafe impl Send for FfiPlayerService {}
 
     /// # Safety
@@ -1461,6 +1461,7 @@ fn get_player_state() -> String {
                 let shuffle = player_service.is_shuffle_enabled();
                 let repeat_mode = player_service.get_repeat_mode();
                 let skipped_track_ids = player_service.get_skipped_track_ids();
+                let is_loading = player_service.is_loading();
 
                 // Convert PlaybackState to is_playing boolean
                 let is_playing = matches!(playback_state, PlaybackState::Playing);
@@ -1482,7 +1483,8 @@ fn get_player_state() -> String {
                         "volume": f64::from(volume),  // Cast f32 to f64 for JSON
                         "shuffle": shuffle,
                         "repeat_mode": repeat_mode,
-                        "skipped_track_ids": skipped_track_ids
+                        "skipped_track_ids": skipped_track_ids,
+                        "is_loading": is_loading
                     }
                 });
                 log::debug!("get_player_state JSON: {json_result}");

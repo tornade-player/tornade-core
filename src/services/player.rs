@@ -1,14 +1,17 @@
-// Audio playback service using rodio
+// Audio playback service using custom AudioEngine (cpal direct) for decoding
+// and lock-free real-time rendering. rodio is used only for decoding.
 
 use crate::db::DbPool;
 use crate::models::{Queue, RepeatMode, Track};
+use crate::services::audio_engine::AudioEngine;
 use crate::services::error::PlayerError;
 use crate::services::events::PlaybackState;
 use crate::utils::app_state::{self, PersistedState};
 use log::{info, warn};
-use rodio::buffer::SamplesBuffer;
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
+use rodio::source::UniformSourceIterator;
+use rodio::{Decoder, Source};
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -17,8 +20,8 @@ type Result<T> = std::result::Result<T, PlayerError>;
 pub struct PlayerService {
     pool: DbPool,
     state: Arc<Mutex<PlayerState>>,
-    audio: Arc<Mutex<Option<(OutputStream, OutputStreamHandle)>>>,
-    sink: Arc<Mutex<Option<Sink>>>,
+    engine: Arc<Mutex<Option<AudioEngine>>>,
+    loading: Arc<AtomicBool>,
 }
 
 struct PlayerState {
@@ -61,35 +64,45 @@ impl PlayerService {
                 paused_at: None,
                 skipped_track_ids: HashSet::new(),
             })),
-            audio: Arc::new(Mutex::new(None)),
-            sink: Arc::new(Mutex::new(None)),
+            engine: Arc::new(Mutex::new(None)),
+            loading: Arc::new(AtomicBool::new(false)),
         })
     }
 
-    /// Initialize audio stream (lazy initialization)
-    fn ensure_audio_stream(&self) -> Result<OutputStreamHandle> {
-        let mut audio = self.audio.lock().unwrap();
-
-        if audio.is_none() {
-            let (stream, handle) = OutputStream::try_default()
-                .map_err(|e| PlayerError::Audio(format!("Failed to create audio stream: {e}")))?;
-            *audio = Some((stream, handle.clone())); // clone: store handle and return it
-            Ok(handle)
-        } else {
-            Ok(audio.as_ref().unwrap().1.clone()) // clone: escape MutexGuard scope
+    /// Initialize the audio engine (lazy initialization).
+    fn ensure_engine(&self) -> Result<()> {
+        let mut engine = self.engine.lock().unwrap();
+        if engine.is_none() {
+            *engine = Some(
+                AudioEngine::new()
+                    .map_err(|e| PlayerError::Audio(format!("Failed to create audio engine: {e}")))?,
+            );
         }
+        Ok(())
+    }
+
+    /// Lock the engine and run a closure with a reference to AudioControls.
+    fn with_controls<T>(&self, f: impl FnOnce(&crate::services::audio_engine::AudioControls) -> T) -> Result<T> {
+        let engine = self.engine.lock().unwrap();
+        let eng = engine
+            .as_ref()
+            .ok_or_else(|| PlayerError::Audio("Audio engine not initialized".into()))?;
+        Ok(f(eng.controls()))
     }
 
     // ========================================================================
     // Playback Control
     // ========================================================================
 
-    /// Start playing a track
+    /// Start playing a track.
+    ///
+    /// The file read happens in a background thread so NAS latency doesn't
+    /// block the UI. The track state is updated immediately; `playback_start_time`
+    /// is set when audio actually starts.
     pub fn play(&self, track_id: i64) -> Result<()> {
         info!("Playing track: {track_id}");
 
-        // Ensure audio stream is initialized
-        let stream_handle = self.ensure_audio_stream()?;
+        self.ensure_engine()?;
 
         // Get track from database
         let conn = self
@@ -101,72 +114,34 @@ impl PlayerService {
             .map_err(|e| PlayerError::Audio(format!("Database error: {e}")))?
             .ok_or(PlayerError::TrackNotFound(track_id))?;
 
-        // Create new sink
-        let sink = Sink::try_new(&stream_handle)
-            .map_err(|e| PlayerError::Audio(format!("Failed to create sink: {e}")))?;
+        // Quick existence check (stat syscall, no data read — fast even on NAS)
+        if !track.file_path.exists() {
+            return Err(PlayerError::FileNotFound(
+                track.file_path.to_string_lossy().into_owned(),
+            ));
+        }
 
-        // Full pre-decode into a contiguous Vec<f32> served via SamplesBuffer.
-        //
-        // This is the definitive fix for "HALC_ProxyIOContext: skipping cycle
-        // due to overload".  The CoreAudio render callback does ZERO work:
-        //
-        //   • No disk / NAS I/O  (file loaded into RAM by std::fs::read)
-        //   • No decompression   (all samples pre-decoded by .collect())
-        //   • No channel / sync  (SamplesBuffer is a plain Vec + index)
-        //   • No memory alloc    (Vec is pre-allocated, never grows)
-        //   • No memory free     (Vec lives until track changes — on the
-        //                         calling thread, not the audio thread)
-        //
-        // SamplesBuffer::next() is a single array-index + increment per sample.
-        //
-        // Previously tried: BackgroundDecoder with a sync_channel of chunks.
-        // Failed because Vec::drop() on consumed chunks called free() on the
-        // CoreAudio real-time thread, which can block on the allocator lock
-        // under high system load (load avg 22+).
-        //
-        // Memory: ~100 MB per 5-min track (decoded f32 PCM) + ~30–50 MB
-        // transient for the compressed file data (freed after collect()).
-        // Decode time from RAM: ~0.3–0.5 s (runs on Task.detached, not UI).
-        let file_data = std::fs::read(&track.file_path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                PlayerError::FileNotFound(track.file_path.to_string_lossy().into_owned())
-            } else {
-                PlayerError::Audio(format!("Failed to read file: {e}"))
-            }
-        })?;
-
-        let decoder = Decoder::new(std::io::Cursor::new(file_data))
-            .map_err(|e| PlayerError::Audio(format!("Failed to decode audio: {e}")))?;
-        let channels = decoder.channels();
-        let sample_rate = decoder.sample_rate();
-
-        // Decode every sample into a contiguous Vec<f32>.  The compressed
-        // file data (Cursor<Vec<u8>>) is freed when collect() finishes.
-        let samples: Vec<f32> = decoder.convert_samples::<f32>().collect();
-
-        // Set volume
+        // Grab what we need for the background thread before updating state
         let volume = self.state.lock().unwrap().volume;
-        sink.set_volume(volume);
+        let (dev_ch, dev_sr) = self.with_controls(|c| c.device_config())?;
+        let bg_handle = self.with_controls(|c| c.bg_handle())?;
+        let bg_state = Arc::clone(&self.state);
+        let bg_loading = Arc::clone(&self.loading);
+        let file_path = track.file_path.clone();
 
-        sink.append(SamplesBuffer::new(channels, sample_rate, samples));
-        sink.play();
+        self.loading.store(true, Relaxed);
 
-        // Update state
+        // Update state immediately so the UI reflects the new track
         {
             let mut state = self.state.lock().unwrap();
             state.current_track = Some(track);
             state.playback_state = PlaybackState::Playing;
+            // Will be set accurately when audio actually starts
             state.playback_start_time = Some(Instant::now());
             state.paused_at = None;
 
-            // Track is now accessible — remove from unavailable set
             state.skipped_track_ids.remove(&track_id);
 
-            // Update current_index only when the caller has NOT already positioned
-            // it on this track. next() / previous() / jump_to_index() set
-            // current_index before calling play(), so we must not overwrite it —
-            // doing so would always snap to the *first* occurrence of a duplicated
-            // track and cause the queue to loop instead of advancing.
             if state.queue.current_track() != Some(track_id)
                 && let Some(position) = state.queue.tracks.iter().position(|&id| id == track_id)
             {
@@ -185,64 +160,86 @@ impl PlayerService {
             }
         }
 
-        // Store sink
-        {
-            let mut sink_lock = self.sink.lock().unwrap();
-            *sink_lock = Some(sink);
-        }
+        // Background: read file from NAS, decode, send to audio callback
+        std::thread::spawn(move || {
+            let file_data = match std::fs::read(&file_path) {
+                Ok(data) => data,
+                Err(e) => {
+                    warn!("Background file read failed: {e}");
+                    bg_loading.store(false, Relaxed);
+                    let mut state = bg_state.lock().unwrap();
+                    state.playback_state = PlaybackState::Stopped;
+                    state.current_track = None;
+                    return;
+                }
+            };
+
+            let decoder = match Decoder::new(std::io::Cursor::new(file_data)) {
+                Ok(d) => d,
+                Err(e) => {
+                    warn!("Background decode failed: {e}");
+                    bg_loading.store(false, Relaxed);
+                    let mut state = bg_state.lock().unwrap();
+                    state.playback_state = PlaybackState::Stopped;
+                    state.current_track = None;
+                    return;
+                }
+            };
+
+            let source: Box<dyn Iterator<Item = f32> + Send> = Box::new(
+                UniformSourceIterator::<_, f32>::new(
+                    decoder.convert_samples::<f32>(),
+                    dev_ch,
+                    dev_sr,
+                ),
+            );
+
+            // Send source to the audio callback
+            bg_handle.set_volume(volume);
+            bg_handle.play_source(source);
+            bg_loading.store(false, Relaxed);
+
+            // Set playback_start_time NOW — when audio actually begins
+            bg_state.lock().unwrap().playback_start_time = Some(Instant::now());
+        });
 
         Ok(())
     }
 
     /// Pause playback
     pub fn pause(&self) -> Result<()> {
-        let sink_lock = self.sink.lock().unwrap();
-        if let Some(ref sink) = *sink_lock {
-            sink.pause();
+        self.with_controls(|c| c.set_paused(true))?;
 
-            // Save current position when pausing
-            let mut state = self.state.lock().unwrap();
-            if let Some(start_time) = state.playback_start_time {
-                state.paused_at = Some(start_time.elapsed());
-            }
-            state.playback_state = PlaybackState::Paused;
-
-            info!("Playback paused");
-            Ok(())
-        } else {
-            Err(PlayerError::EmptyQueue)
+        let mut state = self.state.lock().unwrap();
+        if let Some(start_time) = state.playback_start_time {
+            state.paused_at = Some(start_time.elapsed());
         }
+        state.playback_state = PlaybackState::Paused;
+
+        info!("Playback paused");
+        Ok(())
     }
 
     /// Resume playback
     pub fn resume(&self) -> Result<()> {
-        let sink_lock = self.sink.lock().unwrap();
-        if let Some(ref sink) = *sink_lock {
-            sink.play();
+        self.with_controls(|c| c.set_paused(false))?;
 
-            // Adjust start time to account for paused duration
-            let mut state = self.state.lock().unwrap();
-            if let Some(paused_at) = state.paused_at {
-                state.playback_start_time = Some(Instant::now() - paused_at);
-                state.paused_at = None;
-            }
-            state.playback_state = PlaybackState::Playing;
-
-            info!("Playback resumed");
-            Ok(())
-        } else {
-            Err(PlayerError::EmptyQueue)
+        let mut state = self.state.lock().unwrap();
+        if let Some(paused_at) = state.paused_at {
+            state.playback_start_time = Some(Instant::now() - paused_at);
+            state.paused_at = None;
         }
+        state.playback_state = PlaybackState::Playing;
+
+        info!("Playback resumed");
+        Ok(())
     }
 
     /// Stop playback
     pub fn stop(&self) -> Result<()> {
-        {
-            let mut sink_lock = self.sink.lock().unwrap();
-            if let Some(sink) = sink_lock.take() {
-                sink.stop();
-            }
-        }
+        // Tell the render callback to drop the current source
+        let _ = self.with_controls(|c| c.stop());
+        self.loading.store(false, Relaxed);
 
         {
             let mut state = self.state.lock().unwrap();
@@ -256,19 +253,15 @@ impl PlayerService {
         Ok(())
     }
 
-    /// Seek to position in the current track
+    /// Seek to position in the current track.
     ///
-    /// Implementation note: Since rodio's Decoder doesn't support seeking,
-    /// we simulate it by adjusting the playback start time.
-    /// This works well for tracking position but won't skip actual audio data.
-    /// For true seeking (skipping to position in file), we'd need a custom
-    /// symphonia-based Source with Seek trait implementation.
+    /// Re-decodes from the beginning with `skip_duration`, converting to
+    /// the device format, then sends the new source to the render callback.
     pub fn seek(&self, position: Duration) -> Result<()> {
         // Get current track info before locking state
         let (track, was_playing, volume) = {
             let state = self.state.lock().unwrap();
 
-            // Verify we have a current track
             let track = state
                 .current_track
                 .as_ref()
@@ -296,45 +289,59 @@ impl PlayerService {
             return Ok(());
         }
 
-        // For playing state, we need to restart playback from the new position
-        // Get stream handle
-        let stream_handle = self.ensure_audio_stream()?;
+        self.ensure_engine()?;
 
-        // Full pre-decode (same rationale as play() — zero work on audio thread).
-        let file_data = std::fs::read(&track.file_path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                PlayerError::FileNotFound(track.file_path.to_string_lossy().into_owned())
-            } else {
-                PlayerError::Audio(format!("Failed to read file: {e}"))
-            }
-        })?;
+        let (dev_ch, dev_sr) = self.with_controls(|c| c.device_config())?;
+        let bg_handle = self.with_controls(|c| c.bg_handle())?;
+        let bg_state = Arc::clone(&self.state);
+        let bg_loading = Arc::clone(&self.loading);
+        let file_path = track.file_path.clone();
 
-        let decoder = Decoder::new(std::io::Cursor::new(file_data))
-            .map_err(|e| PlayerError::Audio(format!("Failed to decode audio: {e}")))?;
-        let channels = decoder.channels();
-        let sample_rate = decoder.sample_rate();
-        let samples: Vec<f32> = decoder
-            .skip_duration(clamped_position)
-            .convert_samples::<f32>()
-            .collect();
+        self.loading.store(true, Relaxed);
 
-        // Create new sink
-        let sink = Sink::try_new(&stream_handle)
-            .map_err(|e| PlayerError::Audio(format!("Failed to create sink: {e}")))?;
-
-        sink.set_volume(volume);
-        sink.append(SamplesBuffer::new(channels, sample_rate, samples));
-        sink.play();
-
-        // Update state
+        // Update position tracking immediately
         {
             let mut state = self.state.lock().unwrap();
             state.playback_start_time = Some(Instant::now() - clamped_position);
             state.playback_state = PlaybackState::Playing;
-
-            // Replace sink
-            *self.sink.lock().unwrap() = Some(sink);
         }
+
+        // Background: read file, decode with skip, send to callback
+        std::thread::spawn(move || {
+            let file_data = match std::fs::read(&file_path) {
+                Ok(data) => data,
+                Err(e) => {
+                    warn!("Seek background read failed: {e}");
+                    bg_loading.store(false, Relaxed);
+                    return;
+                }
+            };
+            let decoder = match Decoder::new(std::io::Cursor::new(file_data)) {
+                Ok(d) => d,
+                Err(e) => {
+                    warn!("Seek background decode failed: {e}");
+                    bg_loading.store(false, Relaxed);
+                    return;
+                }
+            };
+
+            let source: Box<dyn Iterator<Item = f32> + Send> = Box::new(
+                UniformSourceIterator::<_, f32>::new(
+                    decoder
+                        .skip_duration(clamped_position)
+                        .convert_samples::<f32>(),
+                    dev_ch,
+                    dev_sr,
+                ),
+            );
+
+            bg_handle.set_volume(volume);
+            bg_handle.play_source(source);
+            bg_loading.store(false, Relaxed);
+
+            bg_state.lock().unwrap().playback_start_time =
+                Some(Instant::now() - clamped_position);
+        });
 
         info!("Seeked to {clamped_position:?}");
         Ok(())
@@ -398,18 +405,7 @@ impl PlayerService {
 
     /// Skip to previous track (or restart if < 3s)
     pub fn previous(&self) -> Result<()> {
-        // Check if we should restart current track or go to previous
-        let should_restart = {
-            let sink_lock = self.sink.lock().unwrap();
-            if let Some(ref _sink) = *sink_lock {
-                // If we've been playing for less than 3 seconds, go to previous
-                // Otherwise restart current track
-                // Note: rodio doesn't expose position easily, so we'll just go to previous
-                false
-            } else {
-                false
-            }
-        };
+        let should_restart = false;
 
         if should_restart {
             // Restart current track
@@ -817,12 +813,7 @@ impl PlayerService {
     pub fn set_volume(&self, volume: f32) -> Result<()> {
         let volume = volume.clamp(0.0, 1.0);
 
-        {
-            let sink_lock = self.sink.lock().unwrap();
-            if let Some(ref sink) = *sink_lock {
-                sink.set_volume(volume);
-            }
-        }
+        let _ = self.with_controls(|c| c.set_volume(volume));
 
         self.state.lock().unwrap().volume = volume;
         info!("Volume set to {volume}");
@@ -833,17 +824,19 @@ impl PlayerService {
         self.state.lock().unwrap().volume
     }
 
+    /// Returns true while the background thread is reading/decoding a file.
+    pub fn is_loading(&self) -> bool {
+        self.loading.load(Relaxed)
+    }
+
     /// Returns true if the current track has finished playing naturally.
     ///
     /// Uses two independent checks:
-    /// 1. Primary: `sink.empty()` — works when the decoder signals exhaustion cleanly.
-    /// 2. Fallback: elapsed wall-clock time > track duration + 1 s — catches decoders
-    ///    (e.g. FLAC via symphonia) that do not return `None` at EOF and therefore
-    ///    never decrement rodio's internal `sound_count`.
+    /// 1. Primary: `controls.is_finished()` — the render callback sets this
+    ///    atomically when the source iterator returns `None`.
+    /// 2. Fallback: elapsed wall-clock time > track duration + 1 s — catches
+    ///    edge cases where the source never signals exhaustion.
     pub fn is_track_finished(&self) -> bool {
-        // Collect all state we need, then release the state lock before
-        // touching the sink lock to avoid a lock-ordering deadlock (pause()
-        // acquires sink then state).
         let (is_playing, fallback_info) = {
             let state = self.state.lock().unwrap();
             let is_playing = matches!(state.playback_state, PlaybackState::Playing);
@@ -865,12 +858,8 @@ impl PlayerService {
             return false;
         }
 
-        // Primary: rodio sink reports all samples consumed
-        let sink_empty = {
-            let sink_lock = self.sink.lock().unwrap();
-            sink_lock.as_ref().is_some_and(rodio::Sink::empty)
-        };
-        if sink_empty {
+        // Primary: render callback signalled source exhaustion
+        if self.with_controls(|c| c.is_finished()).unwrap_or(false) {
             return true;
         }
 
@@ -1417,17 +1406,17 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_pause_without_sink_returns_empty_queue_error() {
+    fn test_pause_without_engine_returns_error() {
         let (_dir, pool) = create_test_pool();
         let player = make_player(pool);
-        assert!(matches!(player.pause(), Err(PlayerError::EmptyQueue)));
+        assert!(player.pause().is_err());
     }
 
     #[test]
-    fn test_resume_without_sink_returns_empty_queue_error() {
+    fn test_resume_without_engine_returns_error() {
         let (_dir, pool) = create_test_pool();
         let player = make_player(pool);
-        assert!(matches!(player.resume(), Err(PlayerError::EmptyQueue)));
+        assert!(player.resume().is_err());
     }
 
     #[test]
