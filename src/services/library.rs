@@ -34,6 +34,58 @@ type Result<T> = std::result::Result<T, LibraryError>;
 /// "Mike + The Mechanics"               → ["Mike + The Mechanics"] (no context → intact)
 /// "Akhenaton, Disiz la Peste"          → ["Akhenaton", "Disiz la Peste"]
 /// ```
+/// Extract featured artist names from a track title.
+///
+/// Recognises parenthetical or bracketed feat markers:
+/// ```text
+/// "Titanium (feat. Sia)"              → ["Sia"]
+/// "Diamond [ft. Rihanna & Jay-Z]"     → ["Rihanna", "Jay-Z"]
+/// "Avf (avec OrelSan & Maitre Gims)"  → ["OrelSan", "Maitre Gims"]
+/// "Normal Title"                      → []
+/// ```
+pub(crate) fn extract_feat_from_title(title: &str) -> Vec<String> {
+    let lower = title.to_lowercase();
+
+    // Longest patterns first to avoid partial matches.
+    const MARKERS: &[&str] = &[
+        "(featuring ", "(feat. ", "(feat ", "(ft. ", "(ft ", "(avec ",
+        "[featuring ", "[feat. ", "[feat ", "[ft. ", "[ft ", "[avec ",
+    ];
+
+    for marker in MARKERS {
+        let Some(start) = lower.find(marker) else {
+            continue;
+        };
+        let artist_start = start + marker.len();
+        let rest_lower = &lower[artist_start..];
+        let closing = rest_lower
+            .find(|c| c == ')' || c == ']')
+            .unwrap_or(rest_lower.len());
+        let artist_end = artist_start + closing;
+
+        // Map byte offsets back to the original title for proper casing.
+        let artist_str = if artist_start <= title.len()
+            && artist_end <= title.len()
+            && title.is_char_boundary(artist_start)
+            && title.is_char_boundary(artist_end)
+        {
+            title[artist_start..artist_end].trim()
+        } else {
+            // Edge case: non-ASCII char changed byte length when lowercased.
+            rest_lower[..closing].trim()
+        };
+
+        if !artist_str.is_empty() {
+            // Inside a feat block, & and + are always artist separators.
+            // Prepend a comma-space to trigger split_artists' context detection.
+            let with_context = format!(", {artist_str}");
+            return split_artists(&with_context);
+        }
+    }
+
+    vec![]
+}
+
 pub(crate) fn split_artists(artist: &str) -> Vec<String> {
     let trimmed = artist.trim();
     if trimmed.is_empty() {
@@ -406,6 +458,14 @@ impl LibraryService {
         for (pos, name) in artists.iter().enumerate() {
             let aid = queries::insert_artist(conn, name, None)?;
             queries::link_track_artist(conn, track_id, aid, pos as u32)?;
+        }
+
+        // Also link featured artists extracted from the track title
+        // (e.g. "Titanium (feat. Sia)" when ARTIST tag only contains "David Guetta").
+        let title_offset = artists.len() as u32;
+        for (pos, name) in extract_feat_from_title(&metadata.title).into_iter().enumerate() {
+            let aid = queries::insert_artist(conn, &name, None)?;
+            queries::link_track_artist(conn, track_id, aid, title_offset + pos as u32)?;
         }
 
         // Add genre if present

@@ -325,6 +325,14 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO schema_migrations (version) VALUES (?1)", [9])?;
     }
 
+    // Migration 10: Parse track titles for feat markers and link the extracted artists
+    // in track_artists. Recovers featuring artists that are only present in the title
+    // (e.g. "Titanium (feat. Sia)") and were never stored in the ARTIST tag.
+    if current_version < 10 {
+        apply_migration_10_logic(conn)?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (?1)", [10])?;
+    }
+
     Ok(())
 }
 
@@ -381,6 +389,51 @@ fn apply_migration_9_logic(conn: &Connection) -> Result<()> {
          AND id NOT IN (SELECT DISTINCT artist_id FROM track_artists)",
         [va_id],
     )?;
+
+    Ok(())
+}
+
+fn apply_migration_10_logic(conn: &Connection) -> Result<()> {
+    // Load all tracks once — titles can be large but are bounded in practice.
+    let tracks: Vec<(i64, String)> = {
+        let mut stmt = conn.prepare("SELECT id, title FROM tracks")?;
+        stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>>>()?
+    };
+
+    for (track_id, title) in tracks {
+        let feat_artists =
+            crate::services::library::extract_feat_from_title(&title);
+
+        for name in feat_artists {
+            // Find or create the artist row.
+            let artist_id: i64 = match conn.query_row(
+                "SELECT id FROM artists WHERE name = ?1",
+                [&name],
+                |r| r.get(0),
+            ) {
+                Ok(id) => id,
+                Err(_) => {
+                    conn.execute(
+                        "INSERT INTO artists (name) VALUES (?1)",
+                        [&name],
+                    )?;
+                    conn.last_insert_rowid()
+                }
+            };
+
+            // INSERT OR IGNORE: primary key is (track_id, artist_id), so if the artist
+            // was already linked via the ARTIST tag, this is a no-op.
+            conn.execute(
+                "INSERT OR IGNORE INTO track_artists (track_id, artist_id, position)
+                 VALUES (?1, ?2, (
+                     SELECT COALESCE(MAX(position), -1) + 1
+                     FROM track_artists WHERE track_id = ?1
+                 ))",
+                rusqlite::params![track_id, artist_id],
+            )?;
+        }
+    }
 
     Ok(())
 }
@@ -1381,5 +1434,164 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM artists", [], |r| r.get(0))
             .unwrap();
         assert_eq!(artist_count, 1, "unrelated artist must be untouched");
+    }
+
+    // ── extract_feat_from_title unit tests ────────────────────────────────
+
+    #[test]
+    fn test_extract_feat_from_title_parentheses_feat_dot() {
+        let result = crate::services::library::extract_feat_from_title("Titanium (feat. Sia)");
+        assert_eq!(result, vec!["Sia"]);
+    }
+
+    #[test]
+    fn test_extract_feat_from_title_brackets_ft() {
+        let result = crate::services::library::extract_feat_from_title("Diamond [ft. Rihanna]");
+        assert_eq!(result, vec!["Rihanna"]);
+    }
+
+    #[test]
+    fn test_extract_feat_from_title_multiple_artists_ampersand() {
+        let result = crate::services::library::extract_feat_from_title(
+            "Avf (avec OrelSan & Maitre Gims)",
+        );
+        assert_eq!(result, vec!["OrelSan", "Maitre Gims"]);
+    }
+
+    #[test]
+    fn test_extract_feat_from_title_no_feat_returns_empty() {
+        let result = crate::services::library::extract_feat_from_title("Normal Title");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_extract_feat_from_title_case_insensitive() {
+        let result =
+            crate::services::library::extract_feat_from_title("Track (FEAT. Artist Name)");
+        assert_eq!(result, vec!["Artist Name"]);
+    }
+
+    // ── Migration 10 tests ────────────────────────────────────────────────
+
+    fn apply_migration_10_logic_test(conn: &Connection) {
+        super::apply_migration_10_logic(conn).unwrap();
+    }
+
+    #[test]
+    fn test_migration_10_links_feat_artist_from_title() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source = queries::insert_source(&conn, "s", SourceType::Disk, None).unwrap();
+        let guetta = queries::insert_artist(&conn, "David Guetta", None).unwrap();
+        let track_id = queries::insert_track(
+            &conn,
+            "Titanium (feat. Sia)",
+            None,
+            guetta,
+            source,
+            &PathBuf::from("/t.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
+        // Seed track_artists with the primary artist (position 0)
+        queries::link_track_artist(&conn, track_id, guetta, 0).unwrap();
+
+        apply_migration_10_logic_test(&conn);
+
+        // Sia must now exist as an artist
+        let sia_id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM artists WHERE name = 'Sia'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert!(sia_id.is_some(), "Sia must be created as an artist");
+
+        // Sia must be linked to the track
+        let linked: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM track_artists WHERE track_id = ?1 AND artist_id = ?2",
+                rusqlite::params![track_id, sia_id.unwrap()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(linked, 1, "Sia must be linked via track_artists");
+    }
+
+    #[test]
+    fn test_migration_10_skips_track_with_no_feat() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source = queries::insert_source(&conn, "s", SourceType::Disk, None).unwrap();
+        let adele = queries::insert_artist(&conn, "Adele", None).unwrap();
+        queries::insert_track(
+            &conn,
+            "Rolling in the Deep",
+            None,
+            adele,
+            source,
+            &PathBuf::from("/t.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
+
+        apply_migration_10_logic_test(&conn);
+
+        // No new artists should be created
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM artists", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "no new artists must be created for a plain title");
+    }
+
+    #[test]
+    fn test_migration_10_does_not_duplicate_already_linked_artist() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source = queries::insert_source(&conn, "s", SourceType::Disk, None).unwrap();
+        // Artist tag already has "David Guetta feat. Sia" → both are in track_artists
+        let guetta = queries::insert_artist(&conn, "David Guetta", None).unwrap();
+        let sia = queries::insert_artist(&conn, "Sia", None).unwrap();
+        let track_id = queries::insert_track(
+            &conn,
+            "Titanium (feat. Sia)",
+            None,
+            guetta,
+            source,
+            &PathBuf::from("/t.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
+        queries::link_track_artist(&conn, track_id, guetta, 0).unwrap();
+        queries::link_track_artist(&conn, track_id, sia, 1).unwrap();
+
+        apply_migration_10_logic_test(&conn);
+
+        // Still only 1 row for Sia in track_artists (INSERT OR IGNORE)
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM track_artists WHERE track_id = ?1 AND artist_id = ?2",
+                rusqlite::params![track_id, sia],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "Sia must not be duplicated in track_artists");
     }
 }

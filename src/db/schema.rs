@@ -320,7 +320,7 @@ mod tests {
                 r.get(0)
             })
             .unwrap();
-        assert_eq!(max_version, 9);
+        assert_eq!(max_version, 10);
 
         // Verify migration 2 columns exist
         let album_cols: Vec<String> = conn
