@@ -114,6 +114,18 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_track_genres_genre ON track_genres(genre_id);",
     )?;
 
+    // Create track_artists junction table
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS track_artists (
+            track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+            artist_id INTEGER NOT NULL REFERENCES artists(id) ON DELETE CASCADE,
+            position INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (track_id, artist_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_track_artists_artist ON track_artists(artist_id);",
+    )?;
+
     // Create playlists table
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS playlists (
@@ -244,6 +256,7 @@ mod tests {
         assert!(tables.contains(&"genres".to_string()));
         assert!(tables.contains(&"tracks".to_string()));
         assert!(tables.contains(&"track_genres".to_string()));
+        assert!(tables.contains(&"track_artists".to_string()));
         assert!(tables.contains(&"playlists".to_string()));
         assert!(tables.contains(&"playlist_tracks".to_string()));
         assert!(tables.contains(&"app_state".to_string()));
@@ -307,7 +320,7 @@ mod tests {
                 r.get(0)
             })
             .unwrap();
-        assert_eq!(max_version, 7);
+        assert_eq!(max_version, 9);
 
         // Verify migration 2 columns exist
         let album_cols: Vec<String> = conn

@@ -63,6 +63,7 @@ impl DuplicateService {
                     duplicate_of: row.get(16)?,
                     last_played_at: row.get(17)?,
                     play_count: row.get::<_, i32>(18)? as u32,
+                    artist_names: vec![],
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;

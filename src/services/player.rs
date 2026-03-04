@@ -1349,6 +1349,7 @@ mod tests {
             duplicate_of: None,
             last_played_at: None,
             play_count: 0,
+            artist_names: vec![],
         };
 
         // Simulate playback that started 5 seconds ago (3s duration + 1s buffer = 4s threshold).
@@ -1389,6 +1390,7 @@ mod tests {
             duplicate_of: None,
             last_played_at: None,
             play_count: 0,
+            artist_names: vec![],
         };
 
         // Simulate playback that started 10 seconds ago — well within 300 s duration.

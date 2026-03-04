@@ -242,6 +242,146 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO schema_migrations (version) VALUES (?1)", [7])?;
     }
 
+    // Migration 8: Create track_artists junction table and seed from existing data.
+    //
+    // Before this migration, secondary artists in composite ARTIST tags (ft/feat/avec/vs)
+    // were discarded at scan time. This migration:
+    //   1. Creates the track_artists junction table.
+    //   2. Seeds it from the existing tracks.artist_id column (primary artist, position=0).
+    //   3. Finds any remaining composite artist rows (ft/feat/avec/vs patterns that
+    //      migration 5 did not handle — it only handled comma-separated names) and
+    //      splits them: updates tracks/albums to point to the primary artist, removes
+    //      the composite ghost row.
+    if current_version < 8 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS track_artists (
+                track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+                artist_id INTEGER NOT NULL REFERENCES artists(id) ON DELETE CASCADE,
+                position INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (track_id, artist_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_track_artists_artist ON track_artists(artist_id);
+            INSERT OR IGNORE INTO track_artists (track_id, artist_id, position)
+            SELECT id, artist_id, 0 FROM tracks;",
+        )?;
+
+        // Fix remaining composite artists (ft/feat/avec/vs) missed by migration 5
+        let composite_artists: Vec<(i64, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT id, name FROM artists WHERE
+                 LOWER(name) LIKE '% ft %' OR LOWER(name) LIKE '% ft. %' OR
+                 LOWER(name) LIKE '% feat %' OR LOWER(name) LIKE '% feat. %' OR
+                 LOWER(name) LIKE '% featuring %' OR LOWER(name) LIKE '% avec %' OR
+                 LOWER(name) LIKE '% vs %' OR LOWER(name) LIKE '% vs. %'",
+            )?;
+            stmt.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        for (composite_id, composite_name) in composite_artists {
+            let parts = crate::services::library::split_artists(&composite_name);
+            if parts.len() <= 1 {
+                continue;
+            }
+
+            let primary_name = &parts[0];
+            let primary_id: i64 = if let Ok(id) = conn.query_row(
+                "SELECT id FROM artists WHERE name = ?1",
+                [primary_name],
+                |r| r.get(0),
+            ) {
+                id
+            } else {
+                conn.execute("INSERT INTO artists (name) VALUES (?1)", [primary_name])?;
+                conn.last_insert_rowid()
+            };
+
+            if primary_id != composite_id {
+                conn.execute(
+                    "UPDATE tracks SET artist_id = ?1 WHERE artist_id = ?2",
+                    [primary_id, composite_id],
+                )?;
+                conn.execute(
+                    "UPDATE albums SET artist_id = ?1 WHERE artist_id = ?2",
+                    [primary_id, composite_id],
+                )?;
+                conn.execute(
+                    "UPDATE track_artists SET artist_id = ?1 WHERE artist_id = ?2",
+                    [primary_id, composite_id],
+                )?;
+                conn.execute("DELETE FROM artists WHERE id = ?1", [composite_id])?;
+            }
+        }
+
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (?1)", [8])?;
+    }
+
+    // Migration 9: Remove "Various Artists" — assign the dominant track artist to each
+    // compilation album so that the fictional "Various Artists" entity disappears.
+    if current_version < 9 {
+        apply_migration_9_logic(conn)?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (?1)", [9])?;
+    }
+
+    Ok(())
+}
+
+fn apply_migration_9_logic(conn: &Connection) -> Result<()> {
+    use rusqlite::OptionalExtension;
+
+    // Nothing to do if Various Artists was never created
+    let va_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM artists WHERE name = 'Various Artists'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+
+    let Some(va_id) = va_id else {
+        return Ok(());
+    };
+
+    // Collect all albums owned by Various Artists
+    let va_albums: Vec<i64> = {
+        let mut stmt = conn.prepare("SELECT id FROM albums WHERE artist_id = ?1")?;
+        stmt.query_map([va_id], |r| r.get(0))?
+            .collect::<Result<Vec<_>>>()?
+    };
+
+    for album_id in va_albums {
+        // Pick the artist with the most tracks on this album (primary artist, position=0)
+        let dominant: Option<i64> = conn
+            .query_row(
+                "SELECT t.artist_id FROM tracks t
+                 WHERE t.album_id = ?1
+                 GROUP BY t.artist_id
+                 ORDER BY COUNT(*) DESC
+                 LIMIT 1",
+                [album_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        if let Some(dominant_id) = dominant {
+            conn.execute(
+                "UPDATE albums SET artist_id = ?1 WHERE id = ?2",
+                [dominant_id, album_id],
+            )?;
+        }
+    }
+
+    // Delete Various Artists only if it is no longer referenced anywhere
+    conn.execute(
+        "DELETE FROM artists WHERE id = ?1
+         AND id NOT IN (SELECT DISTINCT artist_id FROM albums)
+         AND id NOT IN (SELECT DISTINCT artist_id FROM tracks)
+         AND id NOT IN (SELECT DISTINCT artist_id FROM track_artists)",
+        [va_id],
+    )?;
+
     Ok(())
 }
 
@@ -953,5 +1093,293 @@ mod tests {
             album_artist, va_id,
             "must use the pre-existing Various Artists ID"
         );
+    }
+
+    // ── Migration 8 helpers ───────────────────────────────────────────────
+
+    fn apply_migration_8_logic(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS track_artists (
+                track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+                artist_id INTEGER NOT NULL REFERENCES artists(id) ON DELETE CASCADE,
+                position INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (track_id, artist_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_track_artists_artist ON track_artists(artist_id);
+            INSERT OR IGNORE INTO track_artists (track_id, artist_id, position)
+            SELECT id, artist_id, 0 FROM tracks;",
+        )
+        .unwrap();
+
+        let composite_artists: Vec<(i64, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, name FROM artists WHERE
+                     LOWER(name) LIKE '% ft %' OR LOWER(name) LIKE '% ft. %' OR
+                     LOWER(name) LIKE '% feat %' OR LOWER(name) LIKE '% feat. %' OR
+                     LOWER(name) LIKE '% featuring %' OR LOWER(name) LIKE '% avec %' OR
+                     LOWER(name) LIKE '% vs %' OR LOWER(name) LIKE '% vs. %'",
+                )
+                .unwrap();
+            stmt.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+        };
+
+        for (composite_id, composite_name) in composite_artists {
+            let parts = crate::services::library::split_artists(&composite_name);
+            if parts.len() <= 1 {
+                continue;
+            }
+
+            let primary_name = &parts[0];
+            let primary_id: i64 = match conn.query_row(
+                "SELECT id FROM artists WHERE name = ?1",
+                [primary_name],
+                |r| r.get(0),
+            ) {
+                Ok(id) => id,
+                Err(_) => {
+                    conn.execute("INSERT INTO artists (name) VALUES (?1)", [primary_name])
+                        .unwrap();
+                    conn.last_insert_rowid()
+                }
+            };
+
+            if primary_id != composite_id {
+                conn.execute(
+                    "UPDATE tracks SET artist_id = ?1 WHERE artist_id = ?2",
+                    [primary_id, composite_id],
+                )
+                .unwrap();
+                conn.execute(
+                    "UPDATE albums SET artist_id = ?1 WHERE artist_id = ?2",
+                    [primary_id, composite_id],
+                )
+                .unwrap();
+                conn.execute(
+                    "UPDATE track_artists SET artist_id = ?1 WHERE artist_id = ?2",
+                    [primary_id, composite_id],
+                )
+                .unwrap();
+                conn.execute("DELETE FROM artists WHERE id = ?1", [composite_id])
+                    .unwrap();
+            }
+        }
+    }
+
+    // ── Migration 8: track_artists table ─────────────────────────────────
+
+    #[test]
+    fn test_migration_8_creates_track_artists_table() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='track_artists'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(exists, "track_artists table must exist after migration 8");
+    }
+
+    #[test]
+    fn test_migration_8_seeds_from_existing_tracks() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source = queries::insert_source(&conn, "s", SourceType::Disk, None).unwrap();
+        let artist = queries::insert_artist(&conn, "Adele", None).unwrap();
+        let track_id = queries::insert_track(
+            &conn,
+            "Hello",
+            None,
+            artist,
+            source,
+            &PathBuf::from("/hello.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
+
+        // The migration already ran as part of initialize_database in TestEnv::new().
+        // The track was inserted AFTER the migration, so track_artists won't have it.
+        // We manually apply seeding to test the logic:
+        conn.execute(
+            "INSERT OR IGNORE INTO track_artists (track_id, artist_id, position)
+             SELECT id, artist_id, 0 FROM tracks WHERE id = ?1",
+            [track_id],
+        )
+        .unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM track_artists WHERE track_id = ?1 AND artist_id = ?2 AND position = 0",
+                [track_id, artist],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "seeding must create a position=0 entry");
+    }
+
+    #[test]
+    fn test_migration_8_fixes_composite_ft_artist() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source = queries::insert_source(&conn, "s", SourceType::Disk, None).unwrap();
+
+        // Insert a composite artist that migration 5 would not have split (no comma)
+        conn.execute(
+            "INSERT INTO artists (name) VALUES ('Doc Gynéco ft El maestro')",
+            [],
+        )
+        .unwrap();
+        let composite_id: i64 = conn.last_insert_rowid();
+        let track_id = queries::insert_track(
+            &conn,
+            "T",
+            None,
+            composite_id,
+            source,
+            &PathBuf::from("/t.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
+
+        // Seed the track_artists table as migration 8 would
+        conn.execute(
+            "INSERT OR IGNORE INTO track_artists (track_id, artist_id, position)
+             SELECT id, artist_id, 0 FROM tracks",
+            [],
+        )
+        .unwrap();
+
+        apply_migration_8_logic(&conn);
+
+        // Composite artist must be gone
+        let composite_gone: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM artists WHERE name = 'Doc Gynéco ft El maestro'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(composite_gone, 0, "composite ft artist must be removed");
+
+        // Primary artist must exist
+        let primary_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM artists WHERE name = 'Doc Gynéco'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(primary_exists, 1, "primary artist must be created");
+
+        // Track must point to primary artist
+        let track_artist: i64 = conn
+            .query_row("SELECT artist_id FROM tracks WHERE id = ?1", [track_id], |r| r.get(0))
+            .unwrap();
+        let primary_id: i64 = conn
+            .query_row("SELECT id FROM artists WHERE name = 'Doc Gynéco'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(track_artist, primary_id);
+    }
+
+    // ── Migration 9: Remove Various Artists ───────────────────────────────
+
+    fn apply_migration_9_logic_test(conn: &Connection) {
+        super::apply_migration_9_logic(conn).unwrap();
+    }
+
+    #[test]
+    fn test_migration_9_assigns_dominant_artist_to_va_album() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source = queries::insert_source(&conn, "s", SourceType::Disk, None).unwrap();
+
+        let va_id = queries::insert_artist(&conn, "Various Artists", None).unwrap();
+        let artist1 = queries::insert_artist(&conn, "Akhenaton", None).unwrap();
+        let artist2 = queries::insert_artist(&conn, "Soprano", None).unwrap();
+        let album = queries::insert_album(&conn, "Compilation", va_id, None).unwrap();
+
+        // artist1 has 2 tracks, artist2 has 1 → artist1 is dominant
+        for path in ["/t1.flac", "/t2.flac"] {
+            queries::insert_track(
+                &conn, "T", Some(album), artist1, source,
+                &PathBuf::from(path), 60_000, None, None, None,
+                AudioFormat::Flac, 1_000_000,
+            ).unwrap();
+        }
+        queries::insert_track(
+            &conn, "T3", Some(album), artist2, source,
+            &PathBuf::from("/t3.flac"), 60_000, None, None, None,
+            AudioFormat::Flac, 1_000_000,
+        ).unwrap();
+
+        apply_migration_9_logic_test(&conn);
+
+        let album_artist: i64 = conn
+            .query_row("SELECT artist_id FROM albums WHERE id = ?1", [album], |r| r.get(0))
+            .unwrap();
+        assert_eq!(album_artist, artist1, "dominant artist must become the album artist");
+    }
+
+    #[test]
+    fn test_migration_9_deletes_various_artists() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source = queries::insert_source(&conn, "s", SourceType::Disk, None).unwrap();
+
+        let va_id = queries::insert_artist(&conn, "Various Artists", None).unwrap();
+        let artist = queries::insert_artist(&conn, "Oxmo Puccino", None).unwrap();
+        let album = queries::insert_album(&conn, "Mix", va_id, None).unwrap();
+        queries::insert_track(
+            &conn, "T", Some(album), artist, source,
+            &PathBuf::from("/t.flac"), 60_000, None, None, None,
+            AudioFormat::Flac, 1_000_000,
+        ).unwrap();
+
+        apply_migration_9_logic_test(&conn);
+
+        let va_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM artists WHERE name = 'Various Artists'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(va_count, 0, "Various Artists artist must be deleted");
+    }
+
+    #[test]
+    fn test_migration_9_noop_when_no_various_artists() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source = queries::insert_source(&conn, "s", SourceType::Disk, None).unwrap();
+        let artist = queries::insert_artist(&conn, "Adele", None).unwrap();
+        let album = queries::insert_album(&conn, "21", artist, None).unwrap();
+        queries::insert_track(
+            &conn, "T", Some(album), artist, source,
+            &PathBuf::from("/t.flac"), 60_000, None, None, None,
+            AudioFormat::Flac, 1_000_000,
+        ).unwrap();
+
+        // Must not panic
+        apply_migration_9_logic_test(&conn);
+
+        let artist_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM artists", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(artist_count, 1, "unrelated artist must be untouched");
     }
 }

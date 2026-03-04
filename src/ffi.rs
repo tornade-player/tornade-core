@@ -167,6 +167,7 @@ mod ffi {
         fn get_genre_albums(genre_id: i64) -> String;
         fn get_album_genres(album_id: i64) -> String;
         fn get_artist_genres(artist_id: i64) -> String;
+        fn get_album_featuring_artists(album_id: i64, exclude_artist_id: i64) -> String;
 
         // Playlist Functions
         fn get_playlists() -> String;
@@ -443,7 +444,10 @@ fn get_tracks_page(offset: u32, limit: u32, sort_by: &str, sort_dir: &str) -> St
                 "SELECT t.id, t.title, t.artist_id, t.album_id, t.source_id, t.file_path, t.duration, \
                  t.track_number, t.disc_number, t.sample_rate, t.bit_depth, t.file_type, t.file_size, \
                  t.rating, t.fingerprint, t.is_duplicate, t.duplicate_of, t.last_played_at, t.play_count, \
-                 t.created_at \
+                 t.created_at, \
+                 (SELECT GROUP_CONCAT(a.name, char(31)) FROM track_artists ta \
+                  JOIN artists a ON a.id = ta.artist_id \
+                  WHERE ta.track_id = t.id ORDER BY ta.position) AS artist_names_raw \
                  FROM tracks t \
                  LEFT JOIN artists ar ON t.artist_id = ar.id \
                  LEFT JOIN albums al ON t.album_id = al.id \
@@ -453,6 +457,10 @@ fn get_tracks_page(offset: u32, limit: u32, sort_by: &str, sort_dir: &str) -> St
             match conn.prepare(&query) {
                 Ok(mut stmt) => {
                     let tracks_iter = stmt.query_map([], |row| {
+                        let raw: Option<String> = row.get("artist_names_raw")?;
+                        let artist_names: Vec<String> = raw
+                            .map(|s| s.split('\x1f').map(str::to_string).collect())
+                            .unwrap_or_default();
                         Ok(serde_json::json!({
                             "id": row.get::<_, i64>(0)?,
                             "title": row.get::<_, String>(1)?,
@@ -474,6 +482,7 @@ fn get_tracks_page(offset: u32, limit: u32, sort_by: &str, sort_dir: &str) -> St
                             "last_played_at": row.get::<_, Option<String>>(17)?,
                             "play_count": row.get::<_, u32>(18)?,
                             "created_at": row.get::<_, Option<String>>(19)?,
+                            "artist_names": artist_names,
                         }))
                     });
 
@@ -2261,6 +2270,42 @@ fn get_artist_genres(artist_id: i64) -> String {
                 Err(e) => serde_json::json!({
                     "success": false,
                     "error": format!("Failed to get artist genres: {}", e)
+                })
+                .to_string(),
+            }
+        }
+        Err(e) => serde_json::json!({
+            "success": false,
+            "error": format!("FFI initialization failed: {}", e)
+        })
+        .to_string(),
+    }
+}
+
+fn get_album_featuring_artists(album_id: i64, exclude_artist_id: i64) -> String {
+    // Get all secondary/featuring artists for an album (excluding the album's own artist)
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let conn = match pool.get() {
+                Ok(conn) => conn,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get database connection: {}", e)
+                    })
+                    .to_string();
+                }
+            };
+
+            match crate::db::queries::get_album_featuring_artists(&conn, album_id, exclude_artist_id) {
+                Ok(artists) => serde_json::json!({
+                    "success": true,
+                    "data": { "artists": artists }
+                })
+                .to_string(),
+                Err(e) => serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to get album featuring artists: {}", e)
                 })
                 .to_string(),
             }

@@ -202,7 +202,9 @@ pub fn clean_orphans(conn: &Connection) -> Result<CleanupStats> {
     let artists_deleted = conn.execute(
         "DELETE FROM artists WHERE id NOT IN (
             SELECT DISTINCT artist_id FROM tracks
-         ) AND id NOT IN (
+            UNION
+            SELECT DISTINCT artist_id FROM track_artists
+            UNION
             SELECT DISTINCT artist_id FROM albums
          )",
         [],
@@ -295,13 +297,20 @@ pub fn insert_track(
 
 pub fn get_track(conn: &Connection, id: i64) -> Result<Option<Track>> {
     conn.query_row(
-        "SELECT id, title, album_id, artist_id, source_id, file_path,
-                duration, track_number, disc_number, sample_rate, bit_depth,
-                file_type, file_size, rating, fingerprint, is_duplicate,
-                duplicate_of, last_played_at, play_count
-         FROM tracks WHERE id = ?1",
+        "SELECT t.id, t.title, t.album_id, t.artist_id, t.source_id, t.file_path,
+                t.duration, t.track_number, t.disc_number, t.sample_rate, t.bit_depth,
+                t.file_type, t.file_size, t.rating, t.fingerprint, t.is_duplicate,
+                t.duplicate_of, t.last_played_at, t.play_count,
+                (SELECT GROUP_CONCAT(a.name, char(31)) FROM track_artists ta
+                 JOIN artists a ON a.id = ta.artist_id
+                 WHERE ta.track_id = t.id ORDER BY ta.position) AS artist_names_raw
+         FROM tracks t WHERE t.id = ?1",
         params![id],
         |row| {
+            let raw: Option<String> = row.get("artist_names_raw")?;
+            let artist_names: Vec<String> = raw
+                .map(|s| s.split('\x1f').map(str::to_string).collect())
+                .unwrap_or_default();
             Ok(Track {
                 id: row.get(0)?,
                 title: row.get(1)?,
@@ -322,6 +331,7 @@ pub fn get_track(conn: &Connection, id: i64) -> Result<Option<Track>> {
                 duplicate_of: row.get(16)?,
                 last_played_at: row.get(17)?,
                 play_count: row.get::<_, i32>(18)? as u32,
+                artist_names,
             })
         },
     )
@@ -330,15 +340,22 @@ pub fn get_track(conn: &Connection, id: i64) -> Result<Option<Track>> {
 
 pub fn get_album_tracks(conn: &Connection, album_id: i64) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, album_id, artist_id, source_id, file_path,
-                duration, track_number, disc_number, sample_rate, bit_depth,
-                file_type, file_size, rating, fingerprint, is_duplicate,
-                duplicate_of, last_played_at, play_count
-         FROM tracks WHERE album_id = ?1
-         ORDER BY disc_number, track_number",
+        "SELECT t.id, t.title, t.album_id, t.artist_id, t.source_id, t.file_path,
+                t.duration, t.track_number, t.disc_number, t.sample_rate, t.bit_depth,
+                t.file_type, t.file_size, t.rating, t.fingerprint, t.is_duplicate,
+                t.duplicate_of, t.last_played_at, t.play_count,
+                (SELECT GROUP_CONCAT(a.name, char(31)) FROM track_artists ta
+                 JOIN artists a ON a.id = ta.artist_id
+                 WHERE ta.track_id = t.id ORDER BY ta.position) AS artist_names_raw
+         FROM tracks t WHERE t.album_id = ?1
+         ORDER BY t.disc_number, t.track_number",
     )?;
 
     let tracks = stmt.query_map(params![album_id], |row| {
+        let raw: Option<String> = row.get("artist_names_raw")?;
+        let artist_names: Vec<String> = raw
+            .map(|s| s.split('\x1f').map(str::to_string).collect())
+            .unwrap_or_default();
         Ok(Track {
             id: row.get(0)?,
             title: row.get(1)?,
@@ -359,6 +376,7 @@ pub fn get_album_tracks(conn: &Connection, album_id: i64) -> Result<Vec<Track>> 
             duplicate_of: row.get(16)?,
             last_played_at: row.get(17)?,
             play_count: row.get::<_, i32>(18)? as u32,
+            artist_names,
         })
     })?;
 
@@ -384,6 +402,60 @@ pub fn link_track_genre(conn: &Connection, track_id: i64, genre_id: i64) -> Resu
         params![track_id, genre_id],
     )?;
     Ok(())
+}
+
+pub fn link_track_artist(
+    conn: &Connection,
+    track_id: i64,
+    artist_id: i64,
+    position: u32,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO track_artists (track_id, artist_id, position) VALUES (?1, ?2, ?3)",
+        params![track_id, artist_id, position],
+    )?;
+    Ok(())
+}
+
+/// Return all artists who appear in `track_artists` for tracks on the given album,
+/// excluding the album's own artist (i.e. featuring / secondary artists only).
+/// Results are ordered alphabetically by name.
+pub fn get_album_featuring_artists(
+    conn: &Connection,
+    album_id: i64,
+    exclude_artist_id: i64,
+) -> Result<Vec<Artist>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT a.id, a.name, a.name_sort, a.bio, a.country, a.genre, a.style, a.mood,
+                a.formed_year, a.born_year, a.died_year, a.disbanded, a.musicbrainz_id, a.theaudiodb_id
+         FROM track_artists ta
+         JOIN tracks t ON t.id = ta.track_id
+         JOIN artists a ON a.id = ta.artist_id
+         WHERE t.album_id = ?1
+           AND a.id != ?2
+         ORDER BY a.name",
+    )?;
+
+    let artists = stmt.query_map(params![album_id, exclude_artist_id], |row| {
+        Ok(Artist {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            name_sort: row.get(2)?,
+            bio: row.get(3)?,
+            country: row.get(4)?,
+            genre: row.get(5)?,
+            style: row.get(6)?,
+            mood: row.get(7)?,
+            formed_year: row.get(8)?,
+            born_year: row.get(9)?,
+            died_year: row.get(10)?,
+            disbanded: row.get(11)?,
+            musicbrainz_id: row.get(12)?,
+            theaudiodb_id: row.get(13)?,
+        })
+    })?;
+
+    artists.collect()
 }
 
 // ============================================================================
@@ -677,7 +749,10 @@ pub fn get_genre_tracks(conn: &Connection, genre_id: i64) -> Result<Vec<Track>> 
         "SELECT t.id, t.title, t.album_id, t.artist_id, t.source_id, t.file_path,
                 t.duration, t.track_number, t.disc_number, t.sample_rate, t.bit_depth,
                 t.file_type, t.file_size, t.rating, t.fingerprint, t.is_duplicate,
-                t.duplicate_of, t.last_played_at, t.play_count
+                t.duplicate_of, t.last_played_at, t.play_count,
+                (SELECT GROUP_CONCAT(a.name, char(31)) FROM track_artists ta
+                 JOIN artists a ON a.id = ta.artist_id
+                 WHERE ta.track_id = t.id ORDER BY ta.position) AS artist_names_raw
          FROM tracks t
          JOIN track_genres tg ON tg.track_id = t.id
          WHERE tg.genre_id = ?1
@@ -685,6 +760,10 @@ pub fn get_genre_tracks(conn: &Connection, genre_id: i64) -> Result<Vec<Track>> 
     )?;
 
     let tracks = stmt.query_map(params![genre_id], |row| {
+        let raw: Option<String> = row.get("artist_names_raw")?;
+        let artist_names: Vec<String> = raw
+            .map(|s| s.split('\x1f').map(str::to_string).collect())
+            .unwrap_or_default();
         Ok(Track {
             id: row.get(0)?,
             title: row.get(1)?,
@@ -705,6 +784,7 @@ pub fn get_genre_tracks(conn: &Connection, genre_id: i64) -> Result<Vec<Track>> 
             duplicate_of: row.get(16)?,
             last_played_at: row.get(17)?,
             play_count: row.get::<_, i32>(18)? as u32,
+            artist_names,
         })
     })?;
 
@@ -753,16 +833,23 @@ pub fn get_artist_genres(conn: &Connection, artist_id: i64) -> Result<Vec<Genre>
 
 pub fn get_source_tracks(conn: &Connection, source_id: i64) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, album_id, artist_id, source_id, file_path,
-                duration, track_number, disc_number, sample_rate, bit_depth,
-                file_type, file_size, rating, fingerprint, is_duplicate,
-                duplicate_of, last_played_at, play_count
-         FROM tracks
-         WHERE source_id = ?1
-         ORDER BY title",
+        "SELECT t.id, t.title, t.album_id, t.artist_id, t.source_id, t.file_path,
+                t.duration, t.track_number, t.disc_number, t.sample_rate, t.bit_depth,
+                t.file_type, t.file_size, t.rating, t.fingerprint, t.is_duplicate,
+                t.duplicate_of, t.last_played_at, t.play_count,
+                (SELECT GROUP_CONCAT(a.name, char(31)) FROM track_artists ta
+                 JOIN artists a ON a.id = ta.artist_id
+                 WHERE ta.track_id = t.id ORDER BY ta.position) AS artist_names_raw
+         FROM tracks t
+         WHERE t.source_id = ?1
+         ORDER BY t.title",
     )?;
 
     let tracks = stmt.query_map(params![source_id], |row| {
+        let raw: Option<String> = row.get("artist_names_raw")?;
+        let artist_names: Vec<String> = raw
+            .map(|s| s.split('\x1f').map(str::to_string).collect())
+            .unwrap_or_default();
         Ok(Track {
             id: row.get(0)?,
             title: row.get(1)?,
@@ -783,6 +870,7 @@ pub fn get_source_tracks(conn: &Connection, source_id: i64) -> Result<Vec<Track>
             duplicate_of: row.get(16)?,
             last_played_at: row.get(17)?,
             play_count: row.get::<_, i32>(18)? as u32,
+            artist_names,
         })
     })?;
 
@@ -804,7 +892,10 @@ pub fn search_library(
         "SELECT t.id, t.title, t.album_id, t.artist_id, t.source_id, t.file_path,
                 t.duration, t.track_number, t.disc_number, t.sample_rate, t.bit_depth,
                 t.file_type, t.file_size, t.rating, t.fingerprint, t.is_duplicate,
-                t.duplicate_of, t.last_played_at, t.play_count
+                t.duplicate_of, t.last_played_at, t.play_count,
+                (SELECT GROUP_CONCAT(a.name, char(31)) FROM track_artists ta
+                 JOIN artists a ON a.id = ta.artist_id
+                 WHERE ta.track_id = t.id ORDER BY ta.position) AS artist_names_raw
          FROM tracks_fts
          JOIN tracks t ON tracks_fts.rowid = t.id
          WHERE tracks_fts MATCH ?1
@@ -812,6 +903,10 @@ pub fn search_library(
     )?;
 
     let track_results = stmt.query_map(params![query, limit], |row| {
+        let raw: Option<String> = row.get("artist_names_raw")?;
+        let artist_names: Vec<String> = raw
+            .map(|s| s.split('\x1f').map(str::to_string).collect())
+            .unwrap_or_default();
         Ok(Track {
             id: row.get(0)?,
             title: row.get(1)?,
@@ -832,6 +927,7 @@ pub fn search_library(
             duplicate_of: row.get(16)?,
             last_played_at: row.get(17)?,
             play_count: row.get::<_, i32>(18)? as u32,
+            artist_names,
         })
     })?;
 
@@ -2134,5 +2230,164 @@ mod tests {
             p1_ids.is_disjoint(&p2_ids),
             "consecutive pages must not overlap"
         );
+    }
+
+    // ====================================================================
+    // track_artists junction table tests
+    // ====================================================================
+
+    #[test]
+    fn test_link_track_artist_inserts_and_ignores_duplicate() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source = insert_source(&conn, "s", SourceType::Disk, None).unwrap();
+        let primary = insert_artist(&conn, "Stromae", None).unwrap();
+        let feat = insert_artist(&conn, "OrelSan", None).unwrap();
+        let track_id = insert_track(
+            &conn,
+            "T",
+            None,
+            primary,
+            source,
+            &PathBuf::from("/t.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
+
+        link_track_artist(&conn, track_id, primary, 0).unwrap();
+        link_track_artist(&conn, track_id, feat, 1).unwrap();
+        // duplicate — must not error
+        link_track_artist(&conn, track_id, feat, 1).unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM track_artists WHERE track_id = ?1",
+                [track_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2, "must have exactly 2 artist links");
+    }
+
+    #[test]
+    fn test_get_album_tracks_returns_artist_names() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source = insert_source(&conn, "s", SourceType::Disk, None).unwrap();
+        let stromae = insert_artist(&conn, "Stromae", None).unwrap();
+        let orelsan = insert_artist(&conn, "OrelSan", None).unwrap();
+        let album = insert_album(&conn, "Collab", stromae, None).unwrap();
+        let track_id = insert_track(
+            &conn,
+            "Collab Track",
+            Some(album),
+            stromae,
+            source,
+            &PathBuf::from("/collab.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
+
+        link_track_artist(&conn, track_id, stromae, 0).unwrap();
+        link_track_artist(&conn, track_id, orelsan, 1).unwrap();
+
+        let tracks = get_album_tracks(&conn, album).unwrap();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].artist_names, vec!["Stromae", "OrelSan"]);
+    }
+
+    #[test]
+    fn test_clean_orphans_keeps_featured_artist() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source = insert_source(&conn, "s", SourceType::Disk, None).unwrap();
+        let primary = insert_artist(&conn, "Stromae", None).unwrap();
+        let feat = insert_artist(&conn, "Maitre Gims", None).unwrap();
+        let track_id = insert_track(
+            &conn,
+            "T",
+            None,
+            primary,
+            source,
+            &PathBuf::from("/t.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
+
+        // Link the featured artist only via track_artists (not tracks.artist_id)
+        link_track_artist(&conn, track_id, primary, 0).unwrap();
+        link_track_artist(&conn, track_id, feat, 1).unwrap();
+
+        let stats = clean_orphans(&conn).unwrap();
+        assert_eq!(stats.artists_deleted, 0, "featured artist must not be deleted");
+
+        let feat_still_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM artists WHERE id = ?1",
+                [feat],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(feat_still_exists, 1);
+    }
+
+    #[test]
+    fn test_get_album_featuring_artists_returns_secondary_artists() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source = insert_source(&conn, "s", SourceType::Disk, None).unwrap();
+        let stromae = insert_artist(&conn, "Stromae", None).unwrap();
+        let orelsan = insert_artist(&conn, "OrelSan", None).unwrap();
+        let gims = insert_artist(&conn, "Maitre Gims", None).unwrap();
+        let album = insert_album(&conn, "Collab", stromae, None).unwrap();
+
+        let track_id = insert_track(
+            &conn, "T", Some(album), stromae, source,
+            &PathBuf::from("/t.flac"), 60_000, None, None, None,
+            AudioFormat::Flac, 1_000_000,
+        ).unwrap();
+
+        link_track_artist(&conn, track_id, stromae, 0).unwrap();
+        link_track_artist(&conn, track_id, orelsan, 1).unwrap();
+        link_track_artist(&conn, track_id, gims, 2).unwrap();
+
+        let featuring = get_album_featuring_artists(&conn, album, stromae).unwrap();
+        let names: Vec<&str> = featuring.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"OrelSan"), "OrelSan must be in featuring");
+        assert!(names.contains(&"Maitre Gims"), "Maitre Gims must be in featuring");
+        assert!(!names.contains(&"Stromae"), "album artist must be excluded");
+    }
+
+    #[test]
+    fn test_get_album_featuring_artists_empty_when_no_featuring() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source = insert_source(&conn, "s", SourceType::Disk, None).unwrap();
+        let adele = insert_artist(&conn, "Adele", None).unwrap();
+        let album = insert_album(&conn, "21", adele, None).unwrap();
+        let track_id = insert_track(
+            &conn, "T", Some(album), adele, source,
+            &PathBuf::from("/t.flac"), 60_000, None, None, None,
+            AudioFormat::Flac, 1_000_000,
+        ).unwrap();
+        link_track_artist(&conn, track_id, adele, 0).unwrap();
+
+        let featuring = get_album_featuring_artists(&conn, album, adele).unwrap();
+        assert!(featuring.is_empty(), "solo album must have no featuring artists");
     }
 }

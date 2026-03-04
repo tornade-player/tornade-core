@@ -34,7 +34,7 @@ type Result<T> = std::result::Result<T, LibraryError>;
 /// "Mike + The Mechanics"               → ["Mike + The Mechanics"] (no context → intact)
 /// "Akhenaton, Disiz la Peste"          → ["Akhenaton", "Disiz la Peste"]
 /// ```
-fn split_artists(artist: &str) -> Vec<String> {
+pub(crate) fn split_artists(artist: &str) -> Vec<String> {
     let trimmed = artist.trim();
     if trimmed.is_empty() {
         return vec!["Unknown Artist".to_string()];
@@ -336,8 +336,7 @@ impl LibraryService {
 
         // Get or create track artist.
         // Split composite tags (e.g. "Stromae avec Maitre Gims & OrelSan") and use the
-        // first name as the primary artist. The others are discarded for now (no junction
-        // table yet); at minimum this prevents fake composite artist entries.
+        // first name as the primary artist. All artists are linked via track_artists.
         let artists = split_artists(&metadata.artist);
         let artist_id = queries::insert_artist(
             conn,
@@ -347,8 +346,14 @@ impl LibraryService {
 
         // For album grouping, prefer ALBUMARTIST tag over track artist.
         // This keeps multi-artist albums (e.g. "Dr. Dre feat. Snoop Dogg") together.
+        // "Various Artists" is intentionally ignored — featuring relationships are
+        // tracked in track_artists, so albums are always owned by their dominant artist.
         let album_artist_id = if let Some(ref album_artist) = metadata.album_artist {
-            queries::insert_artist(conn, album_artist, None)?
+            if album_artist == "Various Artists" {
+                artist_id
+            } else {
+                queries::insert_artist(conn, album_artist, None)?
+            }
         } else {
             artist_id
         };
@@ -356,13 +361,12 @@ impl LibraryService {
         // Get or create album if present.
         //
         // Album identity is always (title, artist_id) — the same UNIQUE constraint used
-        // in the database.  When ALBUMARTIST is set, we use it as the artist; otherwise
-        // we use the primary track artist.
+        // in the database.  When ALBUMARTIST is set (and is not "Various Artists"),
+        // we use it as the artist; otherwise we use the primary track artist.
         //
         // This means "Greatest Hits" by The Beatles and "Greatest Hits" by Eminem are
         // always stored as two separate albums, even if neither file carries an ALBUMARTIST
-        // tag.  Compilations or multi-artist albums *must* be tagged with
-        // ALBUMARTIST=Various Artists to be grouped correctly.
+        // tag.
         let album_id = if let Some(ref album_title) = metadata.album {
             Some(queries::insert_album(
                 conn,
@@ -397,6 +401,12 @@ impl LibraryService {
             file_format,
             file_size,
         )?;
+
+        // Link all artists in track_artists (primary at position 0, featured at 1, 2, ...)
+        for (pos, name) in artists.iter().enumerate() {
+            let aid = queries::insert_artist(conn, name, None)?;
+            queries::link_track_artist(conn, track_id, aid, pos as u32)?;
+        }
 
         // Add genre if present
         if let Some(ref genre_name) = metadata.genre {

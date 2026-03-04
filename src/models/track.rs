@@ -117,6 +117,10 @@ pub struct Track {
     pub duplicate_of: Option<i64>,
     pub last_played_at: Option<String>, // ISO 8601 datetime
     pub play_count: u32,
+    /// Names of all artists for this track (primary first).
+    /// Populated via GROUP_CONCAT in queries; empty if track_artists is not yet seeded.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub artist_names: Vec<String>,
 }
 
 // Custom serde for Duration (stored as milliseconds in DB)
@@ -165,6 +169,7 @@ pub struct TrackBuilder {
     duplicate_of: Option<i64>,
     last_played_at: Option<String>,
     play_count: u32,
+    artist_names: Vec<String>,
 }
 
 impl TrackBuilder {
@@ -197,6 +202,7 @@ impl TrackBuilder {
             duplicate_of: None,
             last_played_at: None,
             play_count: 0,
+            artist_names: vec![],
         }
     }
 
@@ -270,6 +276,7 @@ impl TrackBuilder {
             duplicate_of: self.duplicate_of,
             last_played_at: self.last_played_at,
             play_count: self.play_count,
+            artist_names: self.artist_names,
         }
     }
 }
