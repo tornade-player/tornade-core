@@ -70,9 +70,14 @@ impl MetadataService {
             has_artwork,
         ) = if let Some(tag) = tag {
             let title = tag.title().map_or(default_title, |s| s.to_string());
-            let artist = tag
-                .artist()
-                .map_or_else(|| "Unknown Artist".to_string(), |s| s.to_string());
+            // Collect all ARTIST tag values (FLAC/Vorbis supports multiple).
+            // Join with ", " so split_artists() can split them correctly downstream.
+            let artists: Vec<&str> = tag.get_strings(&ItemKey::TrackArtist).collect();
+            let artist = if artists.is_empty() {
+                "Unknown Artist".to_string()
+            } else {
+                artists.join(", ")
+            };
             let album_artist = tag
                 .get_string(&ItemKey::AlbumArtist)
                 .map(std::string::ToString::to_string);

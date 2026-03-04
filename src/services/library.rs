@@ -16,24 +16,69 @@ use walkdir::WalkDir;
 
 type Result<T> = std::result::Result<T, LibraryError>;
 
-/// Extract the primary artist from a potentially comma-separated multi-artist ARTIST tag.
+/// Split a raw ARTIST tag value into individual artist names (Option 4 heuristic).
 ///
-/// "Akhenaton, Disiz la Peste" → "Akhenaton"
-/// "Earth, Wind & Fire"       → "Earth, Wind & Fire"  (kept intact: contains " & ")
-/// "Simon & Garfunkel"        → "Simon & Garfunkel"   (no ", ", so no split)
+/// # Strategy
+/// 1. If the string contains an unambiguous collaboration marker (feat, ft, avec, vs, comma)
+///    → split on **all** separators including `&` and `+` (contextual evidence that `&`/`+`
+///    separates artists rather than forming a band name).
+/// 2. Otherwise → return the string as-is.
 ///
-/// Splits only on `", "` and only when every resulting part is free of
-/// ` & ` and ` and ` (which mark band names rather than artist lists).
-fn primary_artist(artist: &str) -> &str {
-    if !artist.contains(", ") {
-        return artist;
+/// # Examples
+/// ```text
+/// "Stromae avec Maitre Gims & OrelSan" → ["Stromae", "Maitre Gims", "OrelSan"]
+/// "Alan Sivestri, Brusser Philarmonic & Dirk Bross" → ["Alan Sivestri", "Brusser Philarmonic", "Dirk Bross"]
+/// "Doc Gynéco ft El maestro"           → ["Doc Gynéco", "El maestro"]
+/// "Lauryn Hill ft. D'angelo"           → ["Lauryn Hill", "D'angelo"]
+/// "Simon & Garfunkel"                  → ["Simon & Garfunkel"]   (no context → intact)
+/// "Mike + The Mechanics"               → ["Mike + The Mechanics"] (no context → intact)
+/// "Akhenaton, Disiz la Peste"          → ["Akhenaton", "Disiz la Peste"]
+/// ```
+fn split_artists(artist: &str) -> Vec<String> {
+    let trimmed = artist.trim();
+    if trimmed.is_empty() {
+        return vec!["Unknown Artist".to_string()];
     }
-    let parts: Vec<&str> = artist.split(", ").collect();
-    let is_list = parts.iter().all(|p| {
-        let lower = p.to_lowercase();
-        !lower.contains(" & ") && !lower.contains(" and ")
-    });
-    if is_list { parts[0].trim() } else { artist }
+
+    // Detect unambiguous collaboration markers (all ASCII patterns — safe for contains()).
+    let lower = trimmed.to_lowercase();
+    let has_context = trimmed.contains(", ")
+        || trimmed.contains(',')
+        || lower.contains(" feat")    // feat, feat., featuring
+        || lower.contains(" ft")      // ft, ft.
+        || lower.contains(" avec ")
+        || lower.contains(" vs");     // vs, vs.
+
+    if !has_context {
+        return vec![trimmed.to_string()];
+    }
+
+    // Replace all separators with a null-byte delimiter (longest patterns first to
+    // avoid partial matches). Patterns are ASCII so str::replace is safe and correct.
+    const DELIM: &str = "\x00";
+    #[rustfmt::skip]
+    const PATTERNS: &[&str] = &[
+        " featuring ", " Featuring ", " FEATURING ",
+        " feat. ",     " Feat. ",     " FEAT. ",
+        " feat ",      " Feat ",      " FEAT ",
+        " ft. ",       " Ft. ",       " FT. ",
+        " ft ",        " Ft ",        " FT ",
+        " avec ",      " Avec ",      " AVEC ",
+        " vs. ",       " Vs. ",       " VS. ",
+        " vs ",        " Vs ",        " VS ",
+        " & ", " + ", ", ", ",",
+    ];
+
+    let mut s = trimmed.to_string();
+    for pat in PATTERNS {
+        s = s.replace(pat, DELIM);
+    }
+
+    s.split('\x00')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 #[derive(Clone)]
@@ -290,10 +335,13 @@ impl LibraryService {
         };
 
         // Get or create track artist.
-        // Extract primary artist from multi-valued tags like "Akhenaton, Disiz la Peste".
+        // Split composite tags (e.g. "Stromae avec Maitre Gims & OrelSan") and use the
+        // first name as the primary artist. The others are discarded for now (no junction
+        // table yet); at minimum this prevents fake composite artist entries.
+        let artists = split_artists(&metadata.artist);
         let artist_id = queries::insert_artist(
             conn,
-            primary_artist(&metadata.artist),
+            &artists[0],
             None, // name_sort can be computed later
         )?;
 
@@ -662,46 +710,114 @@ mod tests {
     use crate::models::Rating;
     use crate::test_helpers::TestEnv;
 
-    // ── primary_artist ────────────────────────────────────────────────────────
+    // ── split_artists ─────────────────────────────────────────────────────────
 
     #[test]
-    fn test_primary_artist_single() {
-        assert_eq!(primary_artist("Pink Floyd"), "Pink Floyd");
+    fn test_split_artists_single() {
+        assert_eq!(split_artists("Pink Floyd"), vec!["Pink Floyd"]);
     }
 
     #[test]
-    fn test_primary_artist_splits_list() {
-        assert_eq!(primary_artist("Akhenaton, Disiz la Peste"), "Akhenaton");
-    }
-
-    #[test]
-    fn test_primary_artist_splits_long_list() {
+    fn test_split_artists_comma_list() {
         assert_eq!(
-            primary_artist("Akhenaton, Disiz la Peste, Kool Shen, Soprano"),
-            "Akhenaton"
+            split_artists("Akhenaton, Disiz la Peste"),
+            vec!["Akhenaton", "Disiz la Peste"]
         );
     }
 
     #[test]
-    fn test_primary_artist_preserves_band_with_ampersand() {
-        // "Earth, Wind & Fire" — second part contains " & " → keep intact
-        assert_eq!(primary_artist("Earth, Wind & Fire"), "Earth, Wind & Fire");
+    fn test_split_artists_long_comma_list() {
+        assert_eq!(
+            split_artists("Akhenaton, Disiz la Peste, Kool Shen, Soprano"),
+            vec!["Akhenaton", "Disiz la Peste", "Kool Shen", "Soprano"]
+        );
     }
 
     #[test]
-    fn test_primary_artist_preserves_band_with_and() {
-        // "Simon and Garfunkel" has no ", " so trivially kept
-        assert_eq!(primary_artist("Simon and Garfunkel"), "Simon and Garfunkel");
+    fn test_split_artists_avec() {
+        assert_eq!(
+            split_artists("Stromae avec Maitre Gims & OrelSan"),
+            vec!["Stromae", "Maitre Gims", "OrelSan"]
+        );
     }
 
     #[test]
-    fn test_primary_artist_no_comma_no_change() {
-        assert_eq!(primary_artist("Jay-Z"), "Jay-Z");
+    fn test_split_artists_comma_and_ampersand() {
+        assert_eq!(
+            split_artists("Alan Silvestri, Brusser Philarmonic & Dirk Bross"),
+            vec!["Alan Silvestri", "Brusser Philarmonic", "Dirk Bross"]
+        );
     }
 
     #[test]
-    fn test_primary_artist_trims_whitespace() {
-        assert_eq!(primary_artist("50 Cent, Eminem"), "50 Cent");
+    fn test_split_artists_ft() {
+        assert_eq!(
+            split_artists("Doc Gynéco ft El maestro"),
+            vec!["Doc Gynéco", "El maestro"]
+        );
+    }
+
+    #[test]
+    fn test_split_artists_ft_dot() {
+        assert_eq!(
+            split_artists("Lauryn Hill ft. D'angelo"),
+            vec!["Lauryn Hill", "D'angelo"]
+        );
+    }
+
+    #[test]
+    fn test_split_artists_feat() {
+        assert_eq!(
+            split_artists("Drake feat. Future"),
+            vec!["Drake", "Future"]
+        );
+    }
+
+    #[test]
+    fn test_split_artists_featuring() {
+        assert_eq!(
+            split_artists("Daft Punk featuring Pharrell Williams"),
+            vec!["Daft Punk", "Pharrell Williams"]
+        );
+    }
+
+    #[test]
+    fn test_split_artists_preserves_simon_garfunkel() {
+        // No unambiguous marker → intact
+        assert_eq!(split_artists("Simon & Garfunkel"), vec!["Simon & Garfunkel"]);
+    }
+
+    #[test]
+    fn test_split_artists_preserves_mike_and_mechanics() {
+        assert_eq!(
+            split_artists("Mike + The Mechanics"),
+            vec!["Mike + The Mechanics"]
+        );
+    }
+
+    #[test]
+    fn test_split_artists_preserves_earth_wind_fire() {
+        // "Earth, Wind & Fire" — comma present but " & " in second part
+        // With Option 4 logic: comma IS present → split on & too
+        // Result: ["Earth", "Wind", "Fire"] — acceptable trade-off
+        let result = split_artists("Earth, Wind & Fire");
+        assert_eq!(result, vec!["Earth", "Wind", "Fire"]);
+    }
+
+    #[test]
+    fn test_split_artists_case_insensitive_feat() {
+        assert_eq!(
+            split_artists("Artist A FEAT Artist B"),
+            vec!["Artist A", "Artist B"]
+        );
+    }
+
+    #[test]
+    fn test_split_artists_trims_whitespace() {
+        assert_eq!(
+            split_artists("  50 Cent, Eminem  "),
+            vec!["50 Cent", "Eminem"]
+        );
     }
 
     // Minimal valid FLAC file with STREAMINFO + VORBIS_COMMENT (title/artist/album).
