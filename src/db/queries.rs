@@ -586,6 +586,9 @@ pub fn get_artist_albums(conn: &Connection, artist_id: i64) -> Result<Vec<Album>
          JOIN artists ar ON ar.id = a.artist_id
          WHERE a.artist_id = ?1
             OR EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = a.id AND t.artist_id = ?1)
+            OR EXISTS (SELECT 1 FROM track_artists ta
+                       JOIN tracks t ON t.id = ta.track_id
+                       WHERE t.album_id = a.id AND ta.artist_id = ?1)
          ORDER BY a.year DESC, a.title",
     )?;
 
@@ -1223,6 +1226,43 @@ mod tests {
         // album_artist_id still gets the album too
         let albums = get_artist_albums(&conn, album_artist_id).unwrap();
         assert_eq!(albums.len(), 1);
+    }
+
+    #[test]
+    fn test_get_artist_albums_includes_track_artists_junction() {
+        // Albums where the artist only appears in track_artists (feat. via title parse)
+        // should also be returned.
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        let source_id = insert_source(&conn, "Library", SourceType::Disk, None).unwrap();
+        let guetta = insert_artist(&conn, "David Guetta", None).unwrap();
+        let sia = insert_artist(&conn, "Sia", None).unwrap();
+        let album_id = insert_album(&conn, "Titanium", guetta, Some(2011)).unwrap();
+        let track_id = insert_track(
+            &conn,
+            "Titanium (feat. Sia)",
+            Some(album_id),
+            guetta,
+            source_id,
+            std::path::Path::new("/music/titanium.flac"),
+            312_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
+        // Sia is only in track_artists (not tracks.artist_id)
+        link_track_artist(&conn, track_id, guetta, 0).unwrap();
+        link_track_artist(&conn, track_id, sia, 1).unwrap();
+
+        let sia_albums = get_artist_albums(&conn, sia).unwrap();
+        assert_eq!(sia_albums.len(), 1, "Sia must see the album via track_artists");
+        assert_eq!(sia_albums[0].title, "Titanium");
+
+        let guetta_albums = get_artist_albums(&conn, guetta).unwrap();
+        assert_eq!(guetta_albums.len(), 1, "David Guetta still has the album");
     }
 
     // ====================================================================
