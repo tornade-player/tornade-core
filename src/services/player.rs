@@ -837,6 +837,13 @@ impl PlayerService {
     /// 2. Fallback: elapsed wall-clock time > track duration + 1 s — catches
     ///    edge cases where the source never signals exhaustion.
     pub fn is_track_finished(&self) -> bool {
+        // If a new track is currently being loaded, the audio engine's `finished`
+        // flag may still reflect the previous track. Suppress auto-advance until
+        // the background thread has sent the new source to the render callback.
+        if self.loading.load(Relaxed) {
+            return false;
+        }
+
         let (is_playing, fallback_info) = {
             let state = self.state.lock().unwrap();
             let is_playing = matches!(state.playback_state, PlaybackState::Playing);
