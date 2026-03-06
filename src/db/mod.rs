@@ -48,6 +48,8 @@ pub fn reset_database(pool: &DbPool) -> Result<()> {
     // Drop all tables in reverse order of dependencies
     conn.execute_batch(
         "DROP TABLE IF EXISTS tracks_fts;
+         DROP TABLE IF EXISTS albums_fts;
+         DROP TABLE IF EXISTS artists_fts;
          DROP TABLE IF EXISTS playlist_tracks;
          DROP TABLE IF EXISTS playlists;
          DROP TABLE IF EXISTS track_genres;
@@ -59,7 +61,13 @@ pub fn reset_database(pool: &DbPool) -> Result<()> {
          DROP TABLE IF EXISTS app_state;
          DROP TRIGGER IF EXISTS tracks_ai;
          DROP TRIGGER IF EXISTS tracks_ad;
-         DROP TRIGGER IF EXISTS tracks_au;",
+         DROP TRIGGER IF EXISTS tracks_au;
+         DROP TRIGGER IF EXISTS albums_ai;
+         DROP TRIGGER IF EXISTS albums_ad;
+         DROP TRIGGER IF EXISTS albums_au;
+         DROP TRIGGER IF EXISTS artists_ai;
+         DROP TRIGGER IF EXISTS artists_ad;
+         DROP TRIGGER IF EXISTS artists_au;",
     )?;
 
     // Recreate schema

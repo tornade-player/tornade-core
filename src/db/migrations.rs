@@ -333,6 +333,36 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO schema_migrations (version) VALUES (?1)", [10])?;
     }
 
+    // Migration 11: Add FTS5 virtual tables for albums and artists to enable
+    // prefix search and fuzzy fallback on those entity types.
+    // The tables are created via initialize_fts() (idempotent), so this migration
+    // only needs to back-fill existing data.
+    if current_version < 11 {
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS albums_fts USING fts5(
+                title,
+                artist_name,
+                content='',
+                tokenize='unicode61 remove_diacritics 1'
+            );
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS artists_fts USING fts5(
+                name,
+                content='',
+                tokenize='unicode61 remove_diacritics 1'
+            );
+
+            INSERT OR IGNORE INTO albums_fts(rowid, title, artist_name)
+            SELECT al.id, al.title, ar.name
+            FROM albums al
+            JOIN artists ar ON ar.id = al.artist_id;
+
+            INSERT OR IGNORE INTO artists_fts(rowid, name)
+            SELECT id, name FROM artists;",
+        )?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (?1)", [11])?;
+    }
+
     Ok(())
 }
 

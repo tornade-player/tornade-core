@@ -167,7 +167,7 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Create FTS5 virtual table for full-text search
+/// Create FTS5 virtual tables for full-text search (tracks, albums, artists)
 pub fn initialize_fts(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE VIRTUAL TABLE IF NOT EXISTS tracks_fts USING fts5(
@@ -177,15 +177,28 @@ pub fn initialize_fts(conn: &Connection) -> Result<()> {
             genre_names,
             content='',
             tokenize='unicode61 remove_diacritics 1'
+        );
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS albums_fts USING fts5(
+            title,
+            artist_name,
+            content='',
+            tokenize='unicode61 remove_diacritics 1'
+        );
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS artists_fts USING fts5(
+            name,
+            content='',
+            tokenize='unicode61 remove_diacritics 1'
         );",
     )?;
 
     Ok(())
 }
 
-/// Create triggers to keep FTS in sync with tracks
+/// Create triggers to keep FTS tables in sync with tracks, albums, and artists
 pub fn initialize_fts_triggers(conn: &Connection) -> Result<()> {
-    // Trigger for INSERT
+    // ── tracks_fts triggers ───────────────────────────────────────────────
     conn.execute_batch(
         "CREATE TRIGGER IF NOT EXISTS tracks_ai AFTER INSERT ON tracks BEGIN
             INSERT INTO tracks_fts(rowid, title, artist_name, album_title, genre_names)
@@ -198,23 +211,17 @@ pub fn initialize_fts_triggers(conn: &Connection) -> Result<()> {
                  FROM track_genres tg
                  JOIN genres g ON g.id = tg.genre_id
                  WHERE tg.track_id = NEW.id);
-        END;",
-    )?;
+        END;
 
-    // Trigger for DELETE
-    conn.execute_batch(
-        "CREATE TRIGGER IF NOT EXISTS tracks_ad AFTER DELETE ON tracks BEGIN
+        CREATE TRIGGER IF NOT EXISTS tracks_ad AFTER DELETE ON tracks BEGIN
             INSERT INTO tracks_fts(tracks_fts, rowid, title, artist_name, album_title, genre_names)
             VALUES('delete', OLD.id, OLD.title,
                    (SELECT name FROM artists WHERE id = OLD.artist_id),
                    (SELECT title FROM albums WHERE id = OLD.album_id),
                    '');
-        END;",
-    )?;
+        END;
 
-    // Trigger for UPDATE
-    conn.execute_batch(
-        "CREATE TRIGGER IF NOT EXISTS tracks_au AFTER UPDATE ON tracks BEGIN
+        CREATE TRIGGER IF NOT EXISTS tracks_au AFTER UPDATE ON tracks BEGIN
             INSERT INTO tracks_fts(tracks_fts, rowid, title, artist_name, album_title, genre_names)
             VALUES('delete', OLD.id, OLD.title, '', '', '');
             INSERT INTO tracks_fts(rowid, title, artist_name, album_title, genre_names)
@@ -227,6 +234,44 @@ pub fn initialize_fts_triggers(conn: &Connection) -> Result<()> {
                  FROM track_genres tg
                  JOIN genres g ON g.id = tg.genre_id
                  WHERE tg.track_id = NEW.id);
+        END;",
+    )?;
+
+    // ── albums_fts triggers ───────────────────────────────────────────────
+    conn.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS albums_ai AFTER INSERT ON albums BEGIN
+            INSERT INTO albums_fts(rowid, title, artist_name)
+            SELECT NEW.id, NEW.title, ar.name FROM artists ar WHERE ar.id = NEW.artist_id;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS albums_ad AFTER DELETE ON albums BEGIN
+            INSERT INTO albums_fts(albums_fts, rowid, title, artist_name)
+            VALUES('delete', OLD.id, OLD.title, '');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS albums_au AFTER UPDATE ON albums BEGIN
+            INSERT INTO albums_fts(albums_fts, rowid, title, artist_name)
+            VALUES('delete', OLD.id, OLD.title, '');
+            INSERT INTO albums_fts(rowid, title, artist_name)
+            SELECT NEW.id, NEW.title, ar.name FROM artists ar WHERE ar.id = NEW.artist_id;
+        END;",
+    )?;
+
+    // ── artists_fts triggers ──────────────────────────────────────────────
+    conn.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS artists_ai AFTER INSERT ON artists BEGIN
+            INSERT INTO artists_fts(rowid, name) VALUES(NEW.id, NEW.name);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS artists_ad AFTER DELETE ON artists BEGIN
+            INSERT INTO artists_fts(artists_fts, rowid, name)
+            VALUES('delete', OLD.id, OLD.name);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS artists_au AFTER UPDATE ON artists BEGIN
+            INSERT INTO artists_fts(artists_fts, rowid, name)
+            VALUES('delete', OLD.id, OLD.name);
+            INSERT INTO artists_fts(rowid, name) VALUES(NEW.id, NEW.name);
         END;",
     )?;
 
@@ -295,6 +340,24 @@ mod tests {
             .unwrap();
         assert!(fts_exists);
 
+        let albums_fts_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='albums_fts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(albums_fts_exists);
+
+        let artists_fts_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='artists_fts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(artists_fts_exists);
+
         // Check FTS triggers
         let triggers: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='trigger' ORDER BY name")
@@ -307,6 +370,12 @@ mod tests {
         assert!(triggers.contains(&"tracks_ai".to_string()));
         assert!(triggers.contains(&"tracks_ad".to_string()));
         assert!(triggers.contains(&"tracks_au".to_string()));
+        assert!(triggers.contains(&"albums_ai".to_string()));
+        assert!(triggers.contains(&"albums_ad".to_string()));
+        assert!(triggers.contains(&"albums_au".to_string()));
+        assert!(triggers.contains(&"artists_ai".to_string()));
+        assert!(triggers.contains(&"artists_ad".to_string()));
+        assert!(triggers.contains(&"artists_au".to_string()));
     }
 
     #[test]
@@ -320,7 +389,7 @@ mod tests {
                 r.get(0)
             })
             .unwrap();
-        assert_eq!(max_version, 10);
+        assert_eq!(max_version, 11);
 
         // Verify migration 2 columns exist
         let album_cols: Vec<String> = conn
