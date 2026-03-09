@@ -164,6 +164,7 @@ mod ffi {
         fn get_genres() -> String;
         fn get_genre_tracks(genre_id: i64) -> String;
         fn get_genre_artists(genre_id: i64) -> String;
+        fn get_similar_artists(artist_id: i64) -> String;
         fn get_genre_albums(genre_id: i64) -> String;
         fn get_album_genres(album_id: i64) -> String;
         fn get_artist_genres(artist_id: i64) -> String;
@@ -2162,6 +2163,41 @@ fn get_genre_artists(genre_id: i64) -> String {
                 Err(e) => serde_json::json!({
                     "success": false,
                     "error": format!("Failed to get genre artists: {}", e)
+                })
+                .to_string(),
+            }
+        }
+        Err(e) => serde_json::json!({
+            "success": false,
+            "error": format!("FFI initialization failed: {}", e)
+        })
+        .to_string(),
+    }
+}
+
+fn get_similar_artists(artist_id: i64) -> String {
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let conn = match pool.get() {
+                Ok(conn) => conn,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get database connection: {}", e)
+                    })
+                    .to_string();
+                }
+            };
+
+            match crate::db::queries::get_similar_artists(&conn, artist_id) {
+                Ok(artists) => serde_json::json!({
+                    "success": true,
+                    "data": { "artists": artists }
+                })
+                .to_string(),
+                Err(e) => serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to get similar artists: {}", e)
                 })
                 .to_string(),
             }

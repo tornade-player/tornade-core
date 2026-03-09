@@ -396,6 +396,14 @@ pub fn delete_track(conn: &Connection, track_id: i64) -> Result<()> {
     Ok(())
 }
 
+pub fn clear_track_genres(conn: &Connection, track_id: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM track_genres WHERE track_id = ?1",
+        params![track_id],
+    )?;
+    Ok(())
+}
+
 pub fn link_track_genre(conn: &Connection, track_id: i64, genre_id: i64) -> Result<()> {
     conn.execute(
         "INSERT INTO track_genres (track_id, genre_id) VALUES (?1, ?2) ON CONFLICT DO NOTHING",
@@ -686,16 +694,91 @@ pub fn get_genre_albums(conn: &Connection, genre_id: i64) -> Result<Vec<Album>> 
 
 pub fn get_genre_artists(conn: &Connection, genre_id: i64) -> Result<Vec<Artist>> {
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT a.id, a.name, a.name_sort, a.bio, a.country, a.genre, a.style, a.mood,
+        "SELECT a.id, a.name, a.name_sort, a.bio, a.country, a.genre, a.style, a.mood,
                 a.formed_year, a.born_year, a.died_year, a.disbanded, a.musicbrainz_id, a.theaudiodb_id
          FROM artists a
-         JOIN tracks t ON t.artist_id = a.id
-         JOIN track_genres tg ON tg.track_id = t.id
-         WHERE tg.genre_id = ?1
-         ORDER BY a.name"
+         WHERE a.id IN (
+             SELECT t.artist_id
+             FROM tracks t
+             JOIN track_genres tg ON tg.track_id = t.id
+             WHERE tg.genre_id = ?1
+             GROUP BY t.artist_id
+             HAVING COUNT(*) * 100.0 / (
+                 SELECT COUNT(*) FROM tracks WHERE artist_id = t.artist_id
+             ) >= 25
+         )
+         ORDER BY a.name
+         LIMIT 20"
     )?;
 
     let artists = stmt.query_map(params![genre_id], |row| {
+        Ok(Artist {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            name_sort: row.get(2)?,
+            bio: row.get(3)?,
+            country: row.get(4)?,
+            genre: row.get(5)?,
+            style: row.get(6)?,
+            mood: row.get(7)?,
+            formed_year: row.get(8)?,
+            born_year: row.get(9)?,
+            died_year: row.get(10)?,
+            disbanded: row.get(11)?,
+            musicbrainz_id: row.get(12)?,
+            theaudiodb_id: row.get(13)?,
+        })
+    })?;
+
+    artists.collect()
+}
+
+pub fn get_similar_artists(conn: &Connection, artist_id: i64) -> Result<Vec<Artist>> {
+    // Strategy:
+    // 1. If the artist has a TheAudioDB genre, match other artists by that field.
+    // 2. Otherwise fall back to track_genres: only artists where ≥25% of their
+    //    tracks share the same genre as ≥25% of the reference artist's tracks.
+    let mut stmt = conn.prepare(
+        "SELECT id, name, name_sort, bio, country, genre, style, mood,
+                formed_year, born_year, died_year, disbanded, musicbrainz_id, theaudiodb_id
+         FROM artists
+         WHERE id != ?1
+           AND (
+               -- Branch 1: both artists have TheAudioDB genre → exact match
+               (
+                   (SELECT genre FROM artists WHERE id = ?1) IS NOT NULL
+                   AND genre = (SELECT genre FROM artists WHERE id = ?1)
+               )
+               OR
+               -- Branch 2: no TheAudioDB genre → fall back to track_genres majority
+               (
+                   (SELECT genre FROM artists WHERE id = ?1) IS NULL
+                   AND id IN (
+                       SELECT t.artist_id
+                       FROM tracks t
+                       JOIN track_genres tg ON tg.track_id = t.id
+                       WHERE tg.genre_id IN (
+                           SELECT tg2.genre_id
+                           FROM tracks t2
+                           JOIN track_genres tg2 ON tg2.track_id = t2.id
+                           WHERE t2.artist_id = ?1
+                           GROUP BY tg2.genre_id
+                           HAVING COUNT(*) * 100.0 / (
+                               SELECT COUNT(*) FROM tracks WHERE artist_id = ?1
+                           ) >= 25
+                       )
+                       GROUP BY t.artist_id
+                       HAVING COUNT(*) * 100.0 / (
+                           SELECT COUNT(*) FROM tracks WHERE artist_id = t.artist_id
+                       ) >= 25
+                   )
+               )
+           )
+         ORDER BY name
+         LIMIT 20",
+    )?;
+
+    let artists = stmt.query_map(params![artist_id], |row| {
         Ok(Artist {
             id: row.get(0)?,
             name: row.get(1)?,
@@ -796,11 +879,18 @@ pub fn get_genre_tracks(conn: &Connection, genre_id: i64) -> Result<Vec<Track>> 
 
 pub fn get_album_genres(conn: &Connection, album_id: i64) -> Result<Vec<Genre>> {
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT g.id, g.name
+        "SELECT g.id, g.name
          FROM genres g
-         JOIN track_genres tg ON g.id = tg.genre_id
-         JOIN tracks t ON tg.track_id = t.id
-         WHERE t.album_id = ?1
+         WHERE g.id IN (
+             SELECT tg.genre_id
+             FROM track_genres tg
+             JOIN tracks t ON tg.track_id = t.id
+             WHERE t.album_id = ?1
+             GROUP BY tg.genre_id
+             HAVING COUNT(*) * 100.0 / (
+                 SELECT COUNT(*) FROM tracks WHERE album_id = ?1
+             ) >= 50
+         )
          ORDER BY g.name",
     )?;
 
@@ -1762,6 +1852,61 @@ mod tests {
     }
 
     #[test]
+    fn test_get_genre_artists_filters_low_genre_ratio() {
+        // Artist A (from seed): 2/2 Rock tracks = 100% → included
+        // Artist B: 1/5 Rock tracks = 20% → excluded (below 25% threshold)
+        let env = TestEnv::new();
+        let (source_id, artist_a_id, _, genre_id, _, _) = env.seed_basic_library();
+        let conn = env.pool.get().unwrap();
+
+        let other_genre_id = insert_genre(&conn, "Pop").unwrap();
+        let artist_b_id = insert_artist(&conn, "Intruder Artist", None).unwrap();
+
+        // 1 Rock track
+        let t = insert_track(
+            &conn,
+            "Rock Hit",
+            None,
+            artist_b_id,
+            source_id,
+            &PathBuf::from("/music/rock_hit.flac"),
+            200_000,
+            None,
+            Some(44100),
+            Some(16),
+            AudioFormat::Flac,
+            20_000_000,
+        )
+        .unwrap();
+        link_track_genre(&conn, t, genre_id).unwrap();
+
+        // 4 Pop tracks (no Rock genre link)
+        for i in 0..4_u32 {
+            let t = insert_track(
+                &conn,
+                &format!("Pop Track {i}"),
+                None,
+                artist_b_id,
+                source_id,
+                &PathBuf::from(format!("/music/pop_{i}.flac")),
+                200_000,
+                None,
+                Some(44100),
+                Some(16),
+                AudioFormat::Flac,
+                20_000_000,
+            )
+            .unwrap();
+            link_track_genre(&conn, t, other_genre_id).unwrap();
+        }
+
+        let artists = get_genre_artists(&conn, genre_id).unwrap();
+        let ids: Vec<i64> = artists.iter().map(|a| a.id).collect();
+        assert!(ids.contains(&artist_a_id), "Artist A (100%) should appear");
+        assert!(!ids.contains(&artist_b_id), "Artist B (20%) should be filtered out");
+    }
+
+    #[test]
     fn test_get_album_genres() {
         let env = TestEnv::new();
         let (_, _, album_id, genre_id, _, _) = env.seed_basic_library();
@@ -1779,6 +1924,39 @@ mod tests {
         let conn = env.pool.get().unwrap();
         let genres = get_album_genres(&conn, 9999).unwrap();
         assert!(genres.is_empty());
+    }
+
+    #[test]
+    fn test_get_album_genres_filters_minority_genre() {
+        // Album: 3 Rock tracks (75%) + 1 Pop track (25%) → only Rock shown
+        let env = TestEnv::new();
+        let (source_id, artist_id, album_id, _rock_id, _, _) = env.seed_basic_library();
+        let conn = env.pool.get().unwrap();
+
+        let pop_id = insert_genre(&conn, "Pop").unwrap();
+
+        // 1 bonus track tagged Pop only (25% of 4 total tracks)
+        let bonus = insert_track(
+            &conn,
+            "Bonus Track",
+            Some(album_id),
+            artist_id,
+            source_id,
+            &PathBuf::from("/music/bonus.flac"),
+            200_000,
+            Some(3),
+            Some(44100),
+            Some(16),
+            AudioFormat::Flac,
+            20_000_000,
+        )
+        .unwrap();
+        link_track_genre(&conn, bonus, pop_id).unwrap();
+
+        let genres = get_album_genres(&conn, album_id).unwrap();
+        let names: Vec<&str> = genres.iter().map(|g| g.name.as_str()).collect();
+        assert!(names.contains(&"Rock"), "Rock (75%) should appear");
+        assert!(!names.contains(&"Pop"), "Pop (25%) should be filtered out");
     }
 
     #[test]

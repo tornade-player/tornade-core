@@ -468,7 +468,8 @@ impl LibraryService {
             queries::link_track_artist(conn, track_id, aid, title_offset + pos as u32)?;
         }
 
-        // Add genre if present
+        // Clear existing genre links before re-linking (handles genre tag changes on re-scan)
+        queries::clear_track_genres(conn, track_id)?;
         if let Some(ref genre_name) = metadata.genre {
             let genre_id = queries::insert_genre(conn, genre_name)?;
             queries::link_track_genre(conn, track_id, genre_id)?;
@@ -735,6 +736,12 @@ impl LibraryService {
         let conn = self.pool.get()?;
 
         queries::get_genre_artists(&conn, genre_id).map_err(LibraryError::Database)
+    }
+
+    pub fn get_similar_artists(&self, artist_id: i64) -> Result<Vec<Artist>> {
+        let conn = self.pool.get()?;
+
+        queries::get_similar_artists(&conn, artist_id).map_err(LibraryError::Database)
     }
 
     // ========================================================================
