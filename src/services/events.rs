@@ -1,4 +1,4 @@
-// Service layer event types for UI subscription
+//! Event and progress types emitted by services for UI subscription.
 
 use crate::models::{Playlist, RepeatMode, Track};
 use serde::{Deserialize, Serialize};

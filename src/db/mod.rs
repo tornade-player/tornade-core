@@ -1,4 +1,20 @@
-// Database layer
+//! SQLite persistence layer: connection pool, schema initialisation, and migrations.
+//!
+//! The database is a single SQLite file whose location is determined by
+//! [`crate::utils::AppPaths::database_path`]. Access is managed through an
+//! `r2d2` connection pool (max 3 connections) so services can acquire connections
+//! on demand without blocking each other for long.
+//!
+//! ## Usage
+//!
+//! ```rust,no_run
+//! use tornade_core::db;
+//! use tornade_core::utils::AppPaths;
+//!
+//! let paths = AppPaths::new().expect("app paths");
+//! let pool  = db::create_pool(paths.database_path()).expect("pool");
+//! db::initialize_database(&pool).expect("schema");
+//! ```
 
 pub mod migrations;
 pub mod queries;
@@ -16,7 +32,11 @@ fn pool_err(e: &r2d2::Error) -> rusqlite::Error {
     rusqlite::Error::InvalidPath(PathBuf::from(e.to_string()))
 }
 
-/// Initialize database connection pool
+/// Create an `r2d2` SQLite connection pool for the database at `db_path`.
+///
+/// Opens (or creates) the file at `db_path` and configures each connection
+/// with a 2 MB page-cache limit (`PRAGMA cache_size = -2000`). The pool is
+/// capped at 3 concurrent connections.
 pub fn create_pool(db_path: PathBuf) -> Result<DbPool, r2d2::Error> {
     // Limit SQLite page cache to 2 MB per connection (default is ~8 MB).
     // With 3 connections: 3 × 2 MB = 6 MB vs the default 3 × 8 MB = 24 MB.
@@ -27,7 +47,10 @@ pub fn create_pool(db_path: PathBuf) -> Result<DbPool, r2d2::Error> {
     Ok(pool)
 }
 
-/// Initialize database schema and FTS
+/// Apply the base schema, FTS5 virtual tables, and all pending migrations.
+///
+/// Safe to call on an existing database — the schema is created with
+/// `CREATE TABLE IF NOT EXISTS` guards and migrations are applied idempotently.
 pub fn initialize_database(pool: &DbPool) -> Result<()> {
     let conn = pool.get().map_err(|e| pool_err(&e))?;
 
@@ -41,7 +64,10 @@ pub fn initialize_database(pool: &DbPool) -> Result<()> {
     Ok(())
 }
 
-/// Reset database by dropping all tables and recreating schema
+/// Drop all tables and recreate a clean schema.
+///
+/// **Destructive** — all library data is permanently lost. Intended for use in
+/// tests and the "Reset Library" UI action only.
 pub fn reset_database(pool: &DbPool) -> Result<()> {
     let conn = pool.get().map_err(|e| pool_err(&e))?;
 

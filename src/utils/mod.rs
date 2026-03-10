@@ -1,4 +1,5 @@
-// Utility functions and helpers
+//! Cross-cutting utility helpers: application paths, state persistence,
+//! M3U playlist I/O, and mutex extensions.
 
 pub mod app_state;
 pub mod m3u;

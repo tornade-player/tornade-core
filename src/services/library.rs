@@ -1,4 +1,4 @@
-// Library management service
+//! Library scanning and track/album/artist query service.
 
 use crate::db::{DbPool, queries};
 use crate::models::{Album, Artist, AudioFormat, Source, Track};
@@ -133,6 +133,18 @@ pub(crate) fn split_artists(artist: &str) -> Vec<String> {
         .collect()
 }
 
+/// Manages the music library: scanning directories, upsetting tracks/albums/artists
+/// into the database, and providing read access to the resulting collection.
+///
+/// `LibraryService` is cheap to clone — internal state is either `Arc`-backed or
+/// an `r2d2` connection pool (also `Arc`-backed under the hood).
+///
+/// ## Scanning
+///
+/// Call [`LibraryService::scan_directory`] to walk a directory tree and index all
+/// supported audio files (FLAC, MP3, AAC, M4A, ALAC). The scan runs synchronously
+/// in the calling thread; poll `LibraryService::get_scan_progress` from another
+/// thread for progress updates.
 #[derive(Clone)]
 pub struct LibraryService {
     pool: DbPool,
@@ -143,6 +155,7 @@ pub struct LibraryService {
 }
 
 impl LibraryService {
+    /// Create a new `LibraryService` backed by the given connection pool.
     pub fn new(pool: DbPool, app_paths: AppPaths) -> Self {
         LibraryService {
             pool,
@@ -570,10 +583,19 @@ impl LibraryService {
         Ok(track_ids)
     }
 
+    /// Return the current scan progress, or `None` if no scan is running.
+    ///
+    /// This method acquires a mutex lock; call it from a background thread
+    /// to avoid blocking the audio thread.
     pub fn scan_progress(&self) -> Option<ScanProgress> {
         self.scan_progress.lock().unwrap().clone()
     }
 
+    /// Request cancellation of the currently running scan.
+    ///
+    /// The scan checks this flag between file batches. Cancellation is not
+    /// instantaneous — the current batch will finish before the scan returns
+    /// [`crate::services::error::LibraryError::ScanCancelled`].
     pub fn cancel_scan(&self) {
         *self.scan_cancelled.lock().unwrap() = true;
     }
@@ -582,12 +604,15 @@ impl LibraryService {
     // Sources
     // ========================================================================
 
+    /// Return all music sources registered in the library.
     pub fn list_sources(&self) -> Result<Vec<Source>> {
         let conn = self.pool.get()?;
 
         queries::list_sources(&conn).map_err(LibraryError::Database)
     }
 
+    /// Register a new disk source at the given path, or return the existing one if
+    /// a source with the same canonical path is already registered.
     pub fn add_source(&self, name: &str, path: &Path) -> Result<Source> {
         let conn = self.pool.get()?;
 
@@ -654,18 +679,21 @@ impl LibraryService {
     // Tracks
     // ========================================================================
 
+    /// Fetch a single track by its primary key. Returns `None` if not found.
     pub fn get_track(&self, id: i64) -> Result<Option<Track>> {
         let conn = self.pool.get()?;
 
         queries::get_track(&conn, id).map_err(LibraryError::Database)
     }
 
+    /// Return all tracks belonging to the given album, ordered by disc then track number.
     pub fn get_album_tracks(&self, album_id: i64) -> Result<Vec<Track>> {
         let conn = self.pool.get()?;
 
         queries::get_album_tracks(&conn, album_id).map_err(LibraryError::Database)
     }
 
+    /// Set the star rating of a track. `rating` must be in the range 0–5.
     pub fn rate_track(&self, track_id: i64, rating: u8) -> Result<()> {
         if rating > 5 {
             return Err(LibraryError::InvalidRating(rating));
@@ -680,12 +708,17 @@ impl LibraryService {
     // Albums
     // ========================================================================
 
+    /// Fetch a single album by its primary key. Returns `None` if not found.
     pub fn get_album(&self, id: i64) -> Result<Option<Album>> {
         let conn = self.pool.get()?;
 
         queries::get_album(&conn, id).map_err(LibraryError::Database)
     }
 
+    /// Return a filtered, paginated list of albums.
+    ///
+    /// All filter parameters are optional. Pass `None` to include all values for that
+    /// dimension. Results are ordered alphabetically by album title.
     pub fn list_albums(
         &self,
         artist_id: Option<i64>,
@@ -700,12 +733,14 @@ impl LibraryService {
             .map_err(LibraryError::Database)
     }
 
+    /// Return all albums credited to the given artist, ordered by year.
     pub fn get_artist_albums(&self, artist_id: i64) -> Result<Vec<Album>> {
         let conn = self.pool.get()?;
 
         queries::get_artist_albums(&conn, artist_id).map_err(LibraryError::Database)
     }
 
+    /// Set the star rating of an album. `rating` must be in the range 0–5.
     pub fn rate_album(&self, album_id: i64, rating: u8) -> Result<()> {
         if rating > 5 {
             return Err(LibraryError::InvalidRating(rating));
@@ -720,24 +755,29 @@ impl LibraryService {
     // Artists
     // ========================================================================
 
+    /// Fetch a single artist by its primary key. Returns `None` if not found.
     pub fn get_artist(&self, id: i64) -> Result<Option<Artist>> {
         let conn = self.pool.get()?;
 
         queries::get_artist(&conn, id).map_err(LibraryError::Database)
     }
 
+    /// Return all artists in the library, ordered alphabetically by name.
     pub fn list_artists(&self) -> Result<Vec<Artist>> {
         let conn = self.pool.get()?;
 
         queries::list_artists(&conn).map_err(LibraryError::Database)
     }
 
+    /// Return all artists associated with the given genre.
     pub fn get_genre_artists(&self, genre_id: i64) -> Result<Vec<Artist>> {
         let conn = self.pool.get()?;
 
         queries::get_genre_artists(&conn, genre_id).map_err(LibraryError::Database)
     }
 
+    /// Return artists that share at least one genre with the given artist, excluding
+    /// the artist itself. Useful for "related artists" recommendations in the UI.
     pub fn get_similar_artists(&self, artist_id: i64) -> Result<Vec<Artist>> {
         let conn = self.pool.get()?;
 
@@ -748,18 +788,21 @@ impl LibraryService {
     // Genres
     // ========================================================================
 
+    /// Return all genres with their track and album counts as `(Genre, track_count, album_count)`.
     pub fn list_genres(&self) -> Result<Vec<(crate::models::Genre, u32, u32)>> {
         let conn = self.pool.get()?;
 
         queries::list_genres_with_count(&conn).map_err(LibraryError::Database)
     }
 
+    /// Return all tracks tagged with the given genre.
     pub fn get_genre_tracks(&self, genre_id: i64) -> Result<Vec<Track>> {
         let conn = self.pool.get()?;
 
         queries::get_genre_tracks(&conn, genre_id).map_err(LibraryError::Database)
     }
 
+    /// Return all tracks that were indexed from the given source.
     pub fn get_source_tracks(&self, source_id: i64) -> Result<Vec<Track>> {
         let conn = self.pool.get()?;
 
@@ -770,6 +813,10 @@ impl LibraryService {
     // Search
     // ========================================================================
 
+    /// Search the library using a simple SQL `LIKE` query, returning up to `limit`
+    /// results across tracks, albums, and artists.
+    ///
+    /// For full-text and fuzzy search, prefer [`crate::services::SearchService::search`].
     pub fn search(
         &self,
         query: &str,

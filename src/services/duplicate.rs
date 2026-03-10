@@ -1,4 +1,4 @@
-// Duplicate detection service
+//! Duplicate track detection service.
 
 use crate::db::DbPool;
 use crate::models::Track;
@@ -21,6 +21,7 @@ pub struct DuplicateService {
 }
 
 impl DuplicateService {
+    /// Create a new `DuplicateService` backed by the given connection pool.
     pub fn new(pool: DbPool) -> Self {
         DuplicateService { pool }
     }

@@ -1,5 +1,11 @@
-// SQLite database schema for Tornade Music Player
-// Based on data-model.md
+//! SQLite schema definitions for the Tornade music library.
+//!
+//! Tables: `sources`, `artists`, `albums`, `tracks`, `genres`, `track_genres`,
+//! `track_artists`, `playlists`, `playlist_tracks`, `app_state`.
+//! FTS5 virtual tables: `tracks_fts`, `albums_fts`, `artists_fts`.
+//!
+//! All `CREATE TABLE` statements use `IF NOT EXISTS` so this module is safe
+//! to call on a database that already has the schema applied.
 
 use rusqlite::{Connection, Result};
 

@@ -1,4 +1,4 @@
-// Metadata extraction service using lofty
+//! Audio tag extraction service using the `lofty` crate.
 
 use crate::services::error::LibraryError;
 use crate::utils::AppPaths;
@@ -10,30 +10,52 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// Raw audio-tag data extracted from a single audio file by [`MetadataService`].
+///
+/// All string fields are taken verbatim from the file tags with no normalisation
+/// applied. Multi-artist tags (e.g. `"Daft Punk & Pharrell"`) are left intact at
+/// this layer; splitting is handled by `LibraryService` during scanning.
 #[derive(Debug, Clone)]
 pub struct TrackMetadata {
+    /// Value of the `TITLE` tag, or the filename stem if the tag is absent.
     pub title: String,
+    /// Value of the `ARTIST` tag.
     pub artist: String,
-    /// The ALBUMARTIST tag, if present. Used to group tracks into albums
+    /// The `ALBUMARTIST` tag, if present. Used to group tracks into albums
     /// regardless of per-track featured artists.
     pub album_artist: Option<String>,
+    /// Value of the `ALBUM` tag, if present.
     pub album: Option<String>,
+    /// Value of the `GENRE` tag, if present.
     pub genre: Option<String>,
+    /// Value of the `TRACKNUMBER` tag, if present and parseable.
     pub track_number: Option<u32>,
+    /// Value of the `DISCNUMBER` tag, if present and parseable.
     pub disc_number: Option<u32>,
+    /// Release year parsed from the `DATE` or `YEAR` tag, if present.
     pub year: Option<u16>,
+    /// Total playback duration reported by the audio codec.
     pub duration: Duration,
+    /// Sample rate in Hz (e.g. 44100, 48000, 96000).
     pub sample_rate: Option<u32>,
+    /// Bit depth (e.g. 16, 24) for lossless formats. `None` for lossy formats.
     pub bit_depth: Option<u8>,
+    /// `true` if the file contains embedded cover art.
     pub has_artwork: bool,
 }
 
+/// Reads audio tags and codec properties from audio files using [`lofty`].
+///
+/// Instantiate once and reuse across many files — the service is `Clone` and
+/// has no per-call state.
 #[derive(Clone)]
 pub struct MetadataService {
     app_paths: AppPaths,
 }
 
 impl MetadataService {
+    /// Create a new `MetadataService`. `app_paths` is used to resolve relative paths
+    /// when saving extracted artwork to the local cache.
     pub fn new(app_paths: AppPaths) -> Self {
         MetadataService { app_paths }
     }

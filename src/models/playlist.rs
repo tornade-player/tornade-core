@@ -1,39 +1,66 @@
-// Playlist and Queue models
+//! Playlist and playback-queue domain models.
 
 use serde::{Deserialize, Serialize};
 
+/// A named, ordered collection of tracks saved by the user.
+///
+/// Playlists are persisted in the `playlists` / `playlist_tracks` tables and
+/// managed by [`crate::services::PlaylistService`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Playlist {
+    /// SQLite primary key (`playlists.id`).
     pub id: i64,
+    /// User-visible playlist name.
     pub name: String,
+    /// Optional free-text description.
     pub description: Option<String>,
-    pub tracks: Vec<i64>,   // Track IDs in order
-    pub created_at: String, // ISO 8601
-    pub updated_at: String, // ISO 8601
+    /// Ordered list of track IDs that make up this playlist.
+    pub tracks: Vec<i64>,
+    /// Creation timestamp (ISO 8601, UTC).
+    pub created_at: String,
+    /// Last modification timestamp (ISO 8601, UTC).
+    pub updated_at: String,
 }
 
+/// The transient playback queue managed by [`crate::services::PlayerService`].
+///
+/// Unlike a [`Playlist`], the queue is not persisted — it exists only for the
+/// lifetime of the current playback session. Shuffle support is implemented by
+/// maintaining a pre-computed `shuffle_order` index alongside the original track
+/// order so that both can be traversed without modifying `tracks`.
 #[derive(Debug, Clone, Default)]
 pub struct Queue {
-    pub tracks: Vec<i64>, // Track IDs
+    /// Ordered track IDs in the queue (original, non-shuffled order).
+    pub tracks: Vec<i64>,
+    /// Index into either `tracks` (shuffle off) or `shuffle_order` (shuffle on).
     pub current_index: usize,
+    /// Whether shuffle mode is active.
     pub shuffle_enabled: bool,
+    /// Current repeat behaviour.
     pub repeat_mode: RepeatMode,
-    pub shuffle_order: Vec<usize>, // Shuffled indices
+    /// Pre-computed permutation of `0..tracks.len()` used when `shuffle_enabled` is true.
+    pub shuffle_order: Vec<usize>,
 }
 
 impl Queue {
+    /// Create an empty queue with shuffle off and repeat mode set to [`RepeatMode::Off`].
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Returns `true` if the queue contains no tracks.
     pub fn is_empty(&self) -> bool {
         self.tracks.is_empty()
     }
 
+    /// Returns the number of tracks in the queue.
     pub fn len(&self) -> usize {
         self.tracks.len()
     }
 
+    /// Returns the track ID of the currently active position, respecting shuffle order.
+    ///
+    /// Returns `None` when the queue is empty or `current_index` is out of bounds.
     pub fn current_track(&self) -> Option<i64> {
         if self.is_empty() {
             return None;
@@ -49,12 +76,16 @@ impl Queue {
     }
 }
 
+/// Controls what happens when the queue reaches the last track.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RepeatMode {
+    /// Playback stops after the last track.
     #[default]
     Off,
+    /// The entire queue restarts from the beginning after the last track.
     All,
+    /// The current track repeats indefinitely.
     One,
 }
 

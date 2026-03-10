@@ -1,4 +1,4 @@
-// Playlist management service
+//! Persistent playlist management service.
 
 use crate::db::{DbPool, queries};
 use crate::models::Playlist;
@@ -8,11 +8,16 @@ use std::path::Path;
 
 type Result<T> = std::result::Result<T, PlaylistError>;
 
+/// Manages user-created playlists: creation, renaming, deletion, and track ordering.
+///
+/// All mutations are persisted immediately to the SQLite database. Playlists are
+/// represented in-memory as [`crate::models::Playlist`] values.
 pub struct PlaylistService {
     pool: DbPool,
 }
 
 impl PlaylistService {
+    /// Create a new `PlaylistService` backed by the given connection pool.
     pub fn new(pool: DbPool) -> Self {
         PlaylistService { pool }
     }

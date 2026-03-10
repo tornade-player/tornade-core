@@ -1,4 +1,4 @@
-// Full-text search service — FTS5 prefix + LIKE substring + Levenshtein fuzzy
+//! Full-text search service combining FTS5, LIKE, and Levenshtein fuzzy matching.
 
 use crate::db::DbPool;
 use crate::db::queries;
@@ -7,13 +7,27 @@ use crate::services::error::LibraryError;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+/// Performs full-text and fuzzy search across tracks, albums, and artists.
+///
+/// Three complementary strategies are combined and their results merged
+/// (deduplication by entity ID):
+///
+/// 1. **FTS5 prefix** — fast, relevance-ordered, handles partial-word queries
+///    (e.g. `"Coltr"` → `"Coltrane"`).
+/// 2. **LIKE `%query%`** — substring fallback for entries missing from the FTS index.
+/// 3. **Levenshtein** — typo tolerance for queries ≥ 4 characters
+///    (e.g. `"trak"` → `"track"`).
 pub struct SearchService {
     pool: DbPool,
 }
 
+/// Results returned by [`SearchService::search`], grouped by entity type.
 pub struct SearchResults {
+    /// Matching tracks, ordered by relevance then title.
     pub tracks: Vec<Track>,
+    /// Matching albums, ordered by relevance then title.
     pub albums: Vec<Album>,
+    /// Matching artists, ordered by relevance then name.
     pub artists: Vec<Artist>,
 }
 
@@ -119,6 +133,7 @@ pub fn fuzzy_matches(query: &str, candidate: &str) -> bool {
 // ── Search service ────────────────────────────────────────────────────────────
 
 impl SearchService {
+    /// Create a new `SearchService` backed by the given connection pool.
     pub fn new(pool: DbPool) -> Self {
         SearchService { pool }
     }

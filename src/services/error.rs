@@ -1,4 +1,4 @@
-// Service layer error types
+//! Error types returned by the service layer.
 
 use thiserror::Error;
 

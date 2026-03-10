@@ -1,4 +1,4 @@
-// M3U playlist parser and writer
+//! M3U playlist parser and writer.
 
 use crate::models::Track;
 use crate::services::error::PlaylistError;
@@ -6,7 +6,10 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
+/// Parsed contents of an M3U or M3U8 playlist file.
 pub struct M3uData {
+    /// Ordered list of file paths extracted from the playlist.
+    /// Relative paths are resolved against the directory of the M3U file.
     pub tracks: Vec<PathBuf>,
 }
 

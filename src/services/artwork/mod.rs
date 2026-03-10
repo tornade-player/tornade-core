@@ -1,4 +1,5 @@
-// Artwork fetching service module
+//! Artwork fetching service — downloads album and artist images from MusicBrainz
+//! and Cover Art Archive at 1 request/second to respect API rate limits.
 
 mod client;
 mod matching;
@@ -14,17 +15,26 @@ use chrono::Local;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
-/// Progress tracking for artwork fetching
+/// Live progress state for an in-progress artwork fetch operation.
+///
+/// Retrieved via `ArtworkService::get_fetch_progress` from a background thread
+/// while the fetch runs on the main service thread.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ArtworkFetchProgress {
+    /// Total number of albums/artists to process in this batch.
     pub total_items: u32,
+    /// Number of items processed so far (including failures).
     pub processed_items: u32,
+    /// Human-readable label of the item currently being fetched.
     pub current_item: String,
+    /// Number of items for which artwork was successfully downloaded.
     pub successful: u32,
+    /// Number of items for which the download failed or no artwork was found.
     pub failed: u32,
 }
 
 impl ArtworkFetchProgress {
+    /// Create a new progress tracker for a batch of `total_items` items.
     pub fn new(total_items: u32) -> Self {
         Self {
             total_items,
@@ -32,6 +42,7 @@ impl ArtworkFetchProgress {
         }
     }
 
+    /// Record the outcome of processing one item and advance the progress counter.
     pub fn update(&mut self, item: String, success: bool) {
         self.processed_items += 1;
         self.current_item = item;
@@ -43,7 +54,14 @@ impl ArtworkFetchProgress {
     }
 }
 
-/// Main artwork service
+/// Downloads and caches album artwork and artist photos from MusicBrainz / Cover Art Archive.
+///
+/// All network calls respect a 1 req/s rate limit imposed by the MusicBrainz API
+/// terms of service. Long-running fetch operations can be cancelled via
+/// `ArtworkService::cancel_fetch` and monitored via `ArtworkService::get_fetch_progress`.
+///
+/// `ArtworkService` is `Clone` — all mutable state is `Arc<Mutex<…>>` so clones
+/// share the same rate limiter and progress tracking.
 #[derive(Clone)]
 pub struct ArtworkService {
     pool: DbPool,

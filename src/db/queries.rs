@@ -1,4 +1,11 @@
-// Database query operations
+//! Low-level SQLite query helpers.
+//!
+//! Each function in this module maps directly to one SQL statement (or a small,
+//! fixed number of related statements). They accept a raw `&Connection` rather
+//! than a pool so that callers can compose them inside a single transaction.
+//!
+//! These are internal helpers — higher-level access should go through the service
+//! layer ([`crate::services::LibraryService`], [`crate::services::PlaylistService`], etc.).
 
 use crate::models::source::SourceType;
 use crate::models::{Album, Artist, AudioFormat, Genre, Playlist, Source, Track};
@@ -9,6 +16,8 @@ use std::path::{Path, PathBuf};
 // Source operations
 // ============================================================================
 
+/// Insert a new source row and return its `ROWID`. The caller must ensure `name`
+/// and `path` are unique before calling; no `ON CONFLICT` guard is applied here.
 pub fn insert_source(
     conn: &Connection,
     name: &str,
@@ -26,6 +35,7 @@ pub fn insert_source(
     Ok(conn.last_insert_rowid())
 }
 
+/// Fetch a source by primary key. Returns `None` if no row exists with that `id`.
 pub fn get_source(conn: &Connection, id: i64) -> Result<Option<Source>> {
     conn.query_row(
         "SELECT id, name, type, path, device_id, last_scanned_at FROM sources WHERE id = ?1",
@@ -44,6 +54,7 @@ pub fn get_source(conn: &Connection, id: i64) -> Result<Option<Source>> {
     .optional()
 }
 
+/// Return all sources ordered alphabetically by name.
 pub fn list_sources(conn: &Connection) -> Result<Vec<Source>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, type, path, device_id, last_scanned_at FROM sources ORDER BY name",
@@ -67,6 +78,8 @@ pub fn list_sources(conn: &Connection) -> Result<Vec<Source>> {
 // Artist operations
 // ============================================================================
 
+/// Insert an artist if none with that exact `name` exists (`ON CONFLICT DO NOTHING`),
+/// then return the id of the existing or newly inserted row.
 pub fn insert_artist(conn: &Connection, name: &str, name_sort: Option<&str>) -> Result<i64> {
     conn.execute(
         "INSERT INTO artists (name, name_sort) VALUES (?1, ?2) ON CONFLICT(name) DO NOTHING",
@@ -81,6 +94,7 @@ pub fn insert_artist(conn: &Connection, name: &str, name_sort: Option<&str>) -> 
     )
 }
 
+/// Fetch an artist by primary key. Returns `None` if no row exists with that `id`.
 pub fn get_artist(conn: &Connection, id: i64) -> Result<Option<Artist>> {
     conn.query_row(
         "SELECT id, name, name_sort, bio, country, genre, style, mood,
@@ -113,6 +127,7 @@ pub fn get_artist(conn: &Connection, id: i64) -> Result<Option<Artist>> {
 // Album operations
 // ============================================================================
 
+/// Insert an album if none with `(title, artist_id)` exists, then return the id.
 pub fn insert_album(
     conn: &Connection,
     title: &str,
@@ -132,6 +147,7 @@ pub fn insert_album(
     )
 }
 
+/// Fetch an album by primary key, joining the artist name. Returns `None` if not found.
 pub fn get_album(conn: &Connection, id: i64) -> Result<Option<Album>> {
     conn.query_row(
         "SELECT a.id, a.title, a.artist_id, ar.name as artist_name, a.year, a.rating,
@@ -164,6 +180,7 @@ pub fn get_album(conn: &Connection, id: i64) -> Result<Option<Album>> {
     .optional()
 }
 
+/// Reassign an album to a different artist (used when ALBUMARTIST tag is updated).
 pub fn update_album_artist(conn: &Connection, album_id: i64, artist_id: i64) -> Result<()> {
     conn.execute(
         "UPDATE albums SET artist_id = ?1 WHERE id = ?2",
@@ -172,6 +189,7 @@ pub fn update_album_artist(conn: &Connection, album_id: i64, artist_id: i64) -> 
     Ok(())
 }
 
+/// Update the star rating of an album. `rating` must already be validated (0–5).
 pub fn update_album_rating(conn: &Connection, album_id: i64, rating: u8) -> Result<()> {
     conn.execute(
         "UPDATE albums SET rating = ?1 WHERE id = ?2",
@@ -184,8 +202,11 @@ pub fn update_album_rating(conn: &Connection, album_id: i64, rating: u8) -> Resu
 // Library maintenance
 // ============================================================================
 
+/// Counts of rows removed by [`clean_orphans`].
 pub struct CleanupStats {
+    /// Number of albums that had no tracks and were deleted.
     pub albums_deleted: usize,
+    /// Number of artists that had no tracks and no albums and were deleted.
     pub artists_deleted: usize,
 }
 
@@ -220,6 +241,7 @@ pub fn clean_orphans(conn: &Connection) -> Result<CleanupStats> {
 // Genre operations
 // ============================================================================
 
+/// Insert a genre if none with that `name` exists, then return the id.
 pub fn insert_genre(conn: &Connection, name: &str) -> Result<i64> {
     conn.execute(
         "INSERT INTO genres (name) VALUES (?1) ON CONFLICT(name) DO NOTHING",
@@ -233,6 +255,7 @@ pub fn insert_genre(conn: &Connection, name: &str) -> Result<i64> {
     )
 }
 
+/// Fetch a genre by primary key. Returns `None` if not found.
 pub fn get_genre(conn: &Connection, id: i64) -> Result<Option<Genre>> {
     conn.query_row(
         "SELECT id, name FROM genres WHERE id = ?1",
@@ -251,6 +274,8 @@ pub fn get_genre(conn: &Connection, id: i64) -> Result<Option<Genre>> {
 // Track operations
 // ============================================================================
 
+/// Insert a track or update metadata if the `(source_id, file_path)` combination already
+/// exists (`ON CONFLICT … DO UPDATE`). Returns the id of the row.
 pub fn insert_track(
     conn: &Connection,
     title: &str,
@@ -295,6 +320,8 @@ pub fn insert_track(
     Ok(conn.last_insert_rowid())
 }
 
+/// Fetch a track by primary key, including a denormalised list of artist names.
+/// Returns `None` if no row exists with that `id`.
 pub fn get_track(conn: &Connection, id: i64) -> Result<Option<Track>> {
     conn.query_row(
         "SELECT t.id, t.title, t.album_id, t.artist_id, t.source_id, t.file_path,
@@ -338,6 +365,7 @@ pub fn get_track(conn: &Connection, id: i64) -> Result<Option<Track>> {
     .optional()
 }
 
+/// Return all tracks for `album_id`, ordered by disc then track number.
 pub fn get_album_tracks(conn: &Connection, album_id: i64) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
         "SELECT t.id, t.title, t.album_id, t.artist_id, t.source_id, t.file_path,
@@ -383,6 +411,7 @@ pub fn get_album_tracks(conn: &Connection, album_id: i64) -> Result<Vec<Track>> 
     tracks.collect()
 }
 
+/// Update the star rating of a track. `rating` must already be validated (0–5).
 pub fn update_track_rating(conn: &Connection, track_id: i64, rating: u8) -> Result<()> {
     conn.execute(
         "UPDATE tracks SET rating = ?1 WHERE id = ?2",
@@ -391,11 +420,14 @@ pub fn update_track_rating(conn: &Connection, track_id: i64, rating: u8) -> Resu
     Ok(())
 }
 
+/// Permanently delete a track row. Foreign-key cascade removes related `track_genres`
+/// and `track_artists` rows automatically.
 pub fn delete_track(conn: &Connection, track_id: i64) -> Result<()> {
     conn.execute("DELETE FROM tracks WHERE id = ?1", params![track_id])?;
     Ok(())
 }
 
+/// Remove all genre associations for a track (used before re-linking on rescan).
 pub fn clear_track_genres(conn: &Connection, track_id: i64) -> Result<()> {
     conn.execute(
         "DELETE FROM track_genres WHERE track_id = ?1",
@@ -404,6 +436,7 @@ pub fn clear_track_genres(conn: &Connection, track_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Associate a genre with a track. Silently ignored if the link already exists.
 pub fn link_track_genre(conn: &Connection, track_id: i64, genre_id: i64) -> Result<()> {
     conn.execute(
         "INSERT INTO track_genres (track_id, genre_id) VALUES (?1, ?2) ON CONFLICT DO NOTHING",
@@ -412,6 +445,8 @@ pub fn link_track_genre(conn: &Connection, track_id: i64, genre_id: i64) -> Resu
     Ok(())
 }
 
+/// Associate an artist with a track at the given `position` in the credit list
+/// (0 = primary artist). Silently ignored if the link already exists.
 pub fn link_track_artist(
     conn: &Connection,
     track_id: i64,
@@ -470,6 +505,7 @@ pub fn get_album_featuring_artists(
 // Album operations (extended)
 // ============================================================================
 
+/// Count albums matching the optional filters (same semantics as [`list_albums`]).
 pub fn count_albums(
     conn: &Connection,
     artist_id: Option<i64>,
@@ -509,6 +545,8 @@ pub fn count_albums(
     Ok(count as usize)
 }
 
+/// Return a filtered, paginated list of albums ordered alphabetically by title.
+/// All filter parameters are optional (`None` = no restriction for that dimension).
 pub fn list_albums(
     conn: &Connection,
     artist_id: Option<i64>,
@@ -585,6 +623,8 @@ pub fn list_albums(
     albums.collect()
 }
 
+/// Return all albums credited to `artist_id` as primary, track, or featuring artist,
+/// ordered by year descending then title.
 pub fn get_artist_albums(conn: &Connection, artist_id: i64) -> Result<Vec<Album>> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT a.id, a.title, a.artist_id, ar.name as artist_name, a.year, a.rating,
@@ -627,6 +667,7 @@ pub fn get_artist_albums(conn: &Connection, artist_id: i64) -> Result<Vec<Album>
 // Artist operations (extended)
 // ============================================================================
 
+/// Return all artists ordered by `name_sort` (falling back to `name`).
 pub fn list_artists(conn: &Connection) -> Result<Vec<Artist>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, name_sort, bio, country, genre, style, mood,
@@ -656,6 +697,8 @@ pub fn list_artists(conn: &Connection) -> Result<Vec<Artist>> {
     artists.collect()
 }
 
+/// Return all albums that have at least one track tagged with `genre_id`,
+/// ordered by year descending then title.
 pub fn get_genre_albums(conn: &Connection, genre_id: i64) -> Result<Vec<Album>> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT a.id, a.title, a.artist_id, ar.name as artist_name, a.year, a.rating,
@@ -692,6 +735,8 @@ pub fn get_genre_albums(conn: &Connection, genre_id: i64) -> Result<Vec<Album>> 
     albums.collect()
 }
 
+/// Return artists for whom at least 25 % of their tracks are tagged with `genre_id`.
+/// At most 20 results, ordered alphabetically.
 pub fn get_genre_artists(conn: &Connection, genre_id: i64) -> Result<Vec<Artist>> {
     let mut stmt = conn.prepare(
         "SELECT a.id, a.name, a.name_sort, a.bio, a.country, a.genre, a.style, a.mood,
@@ -733,6 +778,12 @@ pub fn get_genre_artists(conn: &Connection, genre_id: i64) -> Result<Vec<Artist>
     artists.collect()
 }
 
+/// Return up to 20 artists similar to `artist_id`, ordered alphabetically.
+///
+/// Similarity is determined in two steps:
+/// 1. If `artist_id` has a TheAudioDB genre tag, match artists with the same tag.
+/// 2. Otherwise, fall back to track-genre overlap: artists where ≥ 25 % of their
+///    tracks share a genre that accounts for ≥ 25 % of `artist_id`'s tracks.
 pub fn get_similar_artists(conn: &Connection, artist_id: i64) -> Result<Vec<Artist>> {
     // Strategy:
     // 1. If the artist has a TheAudioDB genre, match other artists by that field.
@@ -804,6 +855,8 @@ pub fn get_similar_artists(conn: &Connection, artist_id: i64) -> Result<Vec<Arti
 // Genre operations (extended)
 // ============================================================================
 
+/// Return all genres ordered by name, each paired with its track count and album count.
+/// Tuple layout: `(Genre, track_count, album_count)`.
 pub fn list_genres_with_count(conn: &Connection) -> Result<Vec<(Genre, u32, u32)>> {
     let mut stmt = conn.prepare(
         "SELECT g.id, g.name,
@@ -830,6 +883,7 @@ pub fn list_genres_with_count(conn: &Connection) -> Result<Vec<(Genre, u32, u32)
     genres.collect()
 }
 
+/// Return all tracks tagged with `genre_id`, ordered by title.
 pub fn get_genre_tracks(conn: &Connection, genre_id: i64) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
         "SELECT t.id, t.title, t.album_id, t.artist_id, t.source_id, t.file_path,
@@ -877,6 +931,7 @@ pub fn get_genre_tracks(conn: &Connection, genre_id: i64) -> Result<Vec<Track>> 
     tracks.collect()
 }
 
+/// Return genres that appear on ≥ 50 % of the tracks in `album_id`, ordered by name.
 pub fn get_album_genres(conn: &Connection, album_id: i64) -> Result<Vec<Genre>> {
     let mut stmt = conn.prepare(
         "SELECT g.id, g.name
@@ -904,6 +959,7 @@ pub fn get_album_genres(conn: &Connection, album_id: i64) -> Result<Vec<Genre>> 
     genres.collect()
 }
 
+/// Return all distinct genres across tracks attributed to `artist_id`, ordered by name.
 pub fn get_artist_genres(conn: &Connection, artist_id: i64) -> Result<Vec<Genre>> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT g.id, g.name
@@ -924,6 +980,7 @@ pub fn get_artist_genres(conn: &Connection, artist_id: i64) -> Result<Vec<Genre>
     genres.collect()
 }
 
+/// Return all tracks belonging to `source_id`, ordered by title.
 pub fn get_source_tracks(conn: &Connection, source_id: i64) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
         "SELECT t.id, t.title, t.album_id, t.artist_id, t.source_id, t.file_path,
@@ -974,6 +1031,10 @@ pub fn get_source_tracks(conn: &Connection, source_id: i64) -> Result<Vec<Track>
 // Search operations
 // ============================================================================
 
+/// Simple FTS5 + LIKE search across tracks (FTS5), albums (LIKE), and artists (LIKE).
+/// Returns at most `limit` results per entity type.
+///
+/// For advanced fuzzy search, use [`crate::services::SearchService`] instead.
 pub fn search_library(
     conn: &Connection,
     query: &str,
@@ -1105,6 +1166,7 @@ pub fn search_library(
 // Playlist operations
 // ============================================================================
 
+/// Insert a new playlist row and return its `ROWID`.
 pub fn create_playlist(conn: &Connection, name: &str, description: Option<&str>) -> Result<i64> {
     conn.execute(
         "INSERT INTO playlists (name, description) VALUES (?1, ?2)",
@@ -1113,6 +1175,7 @@ pub fn create_playlist(conn: &Connection, name: &str, description: Option<&str>)
     Ok(conn.last_insert_rowid())
 }
 
+/// Fetch a playlist by primary key, including its ordered track IDs. Returns `None` if not found.
 pub fn get_playlist(conn: &Connection, id: i64) -> Result<Option<Playlist>> {
     let playlist = conn
         .query_row(
@@ -1150,6 +1213,7 @@ pub fn get_playlist(conn: &Connection, id: i64) -> Result<Option<Playlist>> {
     }
 }
 
+/// Append `track_id` to the end of `playlist_id`. Position is `MAX(position) + 1`.
 pub fn add_track_to_playlist(conn: &Connection, playlist_id: i64, track_id: i64) -> Result<()> {
     // Get max position
     let max_pos: i64 = conn.query_row(

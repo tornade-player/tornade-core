@@ -1,4 +1,7 @@
-// Database migrations
+//! Incremental database migrations applied on top of the base schema.
+//!
+//! Each migration is guarded by a `schema_migrations` table so it only runs once,
+//! even if [`run_migrations`] is called multiple times on the same database.
 
 use rusqlite::{Connection, Result};
 

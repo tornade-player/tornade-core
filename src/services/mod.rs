@@ -1,4 +1,19 @@
-// Business logic and services
+//! Business-logic services that sit between the SQLite database and the UI.
+//!
+//! Each service is responsible for a single concern:
+//!
+//! | Service | Responsibility |
+//! |---------|---------------|
+//! | [`LibraryService`] | Scanning directories, indexing audio files |
+//! | [`PlayerService`] | Audio playback via `cpal` (CoreAudio on macOS) |
+//! | [`PlaylistService`] | CRUD operations on persistent playlists |
+//! | [`SearchService`] | FTS5 + Levenshtein full-text search |
+//! | [`ArtworkService`] | Downloading artwork from MusicBrainz / Cover Art Archive |
+//! | [`DuplicateService`] | Detecting duplicate tracks by metadata fingerprint |
+//! | [`MetadataService`] | Reading audio tags with `lofty` |
+//!
+//! Services are designed to be cheap to clone (they wrap an `r2d2` pool or
+//! `Arc`-backed state) and are safe to share across threads.
 
 pub mod artwork;
 pub mod audio_engine;
