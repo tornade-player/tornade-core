@@ -693,6 +693,20 @@ impl LibraryService {
         queries::get_album_tracks(&conn, album_id).map_err(LibraryError::Database)
     }
 
+    /// Return up to `count` random track IDs from the library (capped at 200).
+    pub fn get_random_tracks(&self, count: usize) -> Result<Vec<i64>> {
+        let conn = self.pool.get()?;
+        let n = count.min(200);
+        let mut stmt = conn
+            .prepare(&format!("SELECT id FROM tracks ORDER BY RANDOM() LIMIT {n}"))
+            .map_err(LibraryError::Database)?;
+        let ids: std::result::Result<Vec<i64>, _> = stmt
+            .query_map([], |row| row.get::<_, i64>(0))
+            .map_err(LibraryError::Database)?
+            .collect();
+        ids.map_err(LibraryError::Database)
+    }
+
     /// Set the star rating of a track. `rating` must be in the range 0–5.
     pub fn rate_track(&self, track_id: i64, rating: u8) -> Result<()> {
         if rating > 5 {
