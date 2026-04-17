@@ -146,9 +146,7 @@ mod hal {
                 &mut actual as *mut _ as *mut c_void,
             );
             if status != 0 {
-                return Err(format!(
-                    "read back buffer size failed: OSStatus {status}"
-                ));
+                return Err(format!("read back buffer size failed: OSStatus {status}"));
             }
 
             Ok(actual)
@@ -164,8 +162,8 @@ pub struct SharedState {
     pub paused: AtomicBool,
     pub stopped: AtomicBool,
     pub finished: AtomicBool,
-    pub volume: AtomicU32,            // f32 bits stored as u32
-    pub callback_frames: AtomicU32,   // actual frames per callback (set once)
+    pub volume: AtomicU32,          // f32 bits stored as u32
+    pub callback_frames: AtomicU32, // actual frames per callback (set once)
 }
 
 impl SharedState {
@@ -325,7 +323,9 @@ impl AudioEngine {
         match hal::set_default_output_buffer_size(hal_target) {
             Ok(actual) => {
                 let ms = actual as f64 / device_sample_rate as f64 * 1000.0;
-                write_diag(&format!("HAL buffer size: requested={hal_target}, actual={actual} ({ms:.1} ms)"));
+                write_diag(&format!(
+                    "HAL buffer size: requested={hal_target}, actual={actual} ({ms:.1} ms)"
+                ));
                 info!("AudioEngine: HAL buffer size set to {actual} frames ({ms:.1} ms)");
             }
             Err(e) => {
@@ -338,11 +338,15 @@ impl AudioEngine {
         let cpal_buffer_size = match supported.buffer_size() {
             SupportedBufferSize::Range { min, max } => {
                 let clamped = target_frames.clamp(*min, *max);
-                write_diag(&format!("cpal buffer: {clamped} frames (range {min}–{max})"));
+                write_diag(&format!(
+                    "cpal buffer: {clamped} frames (range {min}–{max})"
+                ));
                 BufferSize::Fixed(clamped)
             }
             SupportedBufferSize::Unknown => {
-                write_diag(&format!("cpal buffer: range unknown, requesting {target_frames}"));
+                write_diag(&format!(
+                    "cpal buffer: range unknown, requesting {target_frames}"
+                ));
                 BufferSize::Fixed(target_frames)
             }
         };

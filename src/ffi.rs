@@ -2348,7 +2348,11 @@ fn get_album_featuring_artists(album_id: i64, exclude_artist_id: i64) -> String 
                 }
             };
 
-            match crate::db::queries::get_album_featuring_artists(&conn, album_id, exclude_artist_id) {
+            match crate::db::queries::get_album_featuring_artists(
+                &conn,
+                album_id,
+                exclude_artist_id,
+            ) {
                 Ok(artists) => serde_json::json!({
                     "success": true,
                     "data": { "artists": artists }

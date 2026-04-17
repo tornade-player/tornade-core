@@ -435,25 +435,20 @@ fn apply_migration_10_logic(conn: &Connection) -> Result<()> {
     };
 
     for (track_id, title) in tracks {
-        let feat_artists =
-            crate::services::library::extract_feat_from_title(&title);
+        let feat_artists = crate::services::library::extract_feat_from_title(&title);
 
         for name in feat_artists {
             // Find or create the artist row.
-            let artist_id: i64 = match conn.query_row(
-                "SELECT id FROM artists WHERE name = ?1",
-                [&name],
-                |r| r.get(0),
-            ) {
-                Ok(id) => id,
-                Err(_) => {
-                    conn.execute(
-                        "INSERT INTO artists (name) VALUES (?1)",
-                        [&name],
-                    )?;
-                    conn.last_insert_rowid()
-                }
-            };
+            let artist_id: i64 =
+                match conn.query_row("SELECT id FROM artists WHERE name = ?1", [&name], |r| {
+                    r.get(0)
+                }) {
+                    Ok(id) => id,
+                    Err(_) => {
+                        conn.execute("INSERT INTO artists (name) VALUES (?1)", [&name])?;
+                        conn.last_insert_rowid()
+                    }
+                };
 
             // INSERT OR IGNORE: primary key is (track_id, artist_id), so if the artist
             // was already linked via the ARTIST tag, this is a no-op.
@@ -1377,10 +1372,18 @@ mod tests {
 
         // Track must point to primary artist
         let track_artist: i64 = conn
-            .query_row("SELECT artist_id FROM tracks WHERE id = ?1", [track_id], |r| r.get(0))
+            .query_row(
+                "SELECT artist_id FROM tracks WHERE id = ?1",
+                [track_id],
+                |r| r.get(0),
+            )
             .unwrap();
         let primary_id: i64 = conn
-            .query_row("SELECT id FROM artists WHERE name = 'Doc Gynéco'", [], |r| r.get(0))
+            .query_row(
+                "SELECT id FROM artists WHERE name = 'Doc Gynéco'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(track_artist, primary_id);
     }
@@ -1405,23 +1408,48 @@ mod tests {
         // artist1 has 2 tracks, artist2 has 1 → artist1 is dominant
         for path in ["/t1.flac", "/t2.flac"] {
             queries::insert_track(
-                &conn, "T", Some(album), artist1, source,
-                &PathBuf::from(path), 60_000, None, None, None,
-                AudioFormat::Flac, 1_000_000,
-            ).unwrap();
+                &conn,
+                "T",
+                Some(album),
+                artist1,
+                source,
+                &PathBuf::from(path),
+                60_000,
+                None,
+                None,
+                None,
+                AudioFormat::Flac,
+                1_000_000,
+            )
+            .unwrap();
         }
         queries::insert_track(
-            &conn, "T3", Some(album), artist2, source,
-            &PathBuf::from("/t3.flac"), 60_000, None, None, None,
-            AudioFormat::Flac, 1_000_000,
-        ).unwrap();
+            &conn,
+            "T3",
+            Some(album),
+            artist2,
+            source,
+            &PathBuf::from("/t3.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
 
         apply_migration_9_logic_test(&conn);
 
         let album_artist: i64 = conn
-            .query_row("SELECT artist_id FROM albums WHERE id = ?1", [album], |r| r.get(0))
+            .query_row("SELECT artist_id FROM albums WHERE id = ?1", [album], |r| {
+                r.get(0)
+            })
             .unwrap();
-        assert_eq!(album_artist, artist1, "dominant artist must become the album artist");
+        assert_eq!(
+            album_artist, artist1,
+            "dominant artist must become the album artist"
+        );
     }
 
     #[test]
@@ -1434,15 +1462,29 @@ mod tests {
         let artist = queries::insert_artist(&conn, "Oxmo Puccino", None).unwrap();
         let album = queries::insert_album(&conn, "Mix", va_id, None).unwrap();
         queries::insert_track(
-            &conn, "T", Some(album), artist, source,
-            &PathBuf::from("/t.flac"), 60_000, None, None, None,
-            AudioFormat::Flac, 1_000_000,
-        ).unwrap();
+            &conn,
+            "T",
+            Some(album),
+            artist,
+            source,
+            &PathBuf::from("/t.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
 
         apply_migration_9_logic_test(&conn);
 
         let va_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM artists WHERE name = 'Various Artists'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM artists WHERE name = 'Various Artists'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(va_count, 0, "Various Artists artist must be deleted");
     }
@@ -1455,10 +1497,20 @@ mod tests {
         let artist = queries::insert_artist(&conn, "Adele", None).unwrap();
         let album = queries::insert_album(&conn, "21", artist, None).unwrap();
         queries::insert_track(
-            &conn, "T", Some(album), artist, source,
-            &PathBuf::from("/t.flac"), 60_000, None, None, None,
-            AudioFormat::Flac, 1_000_000,
-        ).unwrap();
+            &conn,
+            "T",
+            Some(album),
+            artist,
+            source,
+            &PathBuf::from("/t.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
 
         // Must not panic
         apply_migration_9_logic_test(&conn);
@@ -1485,9 +1537,8 @@ mod tests {
 
     #[test]
     fn test_extract_feat_from_title_multiple_artists_ampersand() {
-        let result = crate::services::library::extract_feat_from_title(
-            "Avf (avec OrelSan & Maitre Gims)",
-        );
+        let result =
+            crate::services::library::extract_feat_from_title("Avf (avec OrelSan & Maitre Gims)");
         assert_eq!(result, vec!["OrelSan", "Maitre Gims"]);
     }
 
@@ -1499,8 +1550,7 @@ mod tests {
 
     #[test]
     fn test_extract_feat_from_title_case_insensitive() {
-        let result =
-            crate::services::library::extract_feat_from_title("Track (FEAT. Artist Name)");
+        let result = crate::services::library::extract_feat_from_title("Track (FEAT. Artist Name)");
         assert_eq!(result, vec!["Artist Name"]);
     }
 
@@ -1538,11 +1588,9 @@ mod tests {
 
         // Sia must now exist as an artist
         let sia_id: Option<i64> = conn
-            .query_row(
-                "SELECT id FROM artists WHERE name = 'Sia'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT id FROM artists WHERE name = 'Sia'", [], |r| {
+                r.get(0)
+            })
             .optional()
             .unwrap();
         assert!(sia_id.is_some(), "Sia must be created as an artist");

@@ -48,8 +48,18 @@ pub(crate) fn extract_feat_from_title(title: &str) -> Vec<String> {
 
     // Longest patterns first to avoid partial matches.
     const MARKERS: &[&str] = &[
-        "(featuring ", "(feat. ", "(feat ", "(ft. ", "(ft ", "(avec ",
-        "[featuring ", "[feat. ", "[feat ", "[ft. ", "[ft ", "[avec ",
+        "(featuring ",
+        "(feat. ",
+        "(feat ",
+        "(ft. ",
+        "(ft ",
+        "(avec ",
+        "[featuring ",
+        "[feat. ",
+        "[feat ",
+        "[ft. ",
+        "[ft ",
+        "[avec ",
     ];
 
     for marker in MARKERS {
@@ -99,7 +109,7 @@ pub(crate) fn split_artists(artist: &str) -> Vec<String> {
         || lower.contains(" feat")    // feat, feat., featuring
         || lower.contains(" ft")      // ft, ft.
         || lower.contains(" avec ")
-        || lower.contains(" vs");     // vs, vs.
+        || lower.contains(" vs"); // vs, vs.
 
     if !has_context {
         return vec![trimmed.to_string()];
@@ -476,7 +486,10 @@ impl LibraryService {
         // Also link featured artists extracted from the track title
         // (e.g. "Titanium (feat. Sia)" when ARTIST tag only contains "David Guetta").
         let title_offset = artists.len() as u32;
-        for (pos, name) in extract_feat_from_title(&metadata.title).into_iter().enumerate() {
+        for (pos, name) in extract_feat_from_title(&metadata.title)
+            .into_iter()
+            .enumerate()
+        {
             let aid = queries::insert_artist(conn, &name, None)?;
             queries::link_track_artist(conn, track_id, aid, title_offset + pos as u32)?;
         }
@@ -762,11 +775,38 @@ impl LibraryService {
         queries::get_artist(&conn, id).map_err(LibraryError::Database)
     }
 
+    /// Return `count` random track IDs from the library (capped at 200).
+    pub fn get_random_tracks(&self, count: usize) -> Result<Vec<i64>> {
+        let conn = self.pool.get()?;
+        let n = count.min(200);
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT id FROM tracks ORDER BY RANDOM() LIMIT {n}"
+            ))
+            .map_err(LibraryError::Database)?;
+        let ids: Vec<i64> = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(LibraryError::Database)?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(ids)
+    }
+
     /// Return all artists in the library, ordered alphabetically by name.
     pub fn list_artists(&self) -> Result<Vec<Artist>> {
         let conn = self.pool.get()?;
 
         queries::list_artists(&conn).map_err(LibraryError::Database)
+    }
+
+    /// Return up to `limit` local artwork paths for albums in the given genre.
+    pub fn get_genre_artwork_paths(
+        &self,
+        genre_id: i64,
+        limit: usize,
+    ) -> Result<Vec<std::path::PathBuf>> {
+        let conn = self.pool.get()?;
+        queries::get_genre_artwork_paths(&conn, genre_id, limit).map_err(LibraryError::Database)
     }
 
     /// Return all artists associated with the given genre.
@@ -891,10 +931,7 @@ mod tests {
 
     #[test]
     fn test_split_artists_feat() {
-        assert_eq!(
-            split_artists("Drake feat. Future"),
-            vec!["Drake", "Future"]
-        );
+        assert_eq!(split_artists("Drake feat. Future"), vec!["Drake", "Future"]);
     }
 
     #[test]
@@ -908,7 +945,10 @@ mod tests {
     #[test]
     fn test_split_artists_preserves_simon_garfunkel() {
         // No unambiguous marker → intact
-        assert_eq!(split_artists("Simon & Garfunkel"), vec!["Simon & Garfunkel"]);
+        assert_eq!(
+            split_artists("Simon & Garfunkel"),
+            vec!["Simon & Garfunkel"]
+        );
     }
 
     #[test]

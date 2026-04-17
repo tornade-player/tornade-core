@@ -98,7 +98,8 @@ pub fn insert_artist(conn: &Connection, name: &str, name_sort: Option<&str>) -> 
 pub fn get_artist(conn: &Connection, id: i64) -> Result<Option<Artist>> {
     conn.query_row(
         "SELECT id, name, name_sort, bio, country, genre, style, mood,
-                formed_year, born_year, died_year, disbanded, musicbrainz_id, theaudiodb_id
+                formed_year, born_year, died_year, disbanded, musicbrainz_id, theaudiodb_id,
+                photo_path
          FROM artists WHERE id = ?1",
         params![id],
         |row| {
@@ -117,6 +118,7 @@ pub fn get_artist(conn: &Connection, id: i64) -> Result<Option<Artist>> {
                 disbanded: row.get(11)?,
                 musicbrainz_id: row.get(12)?,
                 theaudiodb_id: row.get(13)?,
+                photo_path: row.get::<_, Option<String>>(14)?.map(PathBuf::from),
             })
         },
     )
@@ -470,7 +472,8 @@ pub fn get_album_featuring_artists(
 ) -> Result<Vec<Artist>> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT a.id, a.name, a.name_sort, a.bio, a.country, a.genre, a.style, a.mood,
-                a.formed_year, a.born_year, a.died_year, a.disbanded, a.musicbrainz_id, a.theaudiodb_id
+                a.formed_year, a.born_year, a.died_year, a.disbanded, a.musicbrainz_id,
+                a.theaudiodb_id, a.photo_path
          FROM track_artists ta
          JOIN tracks t ON t.id = ta.track_id
          JOIN artists a ON a.id = ta.artist_id
@@ -495,6 +498,7 @@ pub fn get_album_featuring_artists(
             disbanded: row.get(11)?,
             musicbrainz_id: row.get(12)?,
             theaudiodb_id: row.get(13)?,
+            photo_path: row.get::<_, Option<String>>(14)?.map(PathBuf::from),
         })
     })?;
 
@@ -671,7 +675,8 @@ pub fn get_artist_albums(conn: &Connection, artist_id: i64) -> Result<Vec<Album>
 pub fn list_artists(conn: &Connection) -> Result<Vec<Artist>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, name_sort, bio, country, genre, style, mood,
-                formed_year, born_year, died_year, disbanded, musicbrainz_id, theaudiodb_id
+                formed_year, born_year, died_year, disbanded, musicbrainz_id, theaudiodb_id,
+                photo_path
          FROM artists ORDER BY COALESCE(name_sort, name)",
     )?;
 
@@ -691,6 +696,7 @@ pub fn list_artists(conn: &Connection) -> Result<Vec<Artist>> {
             disbanded: row.get(11)?,
             musicbrainz_id: row.get(12)?,
             theaudiodb_id: row.get(13)?,
+            photo_path: row.get::<_, Option<String>>(14)?.map(PathBuf::from),
         })
     })?;
 
@@ -735,12 +741,41 @@ pub fn get_genre_albums(conn: &Connection, genre_id: i64) -> Result<Vec<Album>> 
     albums.collect()
 }
 
+/// Return up to `limit` local artwork file paths for albums in `genre_id`.
+/// Only returns paths that exist on disk. Used to build mosaic thumbnails.
+pub fn get_genre_artwork_paths(
+    conn: &Connection,
+    genre_id: i64,
+    limit: usize,
+) -> Result<Vec<PathBuf>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT COALESCE(a.online_artwork_path, a.artwork_path)
+         FROM albums a
+         JOIN tracks t ON t.album_id = a.id
+         JOIN track_genres tg ON tg.track_id = t.id
+         WHERE tg.genre_id = ?1
+           AND (a.online_artwork_path IS NOT NULL OR a.artwork_path IS NOT NULL)
+         ORDER BY a.year DESC
+         LIMIT ?2",
+    )?;
+    let paths: Vec<PathBuf> = stmt
+        .query_map(params![genre_id, limit as i64], |row| {
+            row.get::<_, String>(0)
+        })?
+        .filter_map(|r| r.ok())
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .collect();
+    Ok(paths)
+}
+
 /// Return artists for whom at least 25 % of their tracks are tagged with `genre_id`.
 /// At most 20 results, ordered alphabetically.
 pub fn get_genre_artists(conn: &Connection, genre_id: i64) -> Result<Vec<Artist>> {
     let mut stmt = conn.prepare(
         "SELECT a.id, a.name, a.name_sort, a.bio, a.country, a.genre, a.style, a.mood,
-                a.formed_year, a.born_year, a.died_year, a.disbanded, a.musicbrainz_id, a.theaudiodb_id
+                a.formed_year, a.born_year, a.died_year, a.disbanded, a.musicbrainz_id,
+                a.theaudiodb_id, a.photo_path
          FROM artists a
          WHERE a.id IN (
              SELECT t.artist_id
@@ -753,7 +788,7 @@ pub fn get_genre_artists(conn: &Connection, genre_id: i64) -> Result<Vec<Artist>
              ) >= 25
          )
          ORDER BY a.name
-         LIMIT 20"
+         LIMIT 20",
     )?;
 
     let artists = stmt.query_map(params![genre_id], |row| {
@@ -772,6 +807,7 @@ pub fn get_genre_artists(conn: &Connection, genre_id: i64) -> Result<Vec<Artist>
             disbanded: row.get(11)?,
             musicbrainz_id: row.get(12)?,
             theaudiodb_id: row.get(13)?,
+            photo_path: row.get::<_, Option<String>>(14)?.map(PathBuf::from),
         })
     })?;
 
@@ -791,7 +827,8 @@ pub fn get_similar_artists(conn: &Connection, artist_id: i64) -> Result<Vec<Arti
     //    tracks share the same genre as ≥25% of the reference artist's tracks.
     let mut stmt = conn.prepare(
         "SELECT id, name, name_sort, bio, country, genre, style, mood,
-                formed_year, born_year, died_year, disbanded, musicbrainz_id, theaudiodb_id
+                formed_year, born_year, died_year, disbanded, musicbrainz_id, theaudiodb_id,
+                photo_path
          FROM artists
          WHERE id != ?1
            AND (
@@ -845,6 +882,7 @@ pub fn get_similar_artists(conn: &Connection, artist_id: i64) -> Result<Vec<Arti
             disbanded: row.get(11)?,
             musicbrainz_id: row.get(12)?,
             theaudiodb_id: row.get(13)?,
+            photo_path: row.get::<_, Option<String>>(14)?.map(PathBuf::from),
         })
     })?;
 
@@ -1130,7 +1168,8 @@ pub fn search_library(
     let mut artists = Vec::new();
     let mut stmt = conn.prepare(
         "SELECT id, name, name_sort, bio, country, genre, style, mood,
-                formed_year, born_year, died_year, disbanded, musicbrainz_id, theaudiodb_id
+                formed_year, born_year, died_year, disbanded, musicbrainz_id, theaudiodb_id,
+                photo_path
          FROM artists
          WHERE name LIKE ?1
          LIMIT ?2",
@@ -1152,6 +1191,7 @@ pub fn search_library(
             disbanded: row.get(11)?,
             musicbrainz_id: row.get(12)?,
             theaudiodb_id: row.get(13)?,
+            photo_path: row.get::<_, Option<String>>(14)?.map(PathBuf::from),
         })
     })?;
 
@@ -1412,7 +1452,11 @@ mod tests {
         link_track_artist(&conn, track_id, sia, 1).unwrap();
 
         let sia_albums = get_artist_albums(&conn, sia).unwrap();
-        assert_eq!(sia_albums.len(), 1, "Sia must see the album via track_artists");
+        assert_eq!(
+            sia_albums.len(),
+            1,
+            "Sia must see the album via track_artists"
+        );
         assert_eq!(sia_albums[0].title, "Titanium");
 
         let guetta_albums = get_artist_albums(&conn, guetta).unwrap();
@@ -1967,7 +2011,10 @@ mod tests {
         let artists = get_genre_artists(&conn, genre_id).unwrap();
         let ids: Vec<i64> = artists.iter().map(|a| a.id).collect();
         assert!(ids.contains(&artist_a_id), "Artist A (100%) should appear");
-        assert!(!ids.contains(&artist_b_id), "Artist B (20%) should be filtered out");
+        assert!(
+            !ids.contains(&artist_b_id),
+            "Artist B (20%) should be filtered out"
+        );
     }
 
     #[test]
@@ -2616,14 +2663,15 @@ mod tests {
         link_track_artist(&conn, track_id, feat, 1).unwrap();
 
         let stats = clean_orphans(&conn).unwrap();
-        assert_eq!(stats.artists_deleted, 0, "featured artist must not be deleted");
+        assert_eq!(
+            stats.artists_deleted, 0,
+            "featured artist must not be deleted"
+        );
 
         let feat_still_exists: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM artists WHERE id = ?1",
-                [feat],
-                |r| r.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM artists WHERE id = ?1", [feat], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(feat_still_exists, 1);
     }
@@ -2639,10 +2687,20 @@ mod tests {
         let album = insert_album(&conn, "Collab", stromae, None).unwrap();
 
         let track_id = insert_track(
-            &conn, "T", Some(album), stromae, source,
-            &PathBuf::from("/t.flac"), 60_000, None, None, None,
-            AudioFormat::Flac, 1_000_000,
-        ).unwrap();
+            &conn,
+            "T",
+            Some(album),
+            stromae,
+            source,
+            &PathBuf::from("/t.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
 
         link_track_artist(&conn, track_id, stromae, 0).unwrap();
         link_track_artist(&conn, track_id, orelsan, 1).unwrap();
@@ -2651,7 +2709,10 @@ mod tests {
         let featuring = get_album_featuring_artists(&conn, album, stromae).unwrap();
         let names: Vec<&str> = featuring.iter().map(|a| a.name.as_str()).collect();
         assert!(names.contains(&"OrelSan"), "OrelSan must be in featuring");
-        assert!(names.contains(&"Maitre Gims"), "Maitre Gims must be in featuring");
+        assert!(
+            names.contains(&"Maitre Gims"),
+            "Maitre Gims must be in featuring"
+        );
         assert!(!names.contains(&"Stromae"), "album artist must be excluded");
     }
 
@@ -2663,13 +2724,26 @@ mod tests {
         let adele = insert_artist(&conn, "Adele", None).unwrap();
         let album = insert_album(&conn, "21", adele, None).unwrap();
         let track_id = insert_track(
-            &conn, "T", Some(album), adele, source,
-            &PathBuf::from("/t.flac"), 60_000, None, None, None,
-            AudioFormat::Flac, 1_000_000,
-        ).unwrap();
+            &conn,
+            "T",
+            Some(album),
+            adele,
+            source,
+            &PathBuf::from("/t.flac"),
+            60_000,
+            None,
+            None,
+            None,
+            AudioFormat::Flac,
+            1_000_000,
+        )
+        .unwrap();
         link_track_artist(&conn, track_id, adele, 0).unwrap();
 
         let featuring = get_album_featuring_artists(&conn, album, adele).unwrap();
-        assert!(featuring.is_empty(), "solo album must have no featuring artists");
+        assert!(
+            featuring.is_empty(),
+            "solo album must have no featuring artists"
+        );
     }
 }

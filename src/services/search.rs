@@ -37,14 +37,14 @@ pub struct SearchResults {
 /// Strips FTS5 operator characters, then appends `*` to each token for prefix
 /// matching ("Coltr" → "Coltr*"). Returns empty string if nothing remains.
 fn sanitize_fts_query(raw: &str) -> String {
-    let cleaned: String = raw
-        .chars()
-        .map(|c| match c {
-            '"' | '(' | ')' | ':' | '^' | '-' | '*' | '\\' | '+' | '~' | '%' | '/' | '?'
-            | '.' => ' ',
-            _ => c,
-        })
-        .collect();
+    let cleaned: String =
+        raw.chars()
+            .map(|c| match c {
+                '"' | '(' | ')' | ':' | '^' | '-' | '*' | '\\' | '+' | '~' | '%' | '/' | '?'
+                | '.' => ' ',
+                _ => c,
+            })
+            .collect();
     cleaned
         .split_whitespace()
         .filter(|t| !t.is_empty())
@@ -69,8 +69,12 @@ fn levenshtein(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
     let (n, m) = (a.len(), b.len());
-    if n == 0 { return m; }
-    if m == 0 { return n; }
+    if n == 0 {
+        return m;
+    }
+    if m == 0 {
+        return n;
+    }
     let mut row: Vec<usize> = (0..=m).collect();
     for i in 1..=n {
         let mut prev = row[0];
@@ -104,18 +108,24 @@ fn edit_threshold(query_chars: usize) -> usize {
 /// 2. Every query word is a prefix of some candidate word.
 /// 3. Edit distance ≤ threshold (queries ≥ 4 chars only).
 pub fn fuzzy_matches(query: &str, candidate: &str) -> bool {
-    if query.is_empty() { return true; }
+    if query.is_empty() {
+        return true;
+    }
     let q = query.to_lowercase();
     let c = candidate.to_lowercase();
 
     // 1. Substring
-    if c.contains(&q) { return true; }
+    if c.contains(&q) {
+        return true;
+    }
 
     // 2. All query words appear as prefixes of some candidate word
     let q_words: Vec<&str> = q.split_whitespace().collect();
     let c_words: Vec<&str> = c.split_whitespace().collect();
     if !q_words.is_empty()
-        && q_words.iter().all(|qw| c_words.iter().any(|cw| cw.starts_with(qw)))
+        && q_words
+            .iter()
+            .all(|qw| c_words.iter().any(|cw| cw.starts_with(qw)))
     {
         return true;
     }
@@ -123,8 +133,12 @@ pub fn fuzzy_matches(query: &str, candidate: &str) -> bool {
     // 3. Levenshtein
     let threshold = edit_threshold(q.chars().count());
     if threshold > 0 {
-        if levenshtein(&q, &c) <= threshold { return true; }
-        if c_words.iter().any(|cw| levenshtein(&q, cw) <= threshold) { return true; }
+        if levenshtein(&q, &c) <= threshold {
+            return true;
+        }
+        if c_words.iter().any(|cw| levenshtein(&q, cw) <= threshold) {
+            return true;
+        }
     }
 
     false
@@ -182,7 +196,9 @@ impl SearchService {
                     .and_then(|rows| rows.collect::<rusqlite::Result<Vec<i64>>>())
                 {
                     for id in ids {
-                        if track_seen.insert(id) { track_ids.push(id); }
+                        if track_seen.insert(id) {
+                            track_ids.push(id);
+                        }
                     }
                 }
             }
@@ -202,7 +218,9 @@ impl SearchService {
                     .and_then(|rows| rows.collect::<rusqlite::Result<Vec<i64>>>())
                 {
                     for id in ids {
-                        if track_seen.insert(id) { track_ids.push(id); }
+                        if track_seen.insert(id) {
+                            track_ids.push(id);
+                        }
                     }
                 }
             }
@@ -227,14 +245,15 @@ impl SearchService {
                     .filter_map(|r| r.ok())
                     .filter(|(id, title, artist)| {
                         !track_seen.contains(id)
-                            && (fuzzy_matches(&q_lower, title)
-                                || fuzzy_matches(&q_lower, artist))
+                            && (fuzzy_matches(&q_lower, title) || fuzzy_matches(&q_lower, artist))
                     })
                     .take(50)
                     .map(|(id, _, _)| id)
                     .collect();
                 for id in new_ids {
-                    if track_seen.insert(id) { track_ids.push(id); }
+                    if track_seen.insert(id) {
+                        track_ids.push(id);
+                    }
                 }
             }
         }
@@ -265,7 +284,9 @@ impl SearchService {
                     .and_then(|rows| rows.collect::<rusqlite::Result<Vec<i64>>>())
                 {
                     for id in ids {
-                        if album_seen.insert(id) { album_ids.push(id); }
+                        if album_seen.insert(id) {
+                            album_ids.push(id);
+                        }
                     }
                 }
             }
@@ -285,7 +306,9 @@ impl SearchService {
                     .and_then(|rows| rows.collect::<rusqlite::Result<Vec<i64>>>())
                 {
                     for id in ids {
-                        if album_seen.insert(id) { album_ids.push(id); }
+                        if album_seen.insert(id) {
+                            album_ids.push(id);
+                        }
                     }
                 }
             }
@@ -310,14 +333,15 @@ impl SearchService {
                     .filter_map(|r| r.ok())
                     .filter(|(id, title, artist)| {
                         !album_seen.contains(id)
-                            && (fuzzy_matches(&q_lower, title)
-                                || fuzzy_matches(&q_lower, artist))
+                            && (fuzzy_matches(&q_lower, title) || fuzzy_matches(&q_lower, artist))
                     })
                     .take(20)
                     .map(|(id, _, _)| id)
                     .collect();
                 for id in new_ids {
-                    if album_seen.insert(id) { album_ids.push(id); }
+                    if album_seen.insert(id) {
+                        album_ids.push(id);
+                    }
                 }
             }
         }
@@ -376,7 +400,9 @@ impl SearchService {
                     .and_then(|rows| rows.collect::<rusqlite::Result<Vec<i64>>>())
                 {
                     for id in ids {
-                        if artist_seen.insert(id) { artist_ids.push(id); }
+                        if artist_seen.insert(id) {
+                            artist_ids.push(id);
+                        }
                     }
                 }
             }
@@ -384,15 +410,17 @@ impl SearchService {
 
         // 2. LIKE substring
         if !like_q.is_empty() {
-            if let Ok(mut stmt) = conn.prepare(
-                "SELECT id FROM artists WHERE name LIKE '%' || ?1 || '%' LIMIT 20",
-            ) {
+            if let Ok(mut stmt) =
+                conn.prepare("SELECT id FROM artists WHERE name LIKE '%' || ?1 || '%' LIMIT 20")
+            {
                 if let Ok(ids) = stmt
                     .query_map([&like_q], |row| row.get(0))
                     .and_then(|rows| rows.collect::<rusqlite::Result<Vec<i64>>>())
                 {
                     for id in ids {
-                        if artist_seen.insert(id) { artist_ids.push(id); }
+                        if artist_seen.insert(id) {
+                            artist_ids.push(id);
+                        }
                     }
                 }
             }
@@ -407,14 +435,14 @@ impl SearchService {
                     })
                     .map_err(LibraryError::Database)?
                     .filter_map(|r| r.ok())
-                    .filter(|(id, name)| {
-                        !artist_seen.contains(id) && fuzzy_matches(&q_lower, name)
-                    })
+                    .filter(|(id, name)| !artist_seen.contains(id) && fuzzy_matches(&q_lower, name))
                     .take(20)
                     .map(|(id, _)| id)
                     .collect();
                 for id in new_ids {
-                    if artist_seen.insert(id) { artist_ids.push(id); }
+                    if artist_seen.insert(id) {
+                        artist_ids.push(id);
+                    }
                 }
             }
         }
@@ -426,7 +454,8 @@ impl SearchService {
             .filter_map(|&id| {
                 conn.query_row(
                     "SELECT id, name, name_sort, bio, country, genre, style, mood,
-                        formed_year, born_year, died_year, disbanded, musicbrainz_id, theaudiodb_id
+                        formed_year, born_year, died_year, disbanded, musicbrainz_id,
+                        theaudiodb_id, photo_path
                      FROM artists WHERE id = ?1",
                     rusqlite::params![id],
                     |row| {
@@ -445,6 +474,9 @@ impl SearchService {
                             disbanded: row.get(11)?,
                             musicbrainz_id: row.get(12)?,
                             theaudiodb_id: row.get(13)?,
+                            photo_path: row
+                                .get::<_, Option<String>>(14)?
+                                .map(std::path::PathBuf::from),
                         })
                     },
                 )
@@ -452,7 +484,11 @@ impl SearchService {
             })
             .collect();
 
-        Ok(SearchResults { tracks, albums, artists })
+        Ok(SearchResults {
+            tracks,
+            albums,
+            artists,
+        })
     }
 }
 
@@ -644,7 +680,10 @@ mod tests {
         env.seed_basic_library();
         let service = SearchService::new(env.pool.clone());
         let results = service.search("Track").unwrap();
-        assert!(!results.tracks.is_empty(), "must find tracks by title token");
+        assert!(
+            !results.tracks.is_empty(),
+            "must find tracks by title token"
+        );
     }
 
     #[test]
@@ -653,7 +692,11 @@ mod tests {
         env.seed_basic_library();
         let service = SearchService::new(env.pool.clone());
         let results = service.search("One").unwrap();
-        assert_eq!(results.tracks.len(), 1, "only 'Track One' contains token 'One'");
+        assert_eq!(
+            results.tracks.len(),
+            1,
+            "only 'Track One' contains token 'One'"
+        );
         assert_eq!(results.tracks[0].title, "Track One");
     }
 
@@ -663,7 +706,10 @@ mod tests {
         env.seed_basic_library();
         let service = SearchService::new(env.pool.clone());
         let results = service.search("Artist").unwrap();
-        assert!(!results.tracks.is_empty(), "must find tracks by artist name token");
+        assert!(
+            !results.tracks.is_empty(),
+            "must find tracks by artist name token"
+        );
     }
 
     #[test]
@@ -672,7 +718,10 @@ mod tests {
         env.seed_basic_library();
         let service = SearchService::new(env.pool.clone());
         let results = service.search("Trac").unwrap();
-        assert!(!results.tracks.is_empty(), "prefix 'Trac' must find 'Track One'");
+        assert!(
+            !results.tracks.is_empty(),
+            "prefix 'Trac' must find 'Track One'"
+        );
     }
 
     #[test]
@@ -681,7 +730,10 @@ mod tests {
         env.seed_basic_library();
         let service = SearchService::new(env.pool.clone());
         let results = service.search("Test Al").unwrap();
-        assert!(!results.albums.is_empty(), "prefix must find album by partial title");
+        assert!(
+            !results.albums.is_empty(),
+            "prefix must find album by partial title"
+        );
     }
 
     #[test]
@@ -690,7 +742,10 @@ mod tests {
         env.seed_basic_library();
         let service = SearchService::new(env.pool.clone());
         let results = service.search("Test Art").unwrap();
-        assert!(!results.artists.is_empty(), "prefix must find artist by partial name");
+        assert!(
+            !results.artists.is_empty(),
+            "prefix must find artist by partial name"
+        );
     }
 
     /// Regression: a track absent from tracks_fts must still appear via LIKE.
@@ -731,7 +786,10 @@ mod tests {
         let service = SearchService::new(env.pool.clone());
         // "Trak" is 1 edit from "Track" — Levenshtein must find it
         let results = service.search("Trak").unwrap();
-        assert!(!results.tracks.is_empty(), "Levenshtein must find 'Track One' with 'Trak'");
+        assert!(
+            !results.tracks.is_empty(),
+            "Levenshtein must find 'Track One' with 'Trak'"
+        );
     }
 
     #[test]
@@ -741,7 +799,10 @@ mod tests {
         let service = SearchService::new(env.pool.clone());
         // "Test Artst" is 1 edit from "Test Artist"
         let results = service.search("Test Artst").unwrap();
-        assert!(!results.artists.is_empty(), "Levenshtein must find 'Test Artist' with 'Test Artst'");
+        assert!(
+            !results.artists.is_empty(),
+            "Levenshtein must find 'Test Artist' with 'Test Artst'"
+        );
     }
 
     // ── Special characters — must not panic ───────────────────────────────
