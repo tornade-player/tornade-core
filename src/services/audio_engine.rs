@@ -13,9 +13,9 @@
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, SampleRate, StreamConfig, SupportedBufferSize};
-use log::warn;
 #[cfg(target_os = "macos")]
 use log::info;
+use log::warn;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed, Ordering::Release};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
