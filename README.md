@@ -1,6 +1,6 @@
 # tornade-core
 
-![Tornade Core Logo](https://raw.githubusercontent.com/tornade-player/tornade/refs/heads/main/sources/tornade-tui-icon.png?token=GHSAT0AAAAAADRW3PLN2TEYS2KZKXGQ4OHC2NAMSQA)
+![Tornade Tui Logo](https://github.com/tornade-player/tornade/blob/main/sources/tornade-core-icon.png)
 
 [![CI](https://github.com/tornade-player/tornade-core/actions/workflows/ci.yml/badge.svg)](https://github.com/tornade-player/tornade-core/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
