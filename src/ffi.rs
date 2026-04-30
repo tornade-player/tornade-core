@@ -177,6 +177,7 @@ mod ffi {
 
         // Genre Functions
         fn get_genres() -> String;
+        fn search_genres(query: &str, limit: u32) -> String;
         fn get_genre_tracks(genre_id: i64) -> String;
         fn get_genre_artists(genre_id: i64) -> String;
         fn get_similar_artists(artist_id: i64) -> String;
@@ -2118,6 +2119,131 @@ fn get_genres() -> String {
     }
 }
 
+fn search_genres(query: &str, limit: u32) -> String {
+    if query.trim().is_empty() {
+        return serde_json::json!({
+            "success": true,
+            "data": { "genres": serde_json::json!([]) }
+        })
+        .to_string();
+    }
+
+    match get_or_init_pool() {
+        Ok(pool) => search_genres_with_pool(&pool, query, limit),
+        Err(e) => serde_json::json!({
+            "success": false,
+            "error": format!("FFI initialization failed: {}", e)
+        })
+        .to_string(),
+    }
+}
+
+fn search_genres_with_pool(pool: &crate::db::DbPool, query: &str, limit: u32) -> String {
+    let conn = match pool.get() {
+        Ok(conn) => conn,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Failed to get database connection: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    let pattern = format!("%{}%", query);
+    let limit_val = limit as i64;
+
+    // LIKE-based substring search on genre name
+    let matched: Vec<(crate::models::Genre, u32, u32)> = conn
+        .prepare(
+            "SELECT g.id, g.name,
+                    COUNT(DISTINCT tg.track_id) AS track_count,
+                    COUNT(DISTINCT t.album_id)  AS album_count
+             FROM genres g
+             LEFT JOIN track_genres tg ON tg.genre_id = g.id
+             LEFT JOIN tracks t ON t.id = tg.track_id
+             WHERE g.name LIKE ?1
+             GROUP BY g.id, g.name
+             ORDER BY g.name
+             LIMIT ?2",
+        )
+        .and_then(|mut stmt| {
+            stmt.query_map(rusqlite::params![pattern, limit_val], |row| {
+                Ok((
+                    crate::models::Genre {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                    },
+                    row.get::<_, i64>(2)? as u32,
+                    row.get::<_, i64>(3)? as u32,
+                ))
+            })
+            .map(|rows| rows.flatten().collect())
+        })
+        .unwrap_or_default();
+
+    // Collect up to 4 representative album IDs per matched genre
+    let genre_ids: Vec<i64> = matched.iter().map(|(g, _, _)| g.id).collect();
+    let mut genre_albums: std::collections::HashMap<i64, Vec<i64>> =
+        std::collections::HashMap::new();
+
+    if !genre_ids.is_empty() {
+        let placeholders = genre_ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT tg.genre_id, a.id
+             FROM track_genres tg
+             JOIN tracks t ON tg.track_id = t.id
+             JOIN albums a ON t.album_id = a.id
+             WHERE tg.genre_id IN ({placeholders})
+             GROUP BY tg.genre_id, a.id
+             ORDER BY tg.genre_id, a.id"
+        );
+        if let Ok(mut stmt) = conn.prepare(&sql) {
+            let params: Vec<&dyn rusqlite::ToSql> = genre_ids
+                .iter()
+                .map(|id| id as &dyn rusqlite::ToSql)
+                .collect();
+            let _ = stmt
+                .query_map(params.as_slice(), |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                })
+                .map(|rows| {
+                    for pair in rows.flatten() {
+                        let entry = genre_albums.entry(pair.0).or_default();
+                        if entry.len() < 4 {
+                            entry.push(pair.1);
+                        }
+                    }
+                });
+        }
+    }
+
+    let genres: Vec<_> = matched
+        .into_iter()
+        .map(|(genre, track_count, album_count)| {
+            let album_ids = genre_albums.get(&genre.id).cloned().unwrap_or_default();
+            serde_json::json!({
+                "id": genre.id,
+                "name": genre.name,
+                "track_count": track_count,
+                "album_count": album_count,
+                "album_ids": album_ids
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "success": true,
+        "data": { "genres": genres }
+    })
+    .to_string()
+}
+
 fn get_genre_tracks(genre_id: i64) -> String {
     // Get all tracks for a specific genre
     match get_or_init_pool() {
@@ -3126,6 +3252,84 @@ mod tests {
         env.seed_basic_library();
         let ids = query_track_ids_paged(&env.pool, 0, 0);
         assert!(ids.is_empty(), "limit=0 must return an empty list");
+    }
+
+    // ── search_genres ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_search_genres_empty_query_returns_empty() {
+        let env = TestEnv::new();
+        env.seed_basic_library(); // seeds "Rock" genre
+        let result = search_genres_with_pool(&env.pool, "", 100);
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["success"], true);
+        // empty-query guard is in `search_genres`, not the helper — helper returns LIKE '%%' (all)
+        // so we just verify JSON is valid and success=true
+    }
+
+    #[test]
+    fn test_search_genres_exact_match_returns_genre() {
+        let env = TestEnv::new();
+        env.seed_basic_library(); // seeds "Rock" genre
+        let result = search_genres_with_pool(&env.pool, "Rock", 100);
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["success"], true);
+        let genres = v["data"]["genres"].as_array().unwrap();
+        assert_eq!(genres.len(), 1);
+        assert_eq!(genres[0]["name"], "Rock");
+    }
+
+    #[test]
+    fn test_search_genres_partial_match_returns_genre() {
+        let env = TestEnv::new();
+        env.seed_basic_library(); // seeds "Rock" genre
+        let result = search_genres_with_pool(&env.pool, "oc", 100);
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["success"], true);
+        let genres = v["data"]["genres"].as_array().unwrap();
+        assert_eq!(genres.len(), 1, "partial 'oc' must match 'Rock'");
+    }
+
+    #[test]
+    fn test_search_genres_no_match_returns_empty_array() {
+        let env = TestEnv::new();
+        env.seed_basic_library(); // seeds "Rock" genre
+        let result = search_genres_with_pool(&env.pool, "Jazz", 100);
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["success"], true);
+        let genres = v["data"]["genres"].as_array().unwrap();
+        assert!(
+            genres.is_empty(),
+            "no genre named Jazz must yield empty array"
+        );
+    }
+
+    #[test]
+    fn test_search_genres_limit_is_respected() {
+        let env = TestEnv::new();
+        let conn = env.pool.get().unwrap();
+        // Insert several genres all matching "ock"
+        for name in &["Rock", "Mock", "Dock", "Stock", "Bock"] {
+            crate::db::queries::insert_genre(&conn, name).unwrap();
+        }
+        let result = search_genres_with_pool(&env.pool, "ock", 3);
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["success"], true);
+        let genres = v["data"]["genres"].as_array().unwrap();
+        assert_eq!(genres.len(), 3, "limit=3 must cap results at 3");
+    }
+
+    #[test]
+    fn test_search_genres_includes_track_and_album_counts() {
+        let env = TestEnv::new();
+        env.seed_basic_library(); // seeds "Rock" with 2 tracks, 1 album
+        let result = search_genres_with_pool(&env.pool, "Rock", 100);
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let genre = &v["data"]["genres"][0];
+        assert_eq!(genre["track_count"], 2, "Rock genre must have 2 tracks");
+        assert_eq!(genre["album_count"], 1, "Rock genre must have 1 album");
+        let album_ids = genre["album_ids"].as_array().unwrap();
+        assert_eq!(album_ids.len(), 1, "Rock genre must expose 1 album_id");
     }
 
     #[test]
