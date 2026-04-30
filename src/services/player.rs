@@ -388,7 +388,7 @@ impl PlayerService {
                     self.save_queue_state();
                     return Ok(());
                 }
-                Err(PlayerError::FileNotFound(path)) if consecutive_misses < 3 => {
+                Err(PlayerError::FileNotFound(_path)) if consecutive_misses < 3 => {
                     warn!("Track {track_id} file not found in next(), skipping");
                     let mut state = self.state.lock().unwrap();
                     // Cap the set at 500 entries to prevent unbounded growth

@@ -68,9 +68,7 @@ pub(crate) fn extract_feat_from_title(title: &str) -> Vec<String> {
         };
         let artist_start = start + marker.len();
         let rest_lower = &lower[artist_start..];
-        let closing = rest_lower
-            .find(|c| c == ')' || c == ']')
-            .unwrap_or(rest_lower.len());
+        let closing = rest_lower.find([')', ']']).unwrap_or(rest_lower.len());
         let artist_end = artist_start + closing;
 
         // Map byte offsets back to the original title for proper casing.

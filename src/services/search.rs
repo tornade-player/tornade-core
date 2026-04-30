@@ -184,76 +184,72 @@ impl SearchService {
         let mut track_ids: Vec<i64> = Vec::new();
 
         // 1. FTS5 prefix
-        if !fts_query.is_empty() {
-            if let Ok(mut stmt) = conn.prepare(
+        if !fts_query.is_empty()
+            && let Ok(mut stmt) = conn.prepare(
                 "SELECT t.id FROM tracks t
                  JOIN tracks_fts fts ON fts.rowid = t.id
                  WHERE tracks_fts MATCH ?1
                  ORDER BY rank LIMIT 50",
-            ) {
-                if let Ok(ids) = stmt
-                    .query_map([&fts_query], |row| row.get(0))
-                    .and_then(|rows| rows.collect::<rusqlite::Result<Vec<i64>>>())
-                {
-                    for id in ids {
-                        if track_seen.insert(id) {
-                            track_ids.push(id);
-                        }
-                    }
+            )
+            && let Ok(ids) = stmt
+                .query_map([&fts_query], |row| row.get(0))
+                .and_then(|rows| rows.collect::<rusqlite::Result<Vec<i64>>>())
+        {
+            for id in ids {
+                if track_seen.insert(id) {
+                    track_ids.push(id);
                 }
             }
         }
 
         // 2. LIKE substring — always, deduplicates with FTS5 results
-        if !like_q.is_empty() {
-            if let Ok(mut stmt) = conn.prepare(
+        if !like_q.is_empty()
+            && let Ok(mut stmt) = conn.prepare(
                 "SELECT t.id FROM tracks t
                  JOIN artists ar ON ar.id = t.artist_id
                  WHERE t.title LIKE '%' || ?1 || '%'
                     OR ar.name  LIKE '%' || ?1 || '%'
                  LIMIT 50",
-            ) {
-                if let Ok(ids) = stmt
-                    .query_map([&like_q], |row| row.get(0))
-                    .and_then(|rows| rows.collect::<rusqlite::Result<Vec<i64>>>())
-                {
-                    for id in ids {
-                        if track_seen.insert(id) {
-                            track_ids.push(id);
-                        }
-                    }
+            )
+            && let Ok(ids) = stmt
+                .query_map([&like_q], |row| row.get(0))
+                .and_then(|rows| rows.collect::<rusqlite::Result<Vec<i64>>>())
+        {
+            for id in ids {
+                if track_seen.insert(id) {
+                    track_ids.push(id);
                 }
             }
         }
 
         // 3. Levenshtein — only for queries ≥ 4 chars, adds candidates not yet found
-        if query_chars >= 4 {
-            if let Ok(mut stmt) = conn.prepare(
+        if query_chars >= 4
+            && let Ok(mut stmt) = conn.prepare(
                 "SELECT t.id, t.title, ar.name
                  FROM tracks t
                  JOIN artists ar ON ar.id = t.artist_id",
-            ) {
-                let new_ids: Vec<i64> = stmt
-                    .query_map([], |row| {
-                        Ok((
-                            row.get::<_, i64>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                        ))
-                    })
-                    .map_err(LibraryError::Database)?
-                    .filter_map(|r| r.ok())
-                    .filter(|(id, title, artist)| {
-                        !track_seen.contains(id)
-                            && (fuzzy_matches(&q_lower, title) || fuzzy_matches(&q_lower, artist))
-                    })
-                    .take(50)
-                    .map(|(id, _, _)| id)
-                    .collect();
-                for id in new_ids {
-                    if track_seen.insert(id) {
-                        track_ids.push(id);
-                    }
+            )
+        {
+            let new_ids: Vec<i64> = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(LibraryError::Database)?
+                .filter_map(|r| r.ok())
+                .filter(|(id, title, artist)| {
+                    !track_seen.contains(id)
+                        && (fuzzy_matches(&q_lower, title) || fuzzy_matches(&q_lower, artist))
+                })
+                .take(50)
+                .map(|(id, _, _)| id)
+                .collect();
+            for id in new_ids {
+                if track_seen.insert(id) {
+                    track_ids.push(id);
                 }
             }
         }
@@ -272,76 +268,72 @@ impl SearchService {
         let mut album_ids: Vec<i64> = Vec::new();
 
         // 1. FTS5 prefix
-        if !fts_query.is_empty() {
-            if let Ok(mut stmt) = conn.prepare(
+        if !fts_query.is_empty()
+            && let Ok(mut stmt) = conn.prepare(
                 "SELECT a.id FROM albums a
                  JOIN albums_fts fts ON fts.rowid = a.id
                  WHERE albums_fts MATCH ?1
                  ORDER BY rank LIMIT 20",
-            ) {
-                if let Ok(ids) = stmt
-                    .query_map([&fts_query], |row| row.get(0))
-                    .and_then(|rows| rows.collect::<rusqlite::Result<Vec<i64>>>())
-                {
-                    for id in ids {
-                        if album_seen.insert(id) {
-                            album_ids.push(id);
-                        }
-                    }
+            )
+            && let Ok(ids) = stmt
+                .query_map([&fts_query], |row| row.get(0))
+                .and_then(|rows| rows.collect::<rusqlite::Result<Vec<i64>>>())
+        {
+            for id in ids {
+                if album_seen.insert(id) {
+                    album_ids.push(id);
                 }
             }
         }
 
         // 2. LIKE substring
-        if !like_q.is_empty() {
-            if let Ok(mut stmt) = conn.prepare(
+        if !like_q.is_empty()
+            && let Ok(mut stmt) = conn.prepare(
                 "SELECT al.id FROM albums al
                  JOIN artists ar ON ar.id = al.artist_id
                  WHERE al.title LIKE '%' || ?1 || '%'
                     OR ar.name  LIKE '%' || ?1 || '%'
                  LIMIT 20",
-            ) {
-                if let Ok(ids) = stmt
-                    .query_map([&like_q], |row| row.get(0))
-                    .and_then(|rows| rows.collect::<rusqlite::Result<Vec<i64>>>())
-                {
-                    for id in ids {
-                        if album_seen.insert(id) {
-                            album_ids.push(id);
-                        }
-                    }
+            )
+            && let Ok(ids) = stmt
+                .query_map([&like_q], |row| row.get(0))
+                .and_then(|rows| rows.collect::<rusqlite::Result<Vec<i64>>>())
+        {
+            for id in ids {
+                if album_seen.insert(id) {
+                    album_ids.push(id);
                 }
             }
         }
 
         // 3. Levenshtein
-        if query_chars >= 4 {
-            if let Ok(mut stmt) = conn.prepare(
+        if query_chars >= 4
+            && let Ok(mut stmt) = conn.prepare(
                 "SELECT al.id, al.title, ar.name
                  FROM albums al
                  JOIN artists ar ON ar.id = al.artist_id",
-            ) {
-                let new_ids: Vec<i64> = stmt
-                    .query_map([], |row| {
-                        Ok((
-                            row.get::<_, i64>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                        ))
-                    })
-                    .map_err(LibraryError::Database)?
-                    .filter_map(|r| r.ok())
-                    .filter(|(id, title, artist)| {
-                        !album_seen.contains(id)
-                            && (fuzzy_matches(&q_lower, title) || fuzzy_matches(&q_lower, artist))
-                    })
-                    .take(20)
-                    .map(|(id, _, _)| id)
-                    .collect();
-                for id in new_ids {
-                    if album_seen.insert(id) {
-                        album_ids.push(id);
-                    }
+            )
+        {
+            let new_ids: Vec<i64> = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(LibraryError::Database)?
+                .filter_map(|r| r.ok())
+                .filter(|(id, title, artist)| {
+                    !album_seen.contains(id)
+                        && (fuzzy_matches(&q_lower, title) || fuzzy_matches(&q_lower, artist))
+                })
+                .take(20)
+                .map(|(id, _, _)| id)
+                .collect();
+            for id in new_ids {
+                if album_seen.insert(id) {
+                    album_ids.push(id);
                 }
             }
         }
@@ -388,61 +380,56 @@ impl SearchService {
         let mut artist_ids: Vec<i64> = Vec::new();
 
         // 1. FTS5 prefix
-        if !fts_query.is_empty() {
-            if let Ok(mut stmt) = conn.prepare(
+        if !fts_query.is_empty()
+            && let Ok(mut stmt) = conn.prepare(
                 "SELECT ar.id FROM artists ar
                  JOIN artists_fts fts ON fts.rowid = ar.id
                  WHERE artists_fts MATCH ?1
                  ORDER BY rank LIMIT 20",
-            ) {
-                if let Ok(ids) = stmt
-                    .query_map([&fts_query], |row| row.get(0))
-                    .and_then(|rows| rows.collect::<rusqlite::Result<Vec<i64>>>())
-                {
-                    for id in ids {
-                        if artist_seen.insert(id) {
-                            artist_ids.push(id);
-                        }
-                    }
+            )
+            && let Ok(ids) = stmt
+                .query_map([&fts_query], |row| row.get(0))
+                .and_then(|rows| rows.collect::<rusqlite::Result<Vec<i64>>>())
+        {
+            for id in ids {
+                if artist_seen.insert(id) {
+                    artist_ids.push(id);
                 }
             }
         }
 
         // 2. LIKE substring
-        if !like_q.is_empty() {
-            if let Ok(mut stmt) =
+        if !like_q.is_empty()
+            && let Ok(mut stmt) =
                 conn.prepare("SELECT id FROM artists WHERE name LIKE '%' || ?1 || '%' LIMIT 20")
-            {
-                if let Ok(ids) = stmt
-                    .query_map([&like_q], |row| row.get(0))
-                    .and_then(|rows| rows.collect::<rusqlite::Result<Vec<i64>>>())
-                {
-                    for id in ids {
-                        if artist_seen.insert(id) {
-                            artist_ids.push(id);
-                        }
-                    }
+            && let Ok(ids) = stmt
+                .query_map([&like_q], |row| row.get(0))
+                .and_then(|rows| rows.collect::<rusqlite::Result<Vec<i64>>>())
+        {
+            for id in ids {
+                if artist_seen.insert(id) {
+                    artist_ids.push(id);
                 }
             }
         }
 
         // 3. Levenshtein
-        if query_chars >= 4 {
-            if let Ok(mut stmt) = conn.prepare("SELECT id, name FROM artists") {
-                let new_ids: Vec<i64> = stmt
-                    .query_map([], |row| {
-                        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-                    })
-                    .map_err(LibraryError::Database)?
-                    .filter_map(|r| r.ok())
-                    .filter(|(id, name)| !artist_seen.contains(id) && fuzzy_matches(&q_lower, name))
-                    .take(20)
-                    .map(|(id, _)| id)
-                    .collect();
-                for id in new_ids {
-                    if artist_seen.insert(id) {
-                        artist_ids.push(id);
-                    }
+        if query_chars >= 4
+            && let Ok(mut stmt) = conn.prepare("SELECT id, name FROM artists")
+        {
+            let new_ids: Vec<i64> = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(LibraryError::Database)?
+                .filter_map(|r| r.ok())
+                .filter(|(id, name)| !artist_seen.contains(id) && fuzzy_matches(&q_lower, name))
+                .take(20)
+                .map(|(id, _)| id)
+                .collect();
+            for id in new_ids {
+                if artist_seen.insert(id) {
+                    artist_ids.push(id);
                 }
             }
         }
