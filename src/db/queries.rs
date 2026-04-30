@@ -331,7 +331,8 @@ pub fn insert_track(
         "SELECT id FROM tracks WHERE source_id = ?1 AND file_path = ?2",
         params![source_id, file_path_str],
         |row| row.get(0),
-    ).map_err(Into::into)
+    )
+    .map_err(Into::into)
 }
 
 /// Fetch a track by primary key, including a denormalised list of artist names.

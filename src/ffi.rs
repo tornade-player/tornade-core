@@ -2429,15 +2429,15 @@ fn import_files(paths_json: &str) -> String {
                     .iter()
                     .find(|p| p.name == "Imported")
                     .map(|p| p.id)
-                    .or_else(|| {
-                        match playlist_service.create_playlist("Imported", None) {
+                    .or_else(
+                        || match playlist_service.create_playlist("Imported", None) {
                             Ok(p) => Some(p.id),
                             Err(e) => {
                                 log::warn!("import_files: create_playlist failed: {e}");
                                 None
                             }
-                        }
-                    });
+                        },
+                    );
                 match pid {
                     None => None,
                     Some(pid) => {
@@ -2804,7 +2804,11 @@ mod tests {
         // Verify both tracks are now in the single "Imported" playlist.
         let playlist_service = PlaylistService::new(env.pool.clone());
         let playlist = playlist_service.get_playlist(id1).unwrap().unwrap();
-        assert_eq!(playlist.tracks.len(), 2, "both tracks must be in the playlist");
+        assert_eq!(
+            playlist.tracks.len(),
+            2,
+            "both tracks must be in the playlist"
+        );
     }
 
     #[test]
@@ -3148,5 +3152,4 @@ mod tests {
             );
         }
     }
-
 }
