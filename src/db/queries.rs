@@ -292,6 +292,8 @@ pub fn insert_track(
     file_type: AudioFormat,
     file_size: u64,
 ) -> Result<i64> {
+    let file_path_str = file_path.to_string_lossy().into_owned();
+
     conn.execute(
         "INSERT INTO tracks (
             title, album_id, artist_id, source_id, file_path,
@@ -309,7 +311,7 @@ pub fn insert_track(
             album_id,
             artist_id,
             source_id,
-            file_path.to_string_lossy().into_owned(),
+            file_path_str,
             duration_ms,
             track_number,
             sample_rate,
@@ -319,7 +321,17 @@ pub fn insert_track(
         ],
     )?;
 
-    Ok(conn.last_insert_rowid())
+    let rowid = conn.last_insert_rowid();
+    if rowid != 0 {
+        return Ok(rowid);
+    }
+    // ON CONFLICT DO UPDATE hit — last_insert_rowid() may return 0.
+    // Fall back to querying the existing row by (source_id, file_path).
+    conn.query_row(
+        "SELECT id FROM tracks WHERE source_id = ?1 AND file_path = ?2",
+        params![source_id, file_path_str],
+        |row| row.get(0),
+    ).map_err(Into::into)
 }
 
 /// Fetch a track by primary key, including a denormalised list of artist names.
@@ -1234,11 +1246,18 @@ pub fn get_playlist(conn: &Connection, id: i64) -> Result<Option<Playlist>> {
         .optional()?;
 
     if let Some((id, name, description, created_at, updated_at)) = playlist {
-        // Get track IDs in order
+        // Get track entries (id + timestamp) in position order
         let mut stmt = conn.prepare(
-            "SELECT track_id FROM playlist_tracks WHERE playlist_id = ?1 ORDER BY position",
+            "SELECT track_id, added_at FROM playlist_tracks WHERE playlist_id = ?1 ORDER BY position",
         )?;
-        let tracks: Result<Vec<i64>> = stmt.query_map(params![id], |row| row.get(0))?.collect();
+        let tracks: Result<Vec<crate::models::PlaylistTrack>> = stmt
+            .query_map(params![id], |row| {
+                Ok(crate::models::PlaylistTrack {
+                    track_id: row.get(0)?,
+                    added_at: row.get(1)?,
+                })
+            })?
+            .collect();
 
         Ok(Some(Playlist {
             id,
@@ -1751,7 +1770,8 @@ mod tests {
         add_track_to_playlist(&conn, pl_id, t1).unwrap();
         add_track_to_playlist(&conn, pl_id, t2).unwrap();
         let pl = get_playlist(&conn, pl_id).unwrap().unwrap();
-        assert_eq!(pl.tracks, vec![t1, t2]);
+        let ids: Vec<i64> = pl.tracks.iter().map(|pt| pt.track_id).collect();
+        assert_eq!(ids, vec![t1, t2]);
     }
 
     #[test]
@@ -1771,7 +1791,7 @@ mod tests {
         .unwrap();
         let pl = get_playlist(&conn, pl_id).unwrap().unwrap();
         assert_eq!(pl.tracks.len(), 1);
-        assert_eq!(pl.tracks[0], t2);
+        assert_eq!(pl.tracks[0].track_id, t2);
     }
 
     #[test]
@@ -1795,8 +1815,8 @@ mod tests {
         add_track_to_playlist(&conn, pl_id, t2).unwrap();
         let pl = get_playlist(&conn, pl_id).unwrap().unwrap();
         // Should be in insertion order (positions 0, 1)
-        assert_eq!(pl.tracks[0], t1);
-        assert_eq!(pl.tracks[1], t2);
+        assert_eq!(pl.tracks[0].track_id, t1);
+        assert_eq!(pl.tracks[1].track_id, t2);
     }
 
     #[test]

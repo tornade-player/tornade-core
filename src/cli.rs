@@ -1108,10 +1108,10 @@ impl TornadeCli {
         );
         println!("{}", "-".repeat(80));
 
-        for (pos, track_id) in playlist.tracks.iter().enumerate() {
+        for (pos, pt) in playlist.tracks.iter().enumerate() {
             // Fetch track details
             let conn = self.pool.get()?;
-            if let Ok(Some(track)) = crate::db::queries::get_track(&conn, *track_id) {
+            if let Ok(Some(track)) = crate::db::queries::get_track(&conn, pt.track_id) {
                 println!(
                     "{:<6} {:<6} {:<40} {:<25}",
                     pos,
@@ -1127,9 +1127,10 @@ impl TornadeCli {
         // Option to play playlist
         let choice = Self::read_input("\nPlay playlist? (y/n): ")?;
         if choice.trim().to_lowercase() == "y" {
-            self.player.set_queue(playlist.tracks.clone())?;
-            if !playlist.tracks.is_empty() {
-                self.player.play(playlist.tracks[0])?;
+            let track_ids: Vec<i64> = playlist.tracks.iter().map(|pt| pt.track_id).collect();
+            self.player.set_queue(track_ids.clone())?;
+            if !track_ids.is_empty() {
+                self.player.play(track_ids[0])?;
                 println!("▶️  Playing playlist");
             }
         }

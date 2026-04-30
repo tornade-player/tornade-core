@@ -2417,22 +2417,50 @@ fn import_files(paths_json: &str) -> String {
     // Find or create "Imported" playlist and add the newly imported tracks.
     // Failures here are non-fatal: the import itself succeeded.
     let playlist_id: Option<i64> = if !track_ids.is_empty() {
-        get_or_init_pool().ok().and_then(|pool| {
-            let playlist_service = playlist::PlaylistService::new(pool);
-            let existing = playlist_service.list_playlists().unwrap_or_default();
-            let playlist_id = existing
-                .iter()
-                .find(|p| p.name == "Imported")
-                .map(|p| p.id)
-                .or_else(|| {
-                    playlist_service
-                        .create_playlist("Imported", None)
-                        .ok()
-                        .map(|p| p.id)
-                })?;
-            playlist_service.add_tracks(playlist_id, track_ids).ok()?;
-            Some(playlist_id)
-        })
+        match get_or_init_pool() {
+            Err(e) => {
+                log::warn!("import_files: pool error, skipping playlist: {e}");
+                None
+            }
+            Ok(pool) => {
+                let playlist_service = playlist::PlaylistService::new(pool);
+                let existing = playlist_service.list_playlists().unwrap_or_default();
+                let pid = existing
+                    .iter()
+                    .find(|p| p.name == "Imported")
+                    .map(|p| p.id)
+                    .or_else(|| {
+                        match playlist_service.create_playlist("Imported", None) {
+                            Ok(p) => Some(p.id),
+                            Err(e) => {
+                                log::warn!("import_files: create_playlist failed: {e}");
+                                None
+                            }
+                        }
+                    });
+                match pid {
+                    None => None,
+                    Some(pid) => {
+                        // Skip tracks already in the playlist to avoid duplicates.
+                        let already_in: std::collections::HashSet<i64> = existing
+                            .iter()
+                            .find(|p| p.id == pid)
+                            .map(|p| p.tracks.iter().map(|pt| pt.track_id).collect())
+                            .unwrap_or_default();
+                        let new_tracks: Vec<i64> = track_ids
+                            .into_iter()
+                            .filter(|id| !already_in.contains(id))
+                            .collect();
+                        if !new_tracks.is_empty() {
+                            if let Err(e) = playlist_service.add_tracks(pid, new_tracks) {
+                                log::warn!("import_files: add_tracks failed: {e}");
+                            }
+                        }
+                        Some(pid)
+                    }
+                }
+            }
+        }
     } else {
         None
     };
@@ -2777,6 +2805,26 @@ mod tests {
         let playlist_service = PlaylistService::new(env.pool.clone());
         let playlist = playlist_service.get_playlist(id1).unwrap().unwrap();
         assert_eq!(playlist.tracks.len(), 2, "both tracks must be in the playlist");
+    }
+
+    #[test]
+    fn test_import_files_reimport_same_file_still_creates_playlist() {
+        // Importing the same file twice triggers an upsert (ON CONFLICT DO UPDATE).
+        // The second call must still return a valid playlist_id.
+        let env = TestEnv::new();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let flac = tmp.path().join("song.flac");
+        std::fs::write(&flac, MINIMAL_FLAC).unwrap();
+
+        let (count1, p1) = import_with_env(&env, &[flac.clone()]);
+        assert_eq!(count1, 1, "first import: 1 track");
+        let (pid1, _) = p1.expect("first import: playlist created");
+
+        // Import same file again
+        let (count2, p2) = import_with_env(&env, &[flac]);
+        assert_eq!(count2, 1, "second import: 1 track (upserted)");
+        let (pid2, _) = p2.expect("second import: playlist still returned despite upsert");
+        assert_eq!(pid1, pid2, "same playlist reused");
     }
 
     // ── get_tracks_page — sorting ────────────────────────────────────────────
