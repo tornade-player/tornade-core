@@ -2,6 +2,15 @@
 
 use serde::{Deserialize, Serialize};
 
+/// A track entry within a playlist, carrying its position timestamp.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlaylistTrack {
+    /// Foreign key into the `tracks` table.
+    pub track_id: i64,
+    /// When this track was added to the playlist (ISO 8601, UTC).
+    pub added_at: String,
+}
+
 /// A named, ordered collection of tracks saved by the user.
 ///
 /// Playlists are persisted in the `playlists` / `playlist_tracks` tables and
@@ -14,8 +23,8 @@ pub struct Playlist {
     pub name: String,
     /// Optional free-text description.
     pub description: Option<String>,
-    /// Ordered list of track IDs that make up this playlist.
-    pub tracks: Vec<i64>,
+    /// Ordered list of playlist-track entries (track ID + added_at timestamp).
+    pub tracks: Vec<PlaylistTrack>,
     /// Creation timestamp (ISO 8601, UTC).
     pub created_at: String,
     /// Last modification timestamp (ISO 8601, UTC).

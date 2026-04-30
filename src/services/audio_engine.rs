@@ -13,7 +13,9 @@
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, SampleRate, StreamConfig, SupportedBufferSize};
-use log::{info, warn};
+#[cfg(target_os = "macos")]
+use log::info;
+use log::warn;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed, Ordering::Release};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -146,9 +148,7 @@ mod hal {
                 &mut actual as *mut _ as *mut c_void,
             );
             if status != 0 {
-                return Err(format!(
-                    "read back buffer size failed: OSStatus {status}"
-                ));
+                return Err(format!("read back buffer size failed: OSStatus {status}"));
             }
 
             Ok(actual)
@@ -164,8 +164,8 @@ pub struct SharedState {
     pub paused: AtomicBool,
     pub stopped: AtomicBool,
     pub finished: AtomicBool,
-    pub volume: AtomicU32,            // f32 bits stored as u32
-    pub callback_frames: AtomicU32,   // actual frames per callback (set once)
+    pub volume: AtomicU32,          // f32 bits stored as u32
+    pub callback_frames: AtomicU32, // actual frames per callback (set once)
 }
 
 impl SharedState {
@@ -320,12 +320,15 @@ impl AudioEngine {
 
         // On macOS, set the HAL-level buffer size BEFORE opening the stream.
         // Use the DEVICE sample rate for HAL (it controls the hardware clock).
+        #[cfg(target_os = "macos")]
         let hal_target = (device_sample_rate as f64 * TARGET_BUFFER_MS / 1000.0) as u32;
         #[cfg(target_os = "macos")]
         match hal::set_default_output_buffer_size(hal_target) {
             Ok(actual) => {
                 let ms = actual as f64 / device_sample_rate as f64 * 1000.0;
-                write_diag(&format!("HAL buffer size: requested={hal_target}, actual={actual} ({ms:.1} ms)"));
+                write_diag(&format!(
+                    "HAL buffer size: requested={hal_target}, actual={actual} ({ms:.1} ms)"
+                ));
                 info!("AudioEngine: HAL buffer size set to {actual} frames ({ms:.1} ms)");
             }
             Err(e) => {
@@ -338,11 +341,15 @@ impl AudioEngine {
         let cpal_buffer_size = match supported.buffer_size() {
             SupportedBufferSize::Range { min, max } => {
                 let clamped = target_frames.clamp(*min, *max);
-                write_diag(&format!("cpal buffer: {clamped} frames (range {min}–{max})"));
+                write_diag(&format!(
+                    "cpal buffer: {clamped} frames (range {min}–{max})"
+                ));
                 BufferSize::Fixed(clamped)
             }
             SupportedBufferSize::Unknown => {
-                write_diag(&format!("cpal buffer: range unknown, requesting {target_frames}"));
+                write_diag(&format!(
+                    "cpal buffer: range unknown, requesting {target_frames}"
+                ));
                 BufferSize::Fixed(target_frames)
             }
         };

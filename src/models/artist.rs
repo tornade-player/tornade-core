@@ -1,6 +1,7 @@
 //! Artist domain model.
 
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// A recording artist or band as stored in the library database.
 ///
@@ -37,4 +38,6 @@ pub struct Artist {
     pub musicbrainz_id: Option<String>,
     /// TheAudioDB numeric artist ID (stored as a string to match the API response).
     pub theaudiodb_id: Option<String>,
+    /// Local path to the cached artist photo (downloaded from TheAudioDB).
+    pub photo_path: Option<PathBuf>,
 }

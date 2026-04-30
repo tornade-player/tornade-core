@@ -2348,7 +2348,11 @@ fn get_album_featuring_artists(album_id: i64, exclude_artist_id: i64) -> String 
                 }
             };
 
-            match crate::db::queries::get_album_featuring_artists(&conn, album_id, exclude_artist_id) {
+            match crate::db::queries::get_album_featuring_artists(
+                &conn,
+                album_id,
+                exclude_artist_id,
+            ) {
                 Ok(artists) => serde_json::json!({
                     "success": true,
                     "data": { "artists": artists }
@@ -2386,27 +2390,93 @@ fn import_files(paths_json: &str) -> String {
 
     let path_bufs: Vec<PathBuf> = path_strings.iter().map(PathBuf::from).collect();
 
-    match get_or_init_library() {
-        Ok(library_service) => match library_service.import_paths(&path_bufs) {
-            Ok(track_ids) => serde_json::json!({
-                "success": true,
-                "data": {
-                    "tracks_imported": track_ids.len()
-                }
+    let library_service = match get_or_init_library() {
+        Ok(s) => s,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("FFI initialization failed: {}", e)
             })
-            .to_string(),
-            Err(e) => serde_json::json!({
+            .to_string();
+        }
+    };
+
+    let track_ids = match library_service.import_paths(&path_bufs) {
+        Ok(ids) => ids,
+        Err(e) => {
+            return serde_json::json!({
                 "success": false,
                 "error": format!("Failed to import paths: {}", e)
             })
-            .to_string(),
-        },
-        Err(e) => serde_json::json!({
-            "success": false,
-            "error": format!("FFI initialization failed: {}", e)
-        })
-        .to_string(),
+            .to_string();
+        }
+    };
+
+    let tracks_imported = track_ids.len();
+
+    // Find or create "Imported" playlist and add the newly imported tracks.
+    // Failures here are non-fatal: the import itself succeeded.
+    let playlist_id: Option<i64> = if !track_ids.is_empty() {
+        match get_or_init_pool() {
+            Err(e) => {
+                log::warn!("import_files: pool error, skipping playlist: {e}");
+                None
+            }
+            Ok(pool) => {
+                let playlist_service = playlist::PlaylistService::new(pool);
+                let existing = playlist_service.list_playlists().unwrap_or_default();
+                let pid = existing
+                    .iter()
+                    .find(|p| p.name == "Imported")
+                    .map(|p| p.id)
+                    .or_else(
+                        || match playlist_service.create_playlist("Imported", None) {
+                            Ok(p) => Some(p.id),
+                            Err(e) => {
+                                log::warn!("import_files: create_playlist failed: {e}");
+                                None
+                            }
+                        },
+                    );
+                match pid {
+                    None => None,
+                    Some(pid) => {
+                        // Skip tracks already in the playlist to avoid duplicates.
+                        let already_in: std::collections::HashSet<i64> = existing
+                            .iter()
+                            .find(|p| p.id == pid)
+                            .map(|p| p.tracks.iter().map(|pt| pt.track_id).collect())
+                            .unwrap_or_default();
+                        let new_tracks: Vec<i64> = track_ids
+                            .into_iter()
+                            .filter(|id| !already_in.contains(id))
+                            .collect();
+                        if !new_tracks.is_empty()
+                            && let Err(e) = playlist_service.add_tracks(pid, new_tracks)
+                        {
+                            log::warn!("import_files: add_tracks failed: {e}");
+                        }
+                        Some(pid)
+                    }
+                }
+            }
+        }
+    } else {
+        None
+    };
+
+    let mut data = serde_json::json!({
+        "tracks_imported": tracks_imported
+    });
+    if let Some(id) = playlist_id {
+        data["playlist_id"] = serde_json::json!(id);
     }
+
+    serde_json::json!({
+        "success": true,
+        "data": data
+    })
+    .to_string()
 }
 
 // Artwork Fetching Functions
@@ -2626,74 +2696,6 @@ mod tests {
 
     const MINIMAL_FLAC: &[u8] = include_bytes!("../tests/fixtures/minimal.flac");
 
-    /// Given a base name and a set of names already in use, return the first
-    /// available name: `base`, then `base-2`, `base-3`, etc.
-    fn unique_playlist_name(base: &str, existing: &std::collections::HashSet<String>) -> String {
-        if !existing.contains(base) {
-            return base.to_string();
-        }
-        let mut suffix = 2usize;
-        loop {
-            let candidate = format!("{}-{}", base, suffix);
-            if !existing.contains(&candidate) {
-                return candidate;
-            }
-            suffix += 1;
-        }
-    }
-
-    // ── unique_playlist_name ─────────────────────────────────────────────────
-
-    #[test]
-    fn test_unique_name_no_collision() {
-        let existing: std::collections::HashSet<String> = std::collections::HashSet::new();
-        assert_eq!(
-            unique_playlist_name("import-2026-02-17", &existing),
-            "import-2026-02-17"
-        );
-    }
-
-    #[test]
-    fn test_unique_name_first_collision() {
-        let existing: std::collections::HashSet<String> =
-            ["import-2026-02-17".to_string()].into_iter().collect();
-        assert_eq!(
-            unique_playlist_name("import-2026-02-17", &existing),
-            "import-2026-02-17-2"
-        );
-    }
-
-    #[test]
-    fn test_unique_name_multiple_collisions() {
-        let existing: std::collections::HashSet<String> = [
-            "import-2026-02-17".to_string(),
-            "import-2026-02-17-2".to_string(),
-            "import-2026-02-17-3".to_string(),
-        ]
-        .into_iter()
-        .collect();
-        assert_eq!(
-            unique_playlist_name("import-2026-02-17", &existing),
-            "import-2026-02-17-4"
-        );
-    }
-
-    #[test]
-    fn test_unique_name_gap_in_suffixes() {
-        // -2 exists but -3 does not: should return -2 wait, no — it tries 2 first
-        let existing: std::collections::HashSet<String> = [
-            "import-2026-02-17".to_string(),
-            "import-2026-02-17-3".to_string(),
-        ]
-        .into_iter()
-        .collect();
-        // -2 is free, so we get -2 (gap is irrelevant)
-        assert_eq!(
-            unique_playlist_name("import-2026-02-17", &existing),
-            "import-2026-02-17-2"
-        );
-    }
-
     // ── import_files JSON parsing ────────────────────────────────────────────
 
     #[test]
@@ -2724,6 +2726,7 @@ mod tests {
     }
 
     /// Helper: run the import business logic against a TestEnv's pool (bypasses global singleton).
+    /// Mirrors the find-or-create "Imported" playlist logic in `import_files`.
     fn import_with_env(
         env: &TestEnv,
         file_paths: &[std::path::PathBuf],
@@ -2739,27 +2742,33 @@ mod tests {
         }
         let tracks_imported = track_ids.len();
 
-        let base_name = chrono::Local::now().format("import-%Y-%m-%d").to_string();
-        let existing_names: std::collections::HashSet<String> = playlist_service
-            .list_playlists()
-            .unwrap_or_default()
+        // Find existing "Imported" playlist or create one.
+        let existing = playlist_service.list_playlists().unwrap_or_default();
+        let playlist_id = existing
             .iter()
-            .map(|p| p.name.clone())
-            .collect();
-        let playlist_name = unique_playlist_name(&base_name, &existing_names);
+            .find(|p| p.name == "Imported")
+            .map(|p| p.id)
+            .unwrap_or_else(|| {
+                playlist_service
+                    .create_playlist("Imported", None)
+                    .expect("create_playlist failed")
+                    .id
+            });
+
+        playlist_service
+            .add_tracks(playlist_id, track_ids)
+            .expect("add_tracks failed");
 
         let playlist = playlist_service
-            .create_playlist(&playlist_name, None)
-            .expect("create_playlist failed");
-        playlist_service
-            .add_tracks(playlist.id, track_ids)
-            .expect("add_tracks failed");
+            .get_playlist(playlist_id)
+            .expect("get_playlist failed")
+            .expect("playlist must exist");
 
         (tracks_imported, Some((playlist.id, playlist.name)))
     }
 
     #[test]
-    fn test_import_files_valid_flac_creates_playlist() {
+    fn test_import_files_valid_flac_creates_imported_playlist() {
         let env = TestEnv::new();
         let tmp = tempfile::TempDir::new().unwrap();
         let flac = tmp.path().join("song.flac");
@@ -2770,11 +2779,56 @@ mod tests {
         assert_eq!(count, 1, "should import exactly 1 track");
         let (id, name) = playlist.expect("playlist should be created");
         assert!(id > 0, "playlist id must be positive");
-        assert!(
-            name.starts_with("import-"),
-            "playlist name must start with 'import-', got: {}",
-            name
+        assert_eq!(name, "Imported", "playlist must be named 'Imported'");
+    }
+
+    #[test]
+    fn test_import_files_second_import_reuses_imported_playlist() {
+        let env = TestEnv::new();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let flac1 = tmp.path().join("a.flac");
+        let flac2 = tmp.path().join("b.flac");
+        std::fs::write(&flac1, MINIMAL_FLAC).unwrap();
+        std::fs::write(&flac2, MINIMAL_FLAC).unwrap();
+
+        let (_, p1) = import_with_env(&env, &[flac1]);
+        let (_, p2) = import_with_env(&env, &[flac2]);
+
+        let (id1, name1) = p1.expect("first import should create a playlist");
+        let (id2, name2) = p2.expect("second import should reuse the playlist");
+
+        assert_eq!(id1, id2, "both imports must reuse the same playlist");
+        assert_eq!(name1, "Imported");
+        assert_eq!(name2, "Imported");
+
+        // Verify both tracks are now in the single "Imported" playlist.
+        let playlist_service = PlaylistService::new(env.pool.clone());
+        let playlist = playlist_service.get_playlist(id1).unwrap().unwrap();
+        assert_eq!(
+            playlist.tracks.len(),
+            2,
+            "both tracks must be in the playlist"
         );
+    }
+
+    #[test]
+    fn test_import_files_reimport_same_file_still_creates_playlist() {
+        // Importing the same file twice triggers an upsert (ON CONFLICT DO UPDATE).
+        // The second call must still return a valid playlist_id.
+        let env = TestEnv::new();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let flac = tmp.path().join("song.flac");
+        std::fs::write(&flac, MINIMAL_FLAC).unwrap();
+
+        let (count1, p1) = import_with_env(&env, &[flac.clone()]);
+        assert_eq!(count1, 1, "first import: 1 track");
+        let (pid1, _) = p1.expect("first import: playlist created");
+
+        // Import same file again
+        let (count2, p2) = import_with_env(&env, &[flac]);
+        assert_eq!(count2, 1, "second import: 1 track (upserted)");
+        let (pid2, _) = p2.expect("second import: playlist still returned despite upsert");
+        assert_eq!(pid1, pid2, "same playlist reused");
     }
 
     // ── get_tracks_page — sorting ────────────────────────────────────────────
@@ -3097,31 +3151,5 @@ mod tests {
                 sort_by
             );
         }
-    }
-
-    #[test]
-    fn test_import_files_second_import_same_day_gets_suffix() {
-        let env = TestEnv::new();
-        let tmp = tempfile::TempDir::new().unwrap();
-        let flac1 = tmp.path().join("a.flac");
-        let flac2 = tmp.path().join("b.flac");
-        std::fs::write(&flac1, MINIMAL_FLAC).unwrap();
-        std::fs::write(&flac2, MINIMAL_FLAC).unwrap();
-
-        let (_, p1) = import_with_env(&env, &[flac1]);
-        let (_, p2) = import_with_env(&env, &[flac2]);
-
-        let name1 = p1.expect("first import should create a playlist").1;
-        let name2 = p2.expect("second import should create a playlist").1;
-
-        assert_ne!(
-            name1, name2,
-            "two imports on the same day must get distinct names"
-        );
-        assert!(
-            name2.ends_with("-2"),
-            "second import should get '-2' suffix, got: {}",
-            name2
-        );
     }
 }

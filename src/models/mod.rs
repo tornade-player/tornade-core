@@ -22,7 +22,7 @@ pub mod track;
 pub use album::Album;
 pub use artist::Artist;
 pub use genre::Genre;
-pub use playlist::{Playlist, Queue, RepeatMode};
+pub use playlist::{Playlist, PlaylistTrack, Queue, RepeatMode};
 pub use source::Source;
 pub use track::{AudioFormat, InvalidRating, Rating, Track, TrackBuilder};
 

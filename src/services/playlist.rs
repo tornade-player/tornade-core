@@ -58,12 +58,17 @@ impl PlaylistService {
             let created_at = row.get::<_, String>(3)?;
             let updated_at = row.get::<_, String>(4)?;
 
-            // Get tracks
+            // Get track entries (id + timestamp) in position order
             let mut track_stmt = conn.prepare(
-                "SELECT track_id FROM playlist_tracks WHERE playlist_id = ?1 ORDER BY position",
+                "SELECT track_id, added_at FROM playlist_tracks WHERE playlist_id = ?1 ORDER BY position",
             )?;
-            let tracks: rusqlite::Result<Vec<i64>> = track_stmt
-                .query_map([playlist_id], |row| row.get(0))?
+            let tracks: rusqlite::Result<Vec<crate::models::PlaylistTrack>> = track_stmt
+                .query_map([playlist_id], |row| {
+                    Ok(crate::models::PlaylistTrack {
+                        track_id: row.get(0)?,
+                        added_at: row.get(1)?,
+                    })
+                })?
                 .collect();
 
             Ok(Playlist {
@@ -156,8 +161,8 @@ impl PlaylistService {
         }
 
         let mut tracks = playlist.tracks;
-        let track_id = tracks.remove(from);
-        tracks.insert(to, track_id);
+        let pt = tracks.remove(from);
+        tracks.insert(to, pt);
 
         // Delete all and recreate
         conn.execute(
@@ -165,10 +170,10 @@ impl PlaylistService {
             rusqlite::params![playlist_id],
         )?;
 
-        for (pos, track_id) in tracks.iter().enumerate() {
+        for (pos, pt) in tracks.iter().enumerate() {
             conn.execute(
-                "INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",
-                rusqlite::params![playlist_id, track_id, pos as i64],
+                "INSERT INTO playlist_tracks (playlist_id, track_id, position, added_at) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![playlist_id, pt.track_id, pos as i64, pt.added_at],
             )?;
         }
 
@@ -230,8 +235,8 @@ impl PlaylistService {
 
         // Get track details
         let mut tracks = Vec::new();
-        for track_id in playlist.tracks {
-            if let Ok(Some(track)) = queries::get_track(&conn, track_id) {
+        for pt in playlist.tracks {
+            if let Ok(Some(track)) = queries::get_track(&conn, pt.track_id) {
                 tracks.push(track);
             }
         }
@@ -298,7 +303,8 @@ mod tests {
         let pl = service.create_playlist("Queue", None).unwrap();
         service.add_tracks(pl.id, vec![t1, t2]).unwrap();
         let updated = service.get_playlist(pl.id).unwrap().unwrap();
-        assert_eq!(updated.tracks, vec![t1, t2]);
+        let ids: Vec<i64> = updated.tracks.iter().map(|pt| pt.track_id).collect();
+        assert_eq!(ids, vec![t1, t2]);
     }
 
     #[test]
@@ -338,8 +344,8 @@ mod tests {
         service.add_tracks(pl.id, vec![t1, t2]).unwrap();
         service.move_track(pl.id, 0, 1).unwrap();
         let updated = service.get_playlist(pl.id).unwrap().unwrap();
-        assert_eq!(updated.tracks[0], t2);
-        assert_eq!(updated.tracks[1], t1);
+        assert_eq!(updated.tracks[0].track_id, t2);
+        assert_eq!(updated.tracks[1].track_id, t1);
     }
 
     // ── import_m3u ───────────────────────────────────────────────────────────

@@ -73,16 +73,19 @@ impl PlayerService {
     fn ensure_engine(&self) -> Result<()> {
         let mut engine = self.engine.lock().unwrap();
         if engine.is_none() {
-            *engine = Some(
-                AudioEngine::new()
-                    .map_err(|e| PlayerError::Audio(format!("Failed to create audio engine: {e}")))?,
-            );
+            *engine =
+                Some(AudioEngine::new().map_err(|e| {
+                    PlayerError::Audio(format!("Failed to create audio engine: {e}"))
+                })?);
         }
         Ok(())
     }
 
     /// Lock the engine and run a closure with a reference to AudioControls.
-    fn with_controls<T>(&self, f: impl FnOnce(&crate::services::audio_engine::AudioControls) -> T) -> Result<T> {
+    fn with_controls<T>(
+        &self,
+        f: impl FnOnce(&crate::services::audio_engine::AudioControls) -> T,
+    ) -> Result<T> {
         let engine = self.engine.lock().unwrap();
         let eng = engine
             .as_ref()
@@ -186,13 +189,12 @@ impl PlayerService {
                 }
             };
 
-            let source: Box<dyn Iterator<Item = f32> + Send> = Box::new(
-                UniformSourceIterator::<_, f32>::new(
+            let source: Box<dyn Iterator<Item = f32> + Send> =
+                Box::new(UniformSourceIterator::<_, f32>::new(
                     decoder.convert_samples::<f32>(),
                     dev_ch,
                     dev_sr,
-                ),
-            );
+                ));
 
             // Send source to the audio callback
             bg_handle.set_volume(volume);
@@ -325,22 +327,20 @@ impl PlayerService {
                 }
             };
 
-            let source: Box<dyn Iterator<Item = f32> + Send> = Box::new(
-                UniformSourceIterator::<_, f32>::new(
+            let source: Box<dyn Iterator<Item = f32> + Send> =
+                Box::new(UniformSourceIterator::<_, f32>::new(
                     decoder
                         .skip_duration(clamped_position)
                         .convert_samples::<f32>(),
                     dev_ch,
                     dev_sr,
-                ),
-            );
+                ));
 
             bg_handle.set_volume(volume);
             bg_handle.play_source(source);
             bg_loading.store(false, Relaxed);
 
-            bg_state.lock().unwrap().playback_start_time =
-                Some(Instant::now() - clamped_position);
+            bg_state.lock().unwrap().playback_start_time = Some(Instant::now() - clamped_position);
         });
 
         info!("Seeked to {clamped_position:?}");
@@ -388,7 +388,7 @@ impl PlayerService {
                     self.save_queue_state();
                     return Ok(());
                 }
-                Err(PlayerError::FileNotFound(path)) if consecutive_misses < 3 => {
+                Err(PlayerError::FileNotFound(_path)) if consecutive_misses < 3 => {
                     warn!("Track {track_id} file not found in next(), skipping");
                     let mut state = self.state.lock().unwrap();
                     // Cap the set at 500 entries to prevent unbounded growth

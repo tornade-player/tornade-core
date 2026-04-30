@@ -52,7 +52,7 @@ pub enum PlaybackState {
 #[derive(Debug, Clone)]
 pub enum PlayerEvent {
     StateChanged { state: PlaybackState },
-    TrackChanged { track: Option<Track> },
+    TrackChanged { track: Option<Box<Track>> },
     PositionChanged { position: Duration },
     QueueChanged { queue: Vec<i64> },
     VolumeChanged { volume: f32 },
