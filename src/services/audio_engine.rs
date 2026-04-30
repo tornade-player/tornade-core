@@ -13,7 +13,9 @@
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, SampleRate, StreamConfig, SupportedBufferSize};
-use log::{info, warn};
+use log::warn;
+#[cfg(target_os = "macos")]
+use log::info;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed, Ordering::Release};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -318,6 +320,7 @@ impl AudioEngine {
 
         // On macOS, set the HAL-level buffer size BEFORE opening the stream.
         // Use the DEVICE sample rate for HAL (it controls the hardware clock).
+        #[cfg(target_os = "macos")]
         let hal_target = (device_sample_rate as f64 * TARGET_BUFFER_MS / 1000.0) as u32;
         #[cfg(target_os = "macos")]
         match hal::set_default_output_buffer_size(hal_target) {
