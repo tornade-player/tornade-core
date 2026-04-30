@@ -332,7 +332,6 @@ pub fn insert_track(
         params![source_id, file_path_str],
         |row| row.get(0),
     )
-    .map_err(Into::into)
 }
 
 /// Fetch a track by primary key, including a denormalised list of artist names.

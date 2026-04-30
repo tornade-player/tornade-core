@@ -2451,10 +2451,10 @@ fn import_files(paths_json: &str) -> String {
                             .into_iter()
                             .filter(|id| !already_in.contains(id))
                             .collect();
-                        if !new_tracks.is_empty() {
-                            if let Err(e) = playlist_service.add_tracks(pid, new_tracks) {
-                                log::warn!("import_files: add_tracks failed: {e}");
-                            }
+                        if !new_tracks.is_empty()
+                            && let Err(e) = playlist_service.add_tracks(pid, new_tracks)
+                        {
+                            log::warn!("import_files: add_tracks failed: {e}");
                         }
                         Some(pid)
                     }
