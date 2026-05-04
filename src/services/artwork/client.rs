@@ -666,7 +666,10 @@ impl MusicBrainzClient {
                 let score = recording.score.unwrap_or(0).clamp(0, 100) as u8;
 
                 let artwork_id = release_id.unwrap_or_else(|| recording.id.clone());
-                let has_artwork = first_release.is_some();
+                let has_artwork = first_release
+                    .and_then(|r| r.cover_art_archive.as_ref())
+                    .map(|caa| caa.front)
+                    .unwrap_or(false);
 
                 crate::services::metadata_scrape::ScrapeCandidate {
                     musicbrainz_id: artwork_id,
@@ -755,7 +758,11 @@ impl MusicBrainzClient {
                     .map(|gs| gs.iter().map(|g| g.name.clone()).collect())
                     .unwrap_or_default();
 
-                let has_artwork = release.release_group.is_some();
+                let has_artwork = release
+                    .cover_art_archive
+                    .as_ref()
+                    .map(|caa| caa.front)
+                    .unwrap_or(false);
 
                 let score = release.score.unwrap_or(0).clamp(0, 100) as u8;
 
@@ -804,6 +811,13 @@ pub(crate) struct MBRelease {
     pub artist_credit: Option<Vec<MBArtistCredit>>,
     pub genres: Option<Vec<MBGenre>>,
     pub media: Option<Vec<MBMedia>>,
+    #[serde(rename = "cover-art-archive")]
+    pub cover_art_archive: Option<MBCoverArtArchive>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MBCoverArtArchive {
+    pub front: bool,
 }
 
 #[derive(Debug, Deserialize)]

@@ -344,16 +344,20 @@ pub fn get_track(conn: &Connection, id: i64) -> Result<Option<Track>> {
                 t.duration, t.track_number, COALESCE(t.disc_number, 0) AS disc_number, t.sample_rate, t.bit_depth,
                 t.file_type, t.file_size, t.rating, t.fingerprint, t.is_duplicate,
                 t.duplicate_of, t.last_played_at, t.play_count,
-                (SELECT GROUP_CONCAT(a.name, char(31)) FROM track_artists ta
-                 JOIN artists a ON a.id = ta.artist_id
-                 WHERE ta.track_id = t.id ORDER BY ta.position) AS artist_names_raw
-         FROM tracks t WHERE t.id = ?1",
+                (SELECT GROUP_CONCAT(a2.name, char(31)) FROM track_artists ta
+                 JOIN artists a2 ON a2.id = ta.artist_id
+                 WHERE ta.track_id = t.id ORDER BY ta.position) AS artist_names_raw,
+                COALESCE(t.year, a.year) AS year
+         FROM tracks t
+         LEFT JOIN albums a ON a.id = t.album_id
+         WHERE t.id = ?1",
         params![id],
         |row| {
             let raw: Option<String> = row.get("artist_names_raw")?;
             let artist_names: Vec<String> = raw
                 .map(|s| s.split('\x1f').map(str::to_string).collect())
                 .unwrap_or_default();
+            let year_raw: Option<i64> = row.get("year")?;
             Ok(Track {
                 id: row.get(0)?,
                 title: row.get(1)?,
@@ -375,6 +379,7 @@ pub fn get_track(conn: &Connection, id: i64) -> Result<Option<Track>> {
                 last_played_at: row.get(17)?,
                 play_count: row.get::<_, i32>(18)? as u32,
                 artist_names,
+                year: year_raw.and_then(|y| u16::try_from(y).ok()),
             })
         },
     )
@@ -421,6 +426,7 @@ pub fn get_album_tracks(conn: &Connection, album_id: i64) -> Result<Vec<Track>> 
             last_played_at: row.get(17)?,
             play_count: row.get::<_, i32>(18)? as u32,
             artist_names,
+            year: None,
         })
     })?;
 
@@ -977,6 +983,7 @@ pub fn get_genre_tracks(conn: &Connection, genre_id: i64) -> Result<Vec<Track>> 
             last_played_at: row.get(17)?,
             play_count: row.get::<_, i32>(18)? as u32,
             artist_names,
+            year: None,
         })
     })?;
 
@@ -1093,6 +1100,7 @@ pub fn get_source_tracks(conn: &Connection, source_id: i64) -> Result<Vec<Track>
             last_played_at: row.get(17)?,
             play_count: row.get::<_, i32>(18)? as u32,
             artist_names,
+            year: None,
         })
     })?;
 
@@ -1154,6 +1162,7 @@ pub fn search_library(
             last_played_at: row.get(17)?,
             play_count: row.get::<_, i32>(18)? as u32,
             artist_names,
+            year: None,
         })
     })?;
 

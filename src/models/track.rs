@@ -121,6 +121,10 @@ pub struct Track {
     /// Populated via GROUP_CONCAT in queries; empty if track_artists is not yet seeded.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub artist_names: Vec<String>,
+    /// Release year. Resolved as COALESCE(tracks.year, albums.year) in get_track;
+    /// None in list queries that do not join albums.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub year: Option<u16>,
 }
 
 // Custom serde for Duration (stored as milliseconds in DB)
@@ -277,6 +281,7 @@ impl TrackBuilder {
             last_played_at: self.last_played_at,
             play_count: self.play_count,
             artist_names: self.artist_names,
+            year: None,
         }
     }
 }
