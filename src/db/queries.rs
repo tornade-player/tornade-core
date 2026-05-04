@@ -1011,6 +1011,26 @@ pub fn get_album_genres(conn: &Connection, album_id: i64) -> Result<Vec<Genre>> 
     genres.collect()
 }
 
+/// Return all genres for a specific track, ordered by name.
+pub fn get_track_genres(conn: &Connection, track_id: i64) -> Result<Vec<Genre>> {
+    let mut stmt = conn.prepare(
+        "SELECT g.id, g.name
+         FROM genres g
+         JOIN track_genres tg ON tg.genre_id = g.id
+         WHERE tg.track_id = ?1
+         ORDER BY g.name",
+    )?;
+
+    let genres = stmt.query_map(params![track_id], |row| {
+        Ok(Genre {
+            id: row.get(0)?,
+            name: row.get(1)?,
+        })
+    })?;
+
+    genres.collect()
+}
+
 /// Return all distinct genres across tracks attributed to `artist_id`, ordered by name.
 pub fn get_artist_genres(conn: &Connection, artist_id: i64) -> Result<Vec<Genre>> {
     let mut stmt = conn.prepare(
