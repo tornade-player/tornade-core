@@ -543,7 +543,7 @@ impl MusicBrainzClient {
 
         let query = format!("recording:\"{title}\" AND artist:\"{artist}\"");
         let url = format!(
-            "{}/ws/2/recording/?query={}&fmt=json&inc=artist-credits+releases+genres&limit=5",
+            "{}/ws/2/recording/?query={}&fmt=json&inc=artist-credits+releases+release-groups+genres&limit=5",
             self.musicbrainz_base_url,
             urlencoding::encode(&query)
         );
@@ -601,21 +601,43 @@ impl MusicBrainzClient {
                     .and_then(|ac| ac.first())
                     .map(|ac| ac.artist.name.clone());
 
-                let year = first_release
-                    .and_then(|r| r.date.as_deref())
-                    .and_then(year_from_mb_date);
+                // Year: scan all releases for any date — first release may lack one.
+                let year = recording
+                    .releases
+                    .as_ref()
+                    .and_then(|releases| {
+                        releases
+                            .iter()
+                            .find_map(|r| r.date.as_deref().and_then(year_from_mb_date))
+                    });
 
-                // Prefer genres on the recording itself; fall back to the first release's genres
-                // (MusicBrainz recordings often have no genre data even when the release does).
+                // Genre priority: recording → any release → release-group.
                 let genres: Vec<String> = recording
                     .genres
                     .as_ref()
                     .map(|gs| gs.iter().map(|g| g.name.clone()).collect::<Vec<_>>())
                     .filter(|v| !v.is_empty())
                     .or_else(|| {
-                        first_release
-                            .and_then(|r| r.genres.as_ref())
-                            .map(|gs| gs.iter().map(|g| g.name.clone()).collect())
+                        recording.releases.as_ref().and_then(|releases| {
+                            releases.iter().find_map(|r| {
+                                r.genres
+                                    .as_ref()
+                                    .filter(|gs| !gs.is_empty())
+                                    .map(|gs| gs.iter().map(|g| g.name.clone()).collect())
+                            })
+                        })
+                    })
+                    .or_else(|| {
+                        // Last resort: release-group genres.
+                        recording.releases.as_ref().and_then(|releases| {
+                            releases.iter().find_map(|r| {
+                                r.release_group
+                                    .as_ref()
+                                    .and_then(|rg| rg.genres.as_ref())
+                                    .filter(|gs| !gs.is_empty())
+                                    .map(|gs| gs.iter().map(|g| g.name.clone()).collect())
+                            })
+                        })
                     })
                     .unwrap_or_default();
 
@@ -623,10 +645,13 @@ impl MusicBrainzClient {
                     .and_then(|r| r.media.as_ref())
                     .and_then(|m| m.first());
 
+                // Track number: prefer explicit position; fall back to track-offset + 1
+                // (MB recording search may return offset without full tracks array).
                 let track_number = first_media
                     .and_then(|m| m.tracks.as_ref())
                     .and_then(|t| t.first())
-                    .and_then(|t| t.position);
+                    .and_then(|t| t.position)
+                    .or_else(|| first_media.and_then(|m| m.track_offset).map(|o| o + 1));
 
                 let disc_number = first_media.and_then(|m| m.disc_number);
 
@@ -777,6 +802,7 @@ pub(crate) struct MBRelease {
 struct MBReleaseGroup {
     #[serde(rename = "primary-type")]
     primary_type: Option<String>,
+    pub genres: Option<Vec<MBGenre>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -811,6 +837,10 @@ pub struct MBMedia {
     pub tracks: Option<Vec<MBTrackInRelease>>,
     #[serde(rename = "position")]
     pub disc_number: Option<u32>,
+    /// 0-based index of the first track of this recording within the disc.
+    /// Used as fallback when `tracks` array is absent in recording search results.
+    #[serde(rename = "track-offset")]
+    pub track_offset: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
