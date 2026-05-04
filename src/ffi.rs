@@ -239,6 +239,22 @@ mod ffi {
         fn cancel_artwork_fetch() -> String;
         fn get_album_artwork_with_online(album_id: i64) -> Vec<u8>;
         fn get_artist_photo(artist_id: i64) -> Vec<u8>;
+
+        // Metadata Editing Functions (T009)
+        fn update_track_metadata(track_id: i64, json: &str) -> String;
+        fn update_album_metadata(album_id: i64, json: &str) -> String;
+        fn write_track_file_tags(track_id: i64) -> String;
+        fn write_album_file_tags(album_id: i64) -> String;
+        fn get_metadata_suggestions(field: &str) -> String;
+        fn scrape_track_metadata(track_id: i64) -> String;
+        fn scrape_album_metadata(album_id: i64) -> String;
+        fn scrape_track_by_query(title: &str, artist: &str) -> String;
+        fn scrape_album_by_query(album_title: &str, artist: &str) -> String;
+        fn set_track_artwork_from_path(track_id: i64, image_path: &str) -> String;
+        fn set_album_artwork_from_path(album_id: i64, image_path: &str) -> String;
+        fn remove_track_artwork(track_id: i64) -> String;
+        fn remove_album_artwork(album_id: i64) -> String;
+        fn set_track_artwork_from_scrape(track_id: i64, musicbrainz_id: &str) -> String;
     }
 }
 
@@ -2811,6 +2827,1149 @@ fn get_artist_photo(artist_id: i64) -> Vec<u8> {
             }
         }
         Err(_) => Vec::new(),
+    }
+}
+
+// ── Metadata Editing Stubs (T009) ────────────────────────────────────────────
+
+fn update_track_metadata(track_id: i64, json: &str) -> String {
+    let update: crate::services::TrackTagUpdate = match serde_json::from_str(json) {
+        Ok(u) => u,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Invalid JSON: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let conn = match pool.get() {
+                Ok(conn) => conn,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get database connection: {}", e)
+                    })
+                    .to_string();
+                }
+            };
+
+            match crate::db::queries::update_track_metadata(&conn, track_id, &update) {
+                Ok(()) => serde_json::json!({
+                    "success": true,
+                    "data": { "track_id": track_id }
+                })
+                .to_string(),
+                Err(e) => serde_json::json!({
+                    "success": false,
+                    "error": format!("{}", e)
+                })
+                .to_string(),
+            }
+        }
+        Err(e) => serde_json::json!({
+            "success": false,
+            "error": format!("FFI initialization failed: {}", e)
+        })
+        .to_string(),
+    }
+}
+
+fn update_album_metadata(album_id: i64, json: &str) -> String {
+    let update: crate::db::queries::AlbumTagUpdate = match serde_json::from_str(json) {
+        Ok(u) => u,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Invalid JSON: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let conn = match pool.get() {
+                Ok(conn) => conn,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get database connection: {}", e)
+                    })
+                    .to_string();
+                }
+            };
+
+            match crate::db::queries::update_album_metadata(&conn, album_id, &update) {
+                Ok(tracks_affected) => serde_json::json!({
+                    "success": true,
+                    "data": { "album_id": album_id, "tracks_affected": tracks_affected }
+                })
+                .to_string(),
+                Err(e) => serde_json::json!({
+                    "success": false,
+                    "error": format!("{}", e)
+                })
+                .to_string(),
+            }
+        }
+        Err(e) => serde_json::json!({
+            "success": false,
+            "error": format!("FFI initialization failed: {}", e)
+        })
+        .to_string(),
+    }
+}
+
+fn write_track_file_tags(track_id: i64) -> String {
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let conn = match pool.get() {
+                Ok(conn) => conn,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get database connection: {}", e),
+                        "data": { "track_id": track_id }
+                    })
+                    .to_string();
+                }
+            };
+
+            // Fetch the track row joined with album and primary artist name.
+            // Also fetch year from tracks.year (migration 12) and genre names
+            // from track_genres/genres via GROUP_CONCAT.
+            let row = conn.query_row(
+                "SELECT t.title, t.file_path, t.track_number, t.disc_number, t.year,
+                        al.title AS album_title,
+                        ar.name  AS album_artist_name,
+                        (SELECT GROUP_CONCAT(a.name, char(31))
+                         FROM track_artists ta
+                         JOIN artists a ON a.id = ta.artist_id
+                         WHERE ta.track_id = t.id
+                         ORDER BY ta.position) AS artist_names_raw,
+                        (SELECT GROUP_CONCAT(g.name, char(31))
+                         FROM track_genres tg
+                         JOIN genres g ON g.id = tg.genre_id
+                         WHERE tg.track_id = t.id
+                         ORDER BY g.name) AS genre_names_raw
+                 FROM tracks t
+                 LEFT JOIN albums  al ON al.id = t.album_id
+                 LEFT JOIN artists ar ON ar.id = al.artist_id
+                 WHERE t.id = ?1",
+                rusqlite::params![track_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,         // title
+                        row.get::<_, String>(1)?,         // file_path
+                        row.get::<_, Option<u32>>(2)?,    // track_number
+                        row.get::<_, u32>(3)?,            // disc_number
+                        row.get::<_, Option<i64>>(4)?,    // year
+                        row.get::<_, Option<String>>(5)?, // album_title
+                        row.get::<_, Option<String>>(6)?, // album_artist_name
+                        row.get::<_, Option<String>>(7)?, // artist_names_raw
+                        row.get::<_, Option<String>>(8)?, // genre_names_raw
+                    ))
+                },
+            );
+
+            let (
+                title,
+                file_path_str,
+                track_number,
+                disc_number,
+                year_raw,
+                album_title,
+                album_artist_name,
+                artist_names_raw,
+                genre_names_raw,
+            ) = match row {
+                Ok(data) => data,
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Track {} not found", track_id),
+                        "data": { "track_id": track_id }
+                    })
+                    .to_string();
+                }
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to fetch track: {}", e),
+                        "data": { "track_id": track_id }
+                    })
+                    .to_string();
+                }
+            };
+
+            // Derive primary artist name from the GROUP_CONCAT list (first entry).
+            let artist_name = artist_names_raw
+                .as_deref()
+                .and_then(|s| s.split('\x1f').next())
+                .unwrap_or("")
+                .to_string();
+
+            let genre_names: Vec<String> = genre_names_raw
+                .map(|s| s.split('\x1f').map(str::to_string).collect())
+                .unwrap_or_default();
+
+            // disc_number == 0 is the sentinel "not set" value used in the DB schema.
+            let disc_number_opt = if disc_number == 0 {
+                None
+            } else {
+                Some(disc_number)
+            };
+
+            let year_opt: Option<u16> = year_raw.and_then(|y| u16::try_from(y).ok());
+
+            let update = crate::services::TrackTagUpdate {
+                title,
+                artist_name,
+                album_title,
+                album_artist_name,
+                year: year_opt,
+                genre_names,
+                track_number,
+                disc_number: disc_number_opt,
+            };
+
+            let file_path = std::path::Path::new(&file_path_str);
+            let svc = crate::services::TagWriterService::new();
+            match svc.write_track_tags(file_path, &update) {
+                Ok(()) => serde_json::json!({
+                    "success": true,
+                    "data": { "track_id": track_id }
+                })
+                .to_string(),
+                Err(e) => serde_json::json!({
+                    "success": false,
+                    "error": format!("{}", e),
+                    "data": { "track_id": track_id, "file_path": file_path_str }
+                })
+                .to_string(),
+            }
+        }
+        Err(e) => serde_json::json!({
+            "success": false,
+            "error": format!("FFI initialization failed: {}", e),
+            "data": { "track_id": track_id }
+        })
+        .to_string(),
+    }
+}
+
+fn write_album_file_tags(album_id: i64) -> String {
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let conn = match pool.get() {
+                Ok(conn) => conn,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get database connection: {}", e),
+                        "data": { "album_id": album_id }
+                    })
+                    .to_string();
+                }
+            };
+
+            // Fetch album title and album artist name.
+            let album_row = conn.query_row(
+                "SELECT al.title, ar.name
+                 FROM albums al
+                 LEFT JOIN artists ar ON ar.id = al.artist_id
+                 WHERE al.id = ?1",
+                rusqlite::params![album_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,         // album title
+                        row.get::<_, Option<String>>(1)?, // album artist name
+                    ))
+                },
+            );
+
+            let (album_title, album_artist_opt) = match album_row {
+                Ok(data) => data,
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Album {} not found", album_id),
+                        "data": { "album_id": album_id }
+                    })
+                    .to_string();
+                }
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to fetch album: {}", e),
+                        "data": { "album_id": album_id }
+                    })
+                    .to_string();
+                }
+            };
+
+            let album_artist = album_artist_opt.unwrap_or_default();
+
+            // Fetch all track file paths for this album.
+            let tracks = match crate::db::queries::get_album_tracks(&conn, album_id) {
+                Ok(t) => t,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to fetch tracks for album: {}", e),
+                        "data": { "album_id": album_id }
+                    })
+                    .to_string();
+                }
+            };
+
+            let svc = crate::services::TagWriterService::new();
+            let mut tracks_written: i64 = 0;
+            let mut errors: Vec<serde_json::Value> = Vec::new();
+
+            for track in &tracks {
+                let file_path = &track.file_path;
+                match svc.write_album_level_tags(file_path, &album_title, &album_artist) {
+                    Ok(()) => {
+                        tracks_written += 1;
+                    }
+                    Err(e) => {
+                        errors.push(serde_json::json!({
+                            "file_path": file_path.to_string_lossy(),
+                            "reason": format!("{}", e)
+                        }));
+                    }
+                }
+            }
+
+            let success = errors.is_empty();
+            serde_json::json!({
+                "success": success,
+                "data": {
+                    "album_id": album_id,
+                    "tracks_written": tracks_written,
+                    "errors": errors
+                }
+            })
+            .to_string()
+        }
+        Err(e) => serde_json::json!({
+            "success": false,
+            "error": format!("FFI initialization failed: {}", e),
+            "data": { "album_id": album_id }
+        })
+        .to_string(),
+    }
+}
+
+fn get_metadata_suggestions(field: &str) -> String {
+    // Validate field early to avoid unnecessary DB connection
+    match field {
+        "artist" | "genre" | "album" | "year" => {}
+        _ => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Unknown field: {}", field)
+            })
+            .to_string();
+        }
+    }
+
+    let pool = match get_or_init_pool() {
+        Ok(p) => p,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Failed to initialize database pool: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Failed to get database connection: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    let result = match field {
+        "artist" => crate::db::queries::get_distinct_artist_names(&conn),
+        "genre" => crate::db::queries::get_distinct_genre_names(&conn),
+        "album" => crate::db::queries::get_distinct_album_titles(&conn),
+        "year" => crate::db::queries::get_distinct_years(&conn),
+        _ => unreachable!("field validated above"),
+    };
+
+    match result {
+        Ok(values) => serde_json::json!({
+            "success": true,
+            "data": {
+                "field": field,
+                "values": values
+            }
+        })
+        .to_string(),
+        Err(e) => serde_json::json!({
+            "success": false,
+            "error": format!("{}", e)
+        })
+        .to_string(),
+    }
+}
+
+fn scrape_track_metadata(track_id: i64) -> String {
+    // 1. Get DB connection
+    let pool = match get_or_init_pool() {
+        Ok(p) => p,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Failed to initialize database pool: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Failed to get database connection: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    // 2. Fetch track title + artist name from DB
+    let row: Result<(String, String), _> = conn.query_row(
+        "SELECT t.title, a.name FROM tracks t JOIN artists a ON t.artist_id = a.id WHERE t.id = ?",
+        rusqlite::params![track_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    );
+
+    let (title, artist) = match row {
+        Ok(pair) => pair,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Track {} not found", track_id)
+            })
+            .to_string();
+        }
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Database query failed: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    // 3. Create MusicBrainzClient and call search_recording_metadata
+    let http_client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .user_agent("Tornade-Music-Player/1.0 ( contact@tornade.app )")
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Failed to create HTTP client: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    let rate_limiter = std::sync::Arc::new(Mutex::new(artwork::RateLimiter::new(1100)));
+    let client = artwork::MusicBrainzClient::new(http_client, rate_limiter);
+
+    let candidates_result =
+        TOKIO_RUNTIME.block_on(async { client.search_recording_metadata(&title, &artist).await });
+
+    match candidates_result {
+        Ok(candidates) => {
+            let candidates_json = match serde_json::to_value(&candidates) {
+                Ok(v) => v,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to serialize candidates: {}", e)
+                    })
+                    .to_string();
+                }
+            };
+            serde_json::json!({
+                "success": true,
+                "data": {
+                    "candidates": candidates_json
+                }
+            })
+            .to_string()
+        }
+        Err(e) => serde_json::json!({
+            "success": false,
+            "error": format!("MusicBrainz search failed: {}", e)
+        })
+        .to_string(),
+    }
+}
+
+fn scrape_album_metadata(album_id: i64) -> String {
+    // 1. Get DB connection
+    let pool = match get_or_init_pool() {
+        Ok(p) => p,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Failed to initialize database pool: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Failed to get database connection: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    // 2. Fetch album title + artist name from DB
+    let row: Result<(String, String), _> = conn.query_row(
+        "SELECT al.title, a.name FROM albums al JOIN artists a ON al.artist_id = a.id WHERE al.id = ?",
+        rusqlite::params![album_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    );
+
+    let (album_title, artist) = match row {
+        Ok(pair) => pair,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Album {} not found", album_id)
+            })
+            .to_string();
+        }
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Database query failed: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    // 3. Create MusicBrainzClient and call search_release_metadata
+    let http_client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .user_agent("Tornade-Music-Player/1.0 ( contact@tornade.app )")
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Failed to create HTTP client: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    let rate_limiter = std::sync::Arc::new(Mutex::new(artwork::RateLimiter::new(1100)));
+    let client = artwork::MusicBrainzClient::new(http_client, rate_limiter);
+
+    let candidates_result = TOKIO_RUNTIME
+        .block_on(async { client.search_release_metadata(&album_title, &artist).await });
+
+    match candidates_result {
+        Ok(candidates) => {
+            let candidates_json = match serde_json::to_value(&candidates) {
+                Ok(v) => v,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to serialize candidates: {}", e)
+                    })
+                    .to_string();
+                }
+            };
+            serde_json::json!({
+                "success": true,
+                "data": {
+                    "candidates": candidates_json
+                }
+            })
+            .to_string()
+        }
+        Err(e) => serde_json::json!({
+            "success": false,
+            "error": format!("MusicBrainz search failed: {}", e)
+        })
+        .to_string(),
+    }
+}
+
+fn scrape_track_by_query(title: &str, artist: &str) -> String {
+    let http_client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .user_agent("Tornade-Music-Player/1.0 ( contact@tornade.app )")
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Failed to create HTTP client: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    let rate_limiter = std::sync::Arc::new(Mutex::new(artwork::RateLimiter::new(1100)));
+    let client = artwork::MusicBrainzClient::new(http_client, rate_limiter);
+
+    let candidates_result =
+        TOKIO_RUNTIME.block_on(async { client.search_recording_metadata(title, artist).await });
+
+    match candidates_result {
+        Ok(candidates) => {
+            let candidates_json = match serde_json::to_value(&candidates) {
+                Ok(v) => v,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to serialize candidates: {}", e)
+                    })
+                    .to_string();
+                }
+            };
+            serde_json::json!({
+                "success": true,
+                "data": {
+                    "candidates": candidates_json
+                }
+            })
+            .to_string()
+        }
+        Err(e) => serde_json::json!({
+            "success": false,
+            "error": format!("MusicBrainz search failed: {}", e)
+        })
+        .to_string(),
+    }
+}
+
+fn scrape_album_by_query(album_title: &str, artist: &str) -> String {
+    let http_client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .user_agent("Tornade-Music-Player/1.0 ( contact@tornade.app )")
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Failed to create HTTP client: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    let rate_limiter = std::sync::Arc::new(Mutex::new(artwork::RateLimiter::new(1100)));
+    let client = artwork::MusicBrainzClient::new(http_client, rate_limiter);
+
+    let candidates_result = TOKIO_RUNTIME
+        .block_on(async { client.search_release_metadata(album_title, artist).await });
+
+    match candidates_result {
+        Ok(candidates) => {
+            let candidates_json = match serde_json::to_value(&candidates) {
+                Ok(v) => v,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to serialize candidates: {}", e)
+                    })
+                    .to_string();
+                }
+            };
+            serde_json::json!({
+                "success": true,
+                "data": {
+                    "candidates": candidates_json
+                }
+            })
+            .to_string()
+        }
+        Err(e) => serde_json::json!({
+            "success": false,
+            "error": format!("MusicBrainz search failed: {}", e)
+        })
+        .to_string(),
+    }
+}
+
+fn set_track_artwork_from_path(track_id: i64, image_path: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    // Validate file exists and check size
+    let metadata = match std::fs::metadata(image_path) {
+        Ok(m) => m,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Cannot read image file: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    let file_size = metadata.len();
+    const MAX_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
+    if file_size > MAX_SIZE {
+        let size_mb = file_size as f64 / (1024.0 * 1024.0);
+        return serde_json::json!({
+            "success": false,
+            "error": format!("Image exceeds 10 MB limit ({:.1} MB)", size_mb)
+        })
+        .to_string();
+    }
+
+    // Generate hash from path + size
+    let mut hasher = DefaultHasher::new();
+    image_path.hash(&mut hasher);
+    file_size.hash(&mut hasher);
+    let hash = format!("{:x}", hasher.finish());
+
+    // Get artwork cache dir and copy file
+    let app_paths = match AppPaths::new() {
+        Ok(p) => p,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Failed to initialize app paths: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    let cache_dir = app_paths.artwork_cache_dir();
+    if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+        return serde_json::json!({
+            "success": false,
+            "error": format!("Failed to create artwork cache dir: {}", e)
+        })
+        .to_string();
+    }
+
+    let dest_path = cache_dir.join(format!("{}.jpg", hash));
+    if let Err(e) = std::fs::copy(image_path, &dest_path) {
+        return serde_json::json!({
+            "success": false,
+            "error": format!("Failed to copy image to cache: {}", e)
+        })
+        .to_string();
+    }
+
+    let dest_path_str = dest_path.to_string_lossy().to_string();
+
+    // Get DB connection and update
+    let pool = match get_or_init_pool() {
+        Ok(p) => p,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": e
+            })
+            .to_string();
+        }
+    };
+
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Failed to get database connection: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    match crate::db::queries::set_track_artwork(&conn, track_id, &dest_path_str, &hash) {
+        Ok(()) => serde_json::json!({
+            "success": true,
+            "data": {
+                "track_id": track_id,
+                "artwork_hash": hash
+            }
+        })
+        .to_string(),
+        Err(e) => serde_json::json!({
+            "success": false,
+            "error": format!("{}", e)
+        })
+        .to_string(),
+    }
+}
+
+fn set_album_artwork_from_path(album_id: i64, image_path: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    // Validate file exists and check size
+    let metadata = match std::fs::metadata(image_path) {
+        Ok(m) => m,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Cannot read image file: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    let file_size = metadata.len();
+    const MAX_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
+    if file_size > MAX_SIZE {
+        let size_mb = file_size as f64 / (1024.0 * 1024.0);
+        return serde_json::json!({
+            "success": false,
+            "error": format!("Image exceeds 10 MB limit ({:.1} MB)", size_mb)
+        })
+        .to_string();
+    }
+
+    // Generate hash from path + size
+    let mut hasher = DefaultHasher::new();
+    image_path.hash(&mut hasher);
+    file_size.hash(&mut hasher);
+    let hash = format!("{:x}", hasher.finish());
+
+    // Get artwork cache dir and copy file
+    let app_paths = match AppPaths::new() {
+        Ok(p) => p,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Failed to initialize app paths: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    let cache_dir = app_paths.artwork_cache_dir();
+    if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+        return serde_json::json!({
+            "success": false,
+            "error": format!("Failed to create artwork cache dir: {}", e)
+        })
+        .to_string();
+    }
+
+    let dest_path = cache_dir.join(format!("{}.jpg", hash));
+    if let Err(e) = std::fs::copy(image_path, &dest_path) {
+        return serde_json::json!({
+            "success": false,
+            "error": format!("Failed to copy image to cache: {}", e)
+        })
+        .to_string();
+    }
+
+    let dest_path_str = dest_path.to_string_lossy().to_string();
+
+    // Get DB connection and update
+    let pool = match get_or_init_pool() {
+        Ok(p) => p,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": e
+            })
+            .to_string();
+        }
+    };
+
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Failed to get database connection: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    match crate::db::queries::set_album_artwork(&conn, album_id, &dest_path_str, &hash) {
+        Ok(()) => serde_json::json!({
+            "success": true,
+            "data": {
+                "album_id": album_id,
+                "artwork_hash": hash
+            }
+        })
+        .to_string(),
+        Err(e) => serde_json::json!({
+            "success": false,
+            "error": format!("{}", e)
+        })
+        .to_string(),
+    }
+}
+
+fn remove_track_artwork(track_id: i64) -> String {
+    let pool = match get_or_init_pool() {
+        Ok(p) => p,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": e
+            })
+            .to_string();
+        }
+    };
+
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Failed to get database connection: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    match crate::db::queries::remove_track_artwork(&conn, track_id) {
+        Ok(()) => serde_json::json!({
+            "success": true,
+            "data": {
+                "track_id": track_id
+            }
+        })
+        .to_string(),
+        Err(e) => serde_json::json!({
+            "success": false,
+            "error": format!("{}", e)
+        })
+        .to_string(),
+    }
+}
+
+fn remove_album_artwork(album_id: i64) -> String {
+    let pool = match get_or_init_pool() {
+        Ok(p) => p,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": e
+            })
+            .to_string();
+        }
+    };
+
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Failed to get database connection: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    match crate::db::queries::remove_album_artwork(&conn, album_id) {
+        Ok(()) => serde_json::json!({
+            "success": true,
+            "data": {
+                "album_id": album_id
+            }
+        })
+        .to_string(),
+        Err(e) => serde_json::json!({
+            "success": false,
+            "error": format!("{}", e)
+        })
+        .to_string(),
+    }
+}
+
+fn set_track_artwork_from_scrape(track_id: i64, musicbrainz_id: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    // Get DB pool
+    let pool = match get_or_init_pool() {
+        Ok(p) => p,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Failed to initialize database pool: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Failed to get database connection: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    // Fetch the album_id for this track
+    let album_id: i64 = match conn.query_row(
+        "SELECT album_id FROM tracks WHERE id = ?1 AND album_id IS NOT NULL",
+        rusqlite::params![track_id],
+        |row| row.get(0),
+    ) {
+        Ok(id) => id,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Track {} not found or has no album", track_id)
+            })
+            .to_string();
+        }
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Failed to fetch track: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    // Download artwork directly from Cover Art Archive using the provided MB release ID
+    let mb_id = musicbrainz_id.to_string();
+    let image_bytes_result = TOKIO_RUNTIME.block_on(async move {
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .user_agent("Tornade-Music-Player/1.0 ( contact@tornade.app )")
+            .build()
+            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+        let url = format!("https://coverartarchive.org/release/{}/front-500", mb_id);
+        log::debug!("Fetching artwork from Cover Art Archive: {url}");
+
+        let response = http_client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("Cover Art Archive request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            return Err(format!(
+                "Cover Art Archive returned status {} for release {}",
+                response.status(),
+                mb_id
+            ));
+        }
+
+        const MAX_IMAGE_SIZE: usize = 10 * 1024 * 1024;
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| format!("Failed to read image bytes: {}", e))?;
+
+        if bytes.len() > MAX_IMAGE_SIZE {
+            let size_mb = bytes.len() as f64 / (1024.0 * 1024.0);
+            return Err(format!("Image exceeds 10 MB limit ({:.1} MB)", size_mb));
+        }
+
+        Ok(bytes.to_vec())
+    });
+
+    let image_bytes = match image_bytes_result {
+        Ok(b) => b,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": e
+            })
+            .to_string();
+        }
+    };
+
+    // Generate hash from image bytes
+    let mut hasher = DefaultHasher::new();
+    image_bytes.hash(&mut hasher);
+    let hash = format!("{:x}", hasher.finish());
+
+    // Get artwork cache dir and write file
+    let app_paths = match AppPaths::new() {
+        Ok(p) => p,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Failed to initialize app paths: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    let cache_dir = app_paths.artwork_cache_dir();
+    if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+        return serde_json::json!({
+            "success": false,
+            "error": format!("Failed to create artwork cache dir: {}", e)
+        })
+        .to_string();
+    }
+
+    let dest_path = cache_dir.join(format!("{}.jpg", hash));
+    if let Err(e) = std::fs::write(&dest_path, &image_bytes) {
+        return serde_json::json!({
+            "success": false,
+            "error": format!("Failed to write artwork file: {}", e)
+        })
+        .to_string();
+    }
+
+    let dest_path_str = dest_path.to_string_lossy().to_string();
+
+    // Update DB: set artwork on the album
+    match crate::db::queries::set_album_artwork(&conn, album_id, &dest_path_str, &hash) {
+        Ok(()) => serde_json::json!({
+            "success": true,
+            "data": {
+                "track_id": track_id,
+                "artwork_hash": hash
+            }
+        })
+        .to_string(),
+        Err(e) => serde_json::json!({
+            "success": false,
+            "error": format!("{}", e)
+        })
+        .to_string(),
     }
 }
 

@@ -9,6 +9,8 @@
 
 use crate::models::source::SourceType;
 use crate::models::{Album, Artist, AudioFormat, Genre, Playlist, Source, Track};
+use crate::services::error::LibraryError;
+use crate::services::tag_writer::TrackTagUpdate;
 use rusqlite::{Connection, OptionalExtension, Result, params};
 use std::path::{Path, PathBuf};
 
@@ -339,7 +341,7 @@ pub fn insert_track(
 pub fn get_track(conn: &Connection, id: i64) -> Result<Option<Track>> {
     conn.query_row(
         "SELECT t.id, t.title, t.album_id, t.artist_id, t.source_id, t.file_path,
-                t.duration, t.track_number, t.disc_number, t.sample_rate, t.bit_depth,
+                t.duration, t.track_number, COALESCE(t.disc_number, 0) AS disc_number, t.sample_rate, t.bit_depth,
                 t.file_type, t.file_size, t.rating, t.fingerprint, t.is_duplicate,
                 t.duplicate_of, t.last_played_at, t.play_count,
                 (SELECT GROUP_CONCAT(a.name, char(31)) FROM track_artists ta
@@ -383,7 +385,7 @@ pub fn get_track(conn: &Connection, id: i64) -> Result<Option<Track>> {
 pub fn get_album_tracks(conn: &Connection, album_id: i64) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
         "SELECT t.id, t.title, t.album_id, t.artist_id, t.source_id, t.file_path,
-                t.duration, t.track_number, t.disc_number, t.sample_rate, t.bit_depth,
+                t.duration, t.track_number, COALESCE(t.disc_number, 0) AS disc_number, t.sample_rate, t.bit_depth,
                 t.file_type, t.file_size, t.rating, t.fingerprint, t.is_duplicate,
                 t.duplicate_of, t.last_played_at, t.play_count,
                 (SELECT GROUP_CONCAT(a.name, char(31)) FROM track_artists ta
@@ -937,7 +939,7 @@ pub fn list_genres_with_count(conn: &Connection) -> Result<Vec<(Genre, u32, u32)
 pub fn get_genre_tracks(conn: &Connection, genre_id: i64) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
         "SELECT t.id, t.title, t.album_id, t.artist_id, t.source_id, t.file_path,
-                t.duration, t.track_number, t.disc_number, t.sample_rate, t.bit_depth,
+                t.duration, t.track_number, COALESCE(t.disc_number, 0) AS disc_number, t.sample_rate, t.bit_depth,
                 t.file_type, t.file_size, t.rating, t.fingerprint, t.is_duplicate,
                 t.duplicate_of, t.last_played_at, t.play_count,
                 (SELECT GROUP_CONCAT(a.name, char(31)) FROM track_artists ta
@@ -1034,7 +1036,7 @@ pub fn get_artist_genres(conn: &Connection, artist_id: i64) -> Result<Vec<Genre>
 pub fn get_source_tracks(conn: &Connection, source_id: i64) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
         "SELECT t.id, t.title, t.album_id, t.artist_id, t.source_id, t.file_path,
-                t.duration, t.track_number, t.disc_number, t.sample_rate, t.bit_depth,
+                t.duration, t.track_number, COALESCE(t.disc_number, 0) AS disc_number, t.sample_rate, t.bit_depth,
                 t.file_type, t.file_size, t.rating, t.fingerprint, t.is_duplicate,
                 t.duplicate_of, t.last_played_at, t.play_count,
                 (SELECT GROUP_CONCAT(a.name, char(31)) FROM track_artists ta
@@ -1094,7 +1096,7 @@ pub fn search_library(
     let mut tracks = Vec::new();
     let mut stmt = conn.prepare(
         "SELECT t.id, t.title, t.album_id, t.artist_id, t.source_id, t.file_path,
-                t.duration, t.track_number, t.disc_number, t.sample_rate, t.bit_depth,
+                t.duration, t.track_number, COALESCE(t.disc_number, 0) AS disc_number, t.sample_rate, t.bit_depth,
                 t.file_type, t.file_size, t.rating, t.fingerprint, t.is_duplicate,
                 t.duplicate_of, t.last_played_at, t.play_count,
                 (SELECT GROUP_CONCAT(a.name, char(31)) FROM track_artists ta
@@ -1292,6 +1294,390 @@ pub fn add_track_to_playlist(conn: &Connection, playlist_id: i64, track_id: i64)
         params![playlist_id],
     )?;
 
+    Ok(())
+}
+
+// ============================================================================
+// Tag-editor bulk-update operations
+// ============================================================================
+
+/// Update a single track's metadata in the database.
+///
+/// # Steps
+/// 1. Upsert the track artist by name; obtain its `id`.
+/// 2. If `update.album_title` is `Some`, upsert the album artist (using
+///    `update.album_artist_name` when provided, otherwise the track artist),
+///    then upsert the album row by `(title, artist_id)` and obtain its `id`.
+/// 3. Update `tracks`: `title`, `artist_id`, `album_id`, `track_number`,
+///    `disc_number`, `year`.
+/// 4. Replace all `track_genres` rows for this track with the new list.
+/// 5. If the track moved to a different album and the old album now has zero
+///    tracks, delete the old album row.
+pub fn update_track_metadata(
+    conn: &Connection,
+    track_id: i64,
+    update: &TrackTagUpdate,
+) -> std::result::Result<(), LibraryError> {
+    // ── Fetch old album_id before we change it ────────────────────────────
+    let old_album_id: Option<i64> = conn
+        .query_row(
+            "SELECT album_id FROM tracks WHERE id = ?1",
+            params![track_id],
+            |row| row.get(0),
+        )
+        .map_err(LibraryError::Database)?;
+
+    // ── Step 1: upsert track artist ───────────────────────────────────────
+    conn.execute(
+        "INSERT OR IGNORE INTO artists (name) VALUES (?1)",
+        params![update.artist_name],
+    )
+    .map_err(LibraryError::Database)?;
+
+    let artist_id: i64 = conn
+        .query_row(
+            "SELECT id FROM artists WHERE name = ?1",
+            params![update.artist_name],
+            |row| row.get(0),
+        )
+        .map_err(LibraryError::Database)?;
+
+    // ── Step 2: upsert album (only if album_title is Some) ────────────────
+    let new_album_id: Option<i64> = if let Some(album_title) = &update.album_title {
+        // Determine album artist: prefer explicit album_artist_name, fall back to track artist
+        let album_artist_id = if let Some(aa_name) = &update.album_artist_name {
+            conn.execute(
+                "INSERT OR IGNORE INTO artists (name) VALUES (?1)",
+                params![aa_name],
+            )
+            .map_err(LibraryError::Database)?;
+
+            conn.query_row(
+                "SELECT id FROM artists WHERE name = ?1",
+                params![aa_name],
+                |row| row.get(0),
+            )
+            .map_err(LibraryError::Database)?
+        } else {
+            artist_id
+        };
+
+        // Upsert album by (title, artist_id)
+        conn.execute(
+            "INSERT OR IGNORE INTO albums (title, artist_id) VALUES (?1, ?2)",
+            params![album_title, album_artist_id],
+        )
+        .map_err(LibraryError::Database)?;
+
+        let aid: i64 = conn
+            .query_row(
+                "SELECT id FROM albums WHERE title = ?1 AND artist_id = ?2",
+                params![album_title, album_artist_id],
+                |row| row.get(0),
+            )
+            .map_err(LibraryError::Database)?;
+
+        Some(aid)
+    } else {
+        None
+    };
+
+    // ── Step 3: update tracks row ─────────────────────────────────────────
+    conn.execute(
+        "UPDATE tracks
+            SET title        = ?1,
+                artist_id    = ?2,
+                album_id     = ?3,
+                track_number = ?4,
+                disc_number  = ?5,
+                year         = ?6,
+                updated_at   = CURRENT_TIMESTAMP
+          WHERE id = ?7",
+        params![
+            update.title,
+            artist_id,
+            new_album_id,
+            update.track_number,
+            update.disc_number,
+            update.year.map(|y| y as i64),
+            track_id,
+        ],
+    )
+    .map_err(LibraryError::Database)?;
+
+    // ── Step 4: replace track_genres ─────────────────────────────────────
+    conn.execute(
+        "DELETE FROM track_genres WHERE track_id = ?1",
+        params![track_id],
+    )
+    .map_err(LibraryError::Database)?;
+
+    for genre_name in &update.genre_names {
+        conn.execute(
+            "INSERT OR IGNORE INTO genres (name) VALUES (?1)",
+            params![genre_name],
+        )
+        .map_err(LibraryError::Database)?;
+
+        let genre_id: i64 = conn
+            .query_row(
+                "SELECT id FROM genres WHERE name = ?1",
+                params![genre_name],
+                |row| row.get(0),
+            )
+            .map_err(LibraryError::Database)?;
+
+        conn.execute(
+            "INSERT INTO track_genres (track_id, genre_id) VALUES (?1, ?2) ON CONFLICT DO NOTHING",
+            params![track_id, genre_id],
+        )
+        .map_err(LibraryError::Database)?;
+    }
+
+    // ── Step 5: auto-delete previous album if it now has 0 tracks ────────
+    if let Some(old_id) = old_album_id {
+        let album_changed = new_album_id != Some(old_id);
+        if album_changed {
+            let remaining: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM tracks WHERE album_id = ?1",
+                    params![old_id],
+                    |row| row.get(0),
+                )
+                .map_err(LibraryError::Database)?;
+
+            if remaining == 0 {
+                conn.execute("DELETE FROM albums WHERE id = ?1", params![old_id])
+                    .map_err(LibraryError::Database)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Batch of album-level metadata changes submitted from the tag-editor modal.
+///
+/// Applying this update touches the `albums` row, the `artists` table (upsert),
+/// and replaces the `track_genres` rows for every track on the album.
+#[derive(Debug, serde::Deserialize)]
+pub struct AlbumTagUpdate {
+    pub title: String,
+    pub artist_name: String,
+    pub year: Option<u16>,
+    pub genre_names: Vec<String>,
+}
+
+/// Apply `update` to the album identified by `album_id` and rewrite genres for
+/// all of its tracks. Returns the number of tracks affected.
+///
+/// # Steps
+/// 1. Upsert the album artist by name; obtain its `id`.
+/// 2. Update `albums.title`, `albums.artist_id`, `albums.year`.
+/// 3. Delete all existing `track_genres` rows for every track on this album.
+/// 4. For each genre in `update.genre_names`, upsert the genre and insert a
+///    `track_genres` row for every track on the album.
+/// 5. Return `COUNT(*) FROM tracks WHERE album_id = ?`.
+pub fn update_album_metadata(
+    conn: &Connection,
+    album_id: i64,
+    update: &AlbumTagUpdate,
+) -> std::result::Result<i64, LibraryError> {
+    // 1. Upsert artist
+    conn.execute(
+        "INSERT OR IGNORE INTO artists (name) VALUES (?1)",
+        params![update.artist_name],
+    )
+    .map_err(LibraryError::Database)?;
+
+    let artist_id: i64 = conn
+        .query_row(
+            "SELECT id FROM artists WHERE name = ?1",
+            params![update.artist_name],
+            |row| row.get(0),
+        )
+        .map_err(LibraryError::Database)?;
+
+    // 2. Update album row
+    conn.execute(
+        "UPDATE albums SET title = ?1, artist_id = ?2, year = ?3 WHERE id = ?4",
+        params![
+            update.title,
+            artist_id,
+            update.year.map(|y| y as i64),
+            album_id
+        ],
+    )
+    .map_err(LibraryError::Database)?;
+
+    // 3. Delete existing genre associations for all tracks on this album
+    conn.execute(
+        "DELETE FROM track_genres WHERE track_id IN (SELECT id FROM tracks WHERE album_id = ?1)",
+        params![album_id],
+    )
+    .map_err(LibraryError::Database)?;
+
+    // 4. Re-insert genres for every track on the album
+    if !update.genre_names.is_empty() {
+        // Collect all track IDs for this album
+        let mut stmt = conn
+            .prepare("SELECT id FROM tracks WHERE album_id = ?1")
+            .map_err(LibraryError::Database)?;
+        let track_ids: Vec<i64> = stmt
+            .query_map(params![album_id], |row| row.get(0))
+            .map_err(LibraryError::Database)?
+            .collect::<rusqlite::Result<Vec<i64>>>()
+            .map_err(LibraryError::Database)?;
+
+        for genre_name in &update.genre_names {
+            // Upsert genre
+            conn.execute(
+                "INSERT OR IGNORE INTO genres (name) VALUES (?1)",
+                params![genre_name],
+            )
+            .map_err(LibraryError::Database)?;
+
+            let genre_id: i64 = conn
+                .query_row(
+                    "SELECT id FROM genres WHERE name = ?1",
+                    params![genre_name],
+                    |row| row.get(0),
+                )
+                .map_err(LibraryError::Database)?;
+
+            // Insert track_genres row for every track
+            for &track_id in &track_ids {
+                conn.execute(
+                    "INSERT INTO track_genres (track_id, genre_id) VALUES (?1, ?2) ON CONFLICT DO NOTHING",
+                    params![track_id, genre_id],
+                )
+                .map_err(LibraryError::Database)?;
+            }
+        }
+    }
+
+    // 5. Return count of affected tracks
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM tracks WHERE album_id = ?1",
+            params![album_id],
+            |row| row.get(0),
+        )
+        .map_err(LibraryError::Database)?;
+
+    Ok(count)
+}
+
+// ============================================================================
+// Distinct-value helpers (used for tag-editor autocomplete suggestions)
+// ============================================================================
+
+/// Return up to 50 distinct artist names ordered alphabetically.
+pub fn get_distinct_artist_names(conn: &Connection) -> Result<Vec<String>, LibraryError> {
+    let mut stmt = conn.prepare("SELECT DISTINCT name FROM artists ORDER BY name LIMIT 50")?;
+    let names = stmt.query_map([], |row| row.get(0))?;
+    names
+        .collect::<Result<Vec<String>>>()
+        .map_err(LibraryError::from)
+}
+
+/// Return up to 50 distinct genre names ordered alphabetically.
+pub fn get_distinct_genre_names(conn: &Connection) -> Result<Vec<String>, LibraryError> {
+    let mut stmt = conn.prepare("SELECT DISTINCT name FROM genres ORDER BY name LIMIT 50")?;
+    let names = stmt.query_map([], |row| row.get(0))?;
+    names
+        .collect::<Result<Vec<String>>>()
+        .map_err(LibraryError::from)
+}
+
+/// Return up to 50 distinct album titles ordered alphabetically.
+pub fn get_distinct_album_titles(conn: &Connection) -> Result<Vec<String>, LibraryError> {
+    let mut stmt = conn.prepare("SELECT DISTINCT title FROM albums ORDER BY title LIMIT 50")?;
+    let titles = stmt.query_map([], |row| row.get(0))?;
+    titles
+        .collect::<Result<Vec<String>>>()
+        .map_err(LibraryError::from)
+}
+
+/// Return up to 50 distinct track years as strings, ordered numerically.
+/// Rows where `year` is NULL are excluded.
+pub fn get_distinct_years(conn: &Connection) -> Result<Vec<String>, LibraryError> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT CAST(year AS TEXT) FROM tracks WHERE year IS NOT NULL ORDER BY year LIMIT 50",
+    )?;
+    let years = stmt.query_map([], |row| row.get(0))?;
+    years
+        .collect::<Result<Vec<String>>>()
+        .map_err(LibraryError::from)
+}
+
+// ============================================================================
+// Artwork DB helpers (used by tag-editor and artwork-from-path services)
+// ============================================================================
+
+/// Set `artwork_path` and `artwork_hash` on the album that owns `track_id`.
+///
+/// Artwork in this schema lives on the `albums` row; individual tracks inherit
+/// it from their album. If the track has no album (`album_id IS NULL`) the
+/// update is a no-op and returns `Ok(())`.
+pub fn set_track_artwork(
+    conn: &Connection,
+    track_id: i64,
+    artwork_path: &str,
+    artwork_hash: &str,
+) -> std::result::Result<(), LibraryError> {
+    conn.execute(
+        "UPDATE albums
+            SET artwork_path = ?1, artwork_hash = ?2
+          WHERE id = (SELECT album_id FROM tracks WHERE id = ?3 AND album_id IS NOT NULL)",
+        params![artwork_path, artwork_hash, track_id],
+    )
+    .map_err(LibraryError::Database)?;
+    Ok(())
+}
+
+/// Set `artwork_path` and `artwork_hash` on the album identified by `album_id`.
+pub fn set_album_artwork(
+    conn: &Connection,
+    album_id: i64,
+    artwork_path: &str,
+    artwork_hash: &str,
+) -> std::result::Result<(), LibraryError> {
+    conn.execute(
+        "UPDATE albums SET artwork_path = ?1, artwork_hash = ?2 WHERE id = ?3",
+        params![artwork_path, artwork_hash, album_id],
+    )
+    .map_err(LibraryError::Database)?;
+    Ok(())
+}
+
+/// Clear `artwork_path` and `artwork_hash` (set to NULL) on the album that owns
+/// `track_id`. No-op if the track has no album.
+pub fn remove_track_artwork(
+    conn: &Connection,
+    track_id: i64,
+) -> std::result::Result<(), LibraryError> {
+    conn.execute(
+        "UPDATE albums
+            SET artwork_path = NULL, artwork_hash = NULL
+          WHERE id = (SELECT album_id FROM tracks WHERE id = ?1 AND album_id IS NOT NULL)",
+        params![track_id],
+    )
+    .map_err(LibraryError::Database)?;
+    Ok(())
+}
+
+/// Clear `artwork_path` and `artwork_hash` (set to NULL) on the album identified
+/// by `album_id`.
+pub fn remove_album_artwork(
+    conn: &Connection,
+    album_id: i64,
+) -> std::result::Result<(), LibraryError> {
+    conn.execute(
+        "UPDATE albums SET artwork_path = NULL, artwork_hash = NULL WHERE id = ?1",
+        params![album_id],
+    )
+    .map_err(LibraryError::Database)?;
     Ok(())
 }
 

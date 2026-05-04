@@ -197,8 +197,11 @@ impl MusicBrainzClient {
         }
     }
 
-    /// Constructor with configurable base URLs (for testing)
-    #[cfg(test)]
+    /// Constructor with configurable base URLs.
+    ///
+    /// Intended for integration tests that want to point the client at a local
+    /// mock server. Also useful for staging environments or embedded use-cases
+    /// where the default MusicBrainz/CAA/TADB endpoints must be overridden.
     pub fn with_base_urls(
         http_client: reqwest::Client,
         rate_limiter: Arc<Mutex<RateLimiter>>,
@@ -521,6 +524,218 @@ impl MusicBrainzClient {
         // Return the result whether or not we got a photo — the metadata is always valuable
         Ok(Some(result))
     }
+
+    /// Search MusicBrainz for recording (track) metadata candidates.
+    ///
+    /// Returns up to 5 `ScrapeCandidate` results ranked by score descending.
+    pub async fn search_recording_metadata(
+        &self,
+        title: &str,
+        artist: &str,
+    ) -> Result<Vec<crate::services::metadata_scrape::ScrapeCandidate>, String> {
+        let wait_time = {
+            let mut limiter = self.rate_limiter.lock_infallible();
+            limiter.calculate_wait()
+        };
+        if let Some(duration) = wait_time {
+            tokio::time::sleep(duration).await;
+        }
+
+        let query = format!("recording:\"{title}\" AND artist:\"{artist}\"");
+        let url = format!(
+            "{}/ws/2/recording/?query={}&fmt=json&inc=artist-credits+releases+genres&limit=5",
+            self.musicbrainz_base_url,
+            urlencoding::encode(&query)
+        );
+
+        log::debug!("Searching MusicBrainz recordings: {url}");
+
+        let response = self
+            .http_client
+            .get(&url)
+            .header(
+                "User-Agent",
+                "Tornade-Music-Player/1.0 ( thomas@example.com )",
+            )
+            .send()
+            .await
+            .map_err(|e| format!("MusicBrainz recording search failed: {e}"))?;
+
+        if !response.status().is_success() {
+            return Err(format!(
+                "MusicBrainz returned status: {}",
+                response.status()
+            ));
+        }
+
+        let search_result: MBRecordingSearchResult = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse MusicBrainz recording response: {e}"))?;
+
+        let mut candidates: Vec<crate::services::metadata_scrape::ScrapeCandidate> = search_result
+            .recordings
+            .into_iter()
+            .map(|recording| {
+                let artist_name = recording
+                    .artist_credit
+                    .as_ref()
+                    .and_then(|ac| ac.first())
+                    .map(|ac| ac.artist.name.clone())
+                    .unwrap_or_else(|| "Unknown".to_string());
+
+                let release_id = recording
+                    .releases
+                    .as_ref()
+                    .and_then(|r| r.first())
+                    .map(|r| r.id.clone());
+
+                let first_release = recording.releases.as_ref().and_then(|r| r.first());
+
+                let album = first_release.map(|r| r.title.clone());
+
+                let year = first_release
+                    .and_then(|r| r.date.as_deref())
+                    .and_then(year_from_mb_date);
+
+                // Prefer genres on the recording itself; fall back to the first release's genres
+                // (MusicBrainz recordings often have no genre data even when the release does).
+                let genres: Vec<String> = recording
+                    .genres
+                    .as_ref()
+                    .map(|gs| gs.iter().map(|g| g.name.clone()).collect::<Vec<_>>())
+                    .filter(|v| !v.is_empty())
+                    .or_else(|| {
+                        first_release
+                            .and_then(|r| r.genres.as_ref())
+                            .map(|gs| gs.iter().map(|g| g.name.clone()).collect())
+                    })
+                    .unwrap_or_default();
+
+                let first_media = first_release
+                    .and_then(|r| r.media.as_ref())
+                    .and_then(|m| m.first());
+
+                let track_number = first_media
+                    .and_then(|m| m.tracks.as_ref())
+                    .and_then(|t| t.first())
+                    .and_then(|t| t.position);
+
+                let disc_number = first_media.and_then(|m| m.disc_number);
+
+                let score = recording.score.unwrap_or(0).clamp(0, 100) as u8;
+
+                let artwork_id = release_id.unwrap_or_else(|| recording.id.clone());
+                let has_artwork = first_release.is_some();
+
+                crate::services::metadata_scrape::ScrapeCandidate {
+                    musicbrainz_id: artwork_id,
+                    title: recording.title,
+                    artist: artist_name,
+                    album,
+                    year,
+                    genres,
+                    track_number,
+                    disc_number,
+                    has_artwork,
+                    score,
+                }
+            })
+            .collect();
+
+        candidates.sort_by_key(|b| std::cmp::Reverse(b.score));
+        Ok(candidates)
+    }
+
+    /// Search MusicBrainz for release (album) metadata candidates.
+    ///
+    /// Returns up to 5 `ScrapeCandidate` results ranked by score descending.
+    pub async fn search_release_metadata(
+        &self,
+        album_title: &str,
+        artist: &str,
+    ) -> Result<Vec<crate::services::metadata_scrape::ScrapeCandidate>, String> {
+        let wait_time = {
+            let mut limiter = self.rate_limiter.lock_infallible();
+            limiter.calculate_wait()
+        };
+        if let Some(duration) = wait_time {
+            tokio::time::sleep(duration).await;
+        }
+
+        let query = format!("release:\"{album_title}\" AND artist:\"{artist}\"");
+        let url = format!(
+            "{}/ws/2/release/?query={}&fmt=json&inc=recordings+artist-credits+genres&limit=5",
+            self.musicbrainz_base_url,
+            urlencoding::encode(&query)
+        );
+
+        log::debug!("Searching MusicBrainz releases: {url}");
+
+        let response = self
+            .http_client
+            .get(&url)
+            .header(
+                "User-Agent",
+                "Tornade-Music-Player/1.0 ( thomas@example.com )",
+            )
+            .send()
+            .await
+            .map_err(|e| format!("MusicBrainz release search failed: {e}"))?;
+
+        if !response.status().is_success() {
+            return Err(format!(
+                "MusicBrainz returned status: {}",
+                response.status()
+            ));
+        }
+
+        let search_result: MBSearchResult = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse MusicBrainz release response: {e}"))?;
+
+        let mut candidates: Vec<crate::services::metadata_scrape::ScrapeCandidate> = search_result
+            .releases
+            .into_iter()
+            .map(|release| {
+                let artist_name = release
+                    .artist_credit
+                    .as_ref()
+                    .and_then(|ac| ac.first())
+                    .map(|ac| ac.artist.name.clone())
+                    .unwrap_or_else(|| "Unknown".to_string());
+
+                let year = release.date.as_deref().and_then(year_from_mb_date);
+
+                let genres = release
+                    .genres
+                    .as_ref()
+                    .map(|gs| gs.iter().map(|g| g.name.clone()).collect())
+                    .unwrap_or_default();
+
+                let has_artwork = release.release_group.is_some();
+
+                let score = release.score.unwrap_or(0).clamp(0, 100) as u8;
+
+                crate::services::metadata_scrape::ScrapeCandidate {
+                    musicbrainz_id: release.id,
+                    title: release.title,
+                    artist: artist_name,
+                    album: None,
+                    year,
+                    genres,
+                    track_number: None,
+                    disc_number: None,
+                    has_artwork,
+                    score,
+                }
+            })
+            .collect();
+
+        candidates.sort_by_key(|b| std::cmp::Reverse(b.score));
+        Ok(candidates)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -529,7 +744,7 @@ struct MBSearchResult {
 }
 
 #[derive(Debug, Deserialize)]
-struct MBRelease {
+pub(crate) struct MBRelease {
     id: String,
     #[allow(dead_code)]
     title: String,
@@ -543,6 +758,10 @@ struct MBRelease {
     release_group: Option<MBReleaseGroup>,
     #[serde(rename = "label-info")]
     label_info: Option<Vec<MBLabelInfo>>,
+    #[serde(rename = "artist-credit")]
+    pub artist_credit: Option<Vec<MBArtistCredit>>,
+    pub genres: Option<Vec<MBGenre>>,
+    pub media: Option<Vec<MBMedia>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -559,6 +778,55 @@ struct MBLabelInfo {
 #[derive(Debug, Deserialize)]
 struct MBLabel {
     name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MBArtistCredit {
+    pub artist: MBArtistRef,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MBArtistRef {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MBGenre {
+    pub name: String,
+    #[allow(dead_code)]
+    pub count: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MBMedia {
+    pub tracks: Option<Vec<MBTrackInRelease>>,
+    #[serde(rename = "position")]
+    pub disc_number: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MBTrackInRelease {
+    #[allow(dead_code)]
+    pub title: String,
+    #[allow(dead_code)]
+    pub number: Option<String>,
+    pub position: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MBRecordingSearchResult {
+    pub recordings: Vec<MBRecording>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MBRecording {
+    pub id: String,
+    pub title: String,
+    #[serde(rename = "artist-credit")]
+    pub artist_credit: Option<Vec<MBArtistCredit>>,
+    pub releases: Option<Vec<MBRelease>>,
+    pub genres: Option<Vec<MBGenre>>,
+    pub score: Option<i32>,
 }
 
 /// Extract a 4-digit year from a MusicBrainz date string ("1999-11-16" → Some(1999)).
@@ -1185,5 +1453,21 @@ mod tests {
         let data = result.unwrap();
         assert!(data.country.is_some(), "ABBA should have a country");
         assert!(data.genre.is_some(), "ABBA should have a genre");
+    }
+
+    #[test]
+    fn strip_format_brackets_removes_format_tags() {
+        assert_eq!(strip_format_brackets("Album [44.1-24 WEB]"), "Album ");
+        assert_eq!(strip_format_brackets("Album [FLAC]"), "Album ");
+        assert_eq!(
+            strip_format_brackets("Album [Deluxe Edition]"),
+            "Album [Deluxe Edition]"
+        );
+    }
+
+    #[test]
+    fn clean_album_title_strips_disc_suffix() {
+        assert_eq!(clean_album_title("Abbey Road (Disc 1)"), "Abbey Road");
+        assert_eq!(clean_album_title("Dark Side (CD 1) [FLAC]"), "Dark Side");
     }
 }

@@ -39,6 +39,14 @@ swift-bridge-build = "0.1"
 tempfile = "3.8"
 wiremock = "0.5"
 
+[[test]]
+name = "tag_writer_tests"
+path = "tests/integration/tag_writer_tests.rs"
+
+[[test]]
+name = "metadata_scrape_tests"
+path = "tests/integration/metadata_scrape_tests.rs"
+
 [features]
 default = []
 device-support = []

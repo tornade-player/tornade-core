@@ -22,10 +22,12 @@ pub mod error;
 pub mod events;
 pub mod library;
 pub mod metadata;
+pub mod metadata_scrape;
 pub mod player;
 pub mod playlist;
 pub mod reports;
 pub mod search;
+pub mod tag_writer;
 
 pub use artwork::{ArtworkFetchProgress, ArtworkService};
 pub use duplicate::{DuplicateGroup, DuplicateService};
@@ -36,8 +38,10 @@ pub use events::{
 };
 pub use library::LibraryService;
 pub use metadata::{MetadataService, TrackMetadata};
+pub use metadata_scrape::{MetadataScrapeService, ScrapeCandidate};
 pub use player::PlayerService;
 pub use playlist::PlaylistService;
 pub use reports::{ArtworkReport, ScanReport};
 pub use search::{SearchResults, SearchService};
+pub use tag_writer::{TagWriterService, TrackTagUpdate};
 // RepeatMode is re-exported from crate::models

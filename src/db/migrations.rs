@@ -366,6 +366,12 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO schema_migrations (version) VALUES (?1)", [11])?;
     }
 
+    // Migration 12: Add year column to tracks for release year metadata.
+    if current_version < 12 {
+        conn.execute_batch("ALTER TABLE tracks ADD COLUMN year INTEGER;")?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (?1)", [12])?;
+    }
+
     Ok(())
 }
 
