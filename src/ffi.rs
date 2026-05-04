@@ -3886,11 +3886,14 @@ fn set_track_artwork_from_scrape(track_id: i64, musicbrainz_id: &str) -> String 
             .map_err(|e| format!("Cover Art Archive request failed: {}", e))?;
 
         if !response.status().is_success() {
-            return Err(format!(
-                "Cover Art Archive returned status {} for release {}",
-                response.status(),
-                mb_id
-            ));
+            // CAA returns 404 or 500 for releases without front artwork.
+            // Treat any non-success as "no artwork available" for better UX.
+            log::warn!(
+                "Cover Art Archive: no artwork for release {} (status {})",
+                mb_id,
+                response.status()
+            );
+            return Err("No artwork available for this release".to_string());
         }
 
         const MAX_IMAGE_SIZE: usize = 10 * 1024 * 1024;
