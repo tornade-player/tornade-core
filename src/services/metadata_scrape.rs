@@ -13,7 +13,10 @@ use crate::services::artwork::MusicBrainzClient;
 pub struct ScrapeCandidate {
     pub musicbrainz_id: String,
     pub title: String,
+    /// Track artist (may differ from album artist on compilation releases).
     pub artist: String,
+    /// Album artist (release-level artist credit).
+    pub album_artist: Option<String>,
     pub album: Option<String>,
     pub year: Option<u16>,
     pub genres: Vec<String>,

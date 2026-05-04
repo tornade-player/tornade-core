@@ -594,6 +594,13 @@ impl MusicBrainzClient {
 
                 let album = first_release.map(|r| r.title.clone());
 
+                // Album artist comes from the release's artist_credit, which may differ
+                // from the recording's artist on compilation releases.
+                let album_artist = first_release
+                    .and_then(|r| r.artist_credit.as_ref())
+                    .and_then(|ac| ac.first())
+                    .map(|ac| ac.artist.name.clone());
+
                 let year = first_release
                     .and_then(|r| r.date.as_deref())
                     .and_then(year_from_mb_date);
@@ -632,6 +639,7 @@ impl MusicBrainzClient {
                     musicbrainz_id: artwork_id,
                     title: recording.title,
                     artist: artist_name,
+                    album_artist,
                     album,
                     year,
                     genres,
@@ -721,7 +729,8 @@ impl MusicBrainzClient {
                 crate::services::metadata_scrape::ScrapeCandidate {
                     musicbrainz_id: release.id,
                     title: release.title,
-                    artist: artist_name,
+                    artist: artist_name.clone(),
+                    album_artist: Some(artist_name),
                     album: None,
                     year,
                     genres,
