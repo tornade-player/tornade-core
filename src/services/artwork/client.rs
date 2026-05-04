@@ -543,7 +543,7 @@ impl MusicBrainzClient {
 
         let query = format!("recording:\"{title}\" AND artist:\"{artist}\"");
         let url = format!(
-            "{}/ws/2/recording/?query={}&fmt=json&inc=artist-credits+releases+release-groups+genres&limit=5",
+            "{}/ws/2/recording/?query={}&fmt=json&inc=artist-credits+releases+release-groups+genres+tags&limit=5",
             self.musicbrainz_base_url,
             urlencoding::encode(&query)
         );
@@ -628,7 +628,7 @@ impl MusicBrainzClient {
                         })
                     })
                     .or_else(|| {
-                        // Last resort: release-group genres.
+                        // Release-group genres.
                         recording.releases.as_ref().and_then(|releases| {
                             releases.iter().find_map(|r| {
                                 r.release_group
@@ -638,6 +638,14 @@ impl MusicBrainzClient {
                                     .map(|gs| gs.iter().map(|g| g.name.clone()).collect())
                             })
                         })
+                    })
+                    .or_else(|| {
+                        // Last resort: user-submitted tags (more broadly populated than genres).
+                        recording
+                            .tags
+                            .as_ref()
+                            .filter(|ts| !ts.is_empty())
+                            .map(|ts| ts.iter().map(|t| t.name.clone()).collect())
                     })
                     .unwrap_or_default();
 
@@ -865,7 +873,16 @@ pub struct MBRecording {
     pub artist_credit: Option<Vec<MBArtistCredit>>,
     pub releases: Option<Vec<MBRelease>>,
     pub genres: Option<Vec<MBGenre>>,
+    /// User-submitted tags — more broadly populated than formal genres.
+    pub tags: Option<Vec<MBTag>>,
     pub score: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MBTag {
+    pub name: String,
+    #[allow(dead_code)]
+    pub count: Option<u32>,
 }
 
 /// Extract a 4-digit year from a MusicBrainz date string ("1999-11-16" → Some(1999)).
