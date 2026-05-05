@@ -709,7 +709,7 @@ impl MusicBrainzClient {
 
         let query = format!("release:\"{album_title}\" AND artist:\"{artist}\"");
         let url = format!(
-            "{}/ws/2/release/?query={}&fmt=json&inc=recordings+artist-credits+genres&limit=5",
+            "{}/ws/2/release/?query={}&fmt=json&inc=recordings+artist-credits+genres+cover-art-archive&limit=5",
             self.musicbrainz_base_url,
             urlencoding::encode(&query)
         );
