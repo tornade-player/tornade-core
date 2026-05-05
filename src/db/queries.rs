@@ -1598,6 +1598,133 @@ pub fn update_album_metadata(
 }
 
 // ============================================================================
+// Multi-track metadata editing (T009 bulk edit extension)
+// ============================================================================
+
+/// Fields that may be applied to a batch of tracks simultaneously.
+/// `None` on any field means "leave this field unchanged per track".
+/// `Some("")` on `artist_name` or `album_title` means "clear / unassign".
+#[derive(Debug, serde::Deserialize)]
+pub struct MultiTrackTagUpdate {
+    pub artist_name: Option<String>,
+    pub album_title: Option<String>,
+    pub year: Option<Option<u16>>,
+    pub genre_names: Option<Vec<String>>,
+}
+
+/// Load the current tag fields for a single track so they can be merged with
+/// a `MultiTrackTagUpdate` before calling `update_track_metadata`.
+pub fn get_track_tag_update(
+    conn: &Connection,
+    track_id: i64,
+) -> std::result::Result<crate::services::TrackTagUpdate, LibraryError> {
+    let row = conn.query_row(
+        "SELECT t.title, t.track_number, t.disc_number, t.year,
+                al.title AS album_title,
+                ar_album.name AS album_artist_name,
+                (SELECT a.name
+                 FROM track_artists ta
+                 JOIN artists a ON a.id = ta.artist_id
+                 WHERE ta.track_id = t.id
+                 ORDER BY ta.position
+                 LIMIT 1) AS primary_artist_name,
+                (SELECT GROUP_CONCAT(g.name, char(31))
+                 FROM track_genres tg
+                 JOIN genres g ON g.id = tg.genre_id
+                 WHERE tg.track_id = t.id
+                 ORDER BY g.name) AS genre_names_raw
+         FROM tracks t
+         LEFT JOIN albums  al      ON al.id = t.album_id
+         LEFT JOIN artists ar_album ON ar_album.id = al.artist_id
+         WHERE t.id = ?1",
+        params![track_id],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,          // title
+                row.get::<_, Option<u32>>(1)?,     // track_number
+                row.get::<_, u32>(2)?,             // disc_number
+                row.get::<_, Option<i64>>(3)?,     // year
+                row.get::<_, Option<String>>(4)?,  // album_title
+                row.get::<_, Option<String>>(5)?,  // album_artist_name
+                row.get::<_, Option<String>>(6)?,  // primary_artist_name
+                row.get::<_, Option<String>>(7)?,  // genre_names_raw
+            ))
+        },
+    )
+    .map_err(LibraryError::Database)?;
+
+    let (
+        title,
+        track_number,
+        disc_number,
+        year_raw,
+        album_title,
+        album_artist_name,
+        primary_artist_name,
+        genre_names_raw,
+    ) = row;
+
+    let artist_name = primary_artist_name.unwrap_or_default();
+    let genre_names: Vec<String> = genre_names_raw
+        .map(|s| s.split('\x1f').map(str::to_string).collect())
+        .unwrap_or_default();
+    let disc_number_opt = if disc_number == 0 { None } else { Some(disc_number) };
+    let year: Option<u16> = year_raw.and_then(|y| u16::try_from(y).ok());
+
+    Ok(crate::services::TrackTagUpdate {
+        title,
+        artist_name,
+        album_title,
+        album_artist_name,
+        year,
+        genre_names,
+        track_number,
+        disc_number: disc_number_opt,
+    })
+}
+
+/// Apply `update` to each track in `track_ids`, preserving per-track fields
+/// (title, track number, disc number) unchanged.
+///
+/// For each track the function:
+/// 1. Loads the current `TrackTagUpdate` via `get_track_tag_update`.
+/// 2. Merges non-`None` fields from `update` into the current values.
+/// 3. Calls `update_track_metadata` with the merged result.
+///
+/// Returns the number of tracks successfully updated.
+pub fn update_multiple_tracks_metadata(
+    conn: &Connection,
+    track_ids: &[i64],
+    update: &MultiTrackTagUpdate,
+) -> std::result::Result<usize, LibraryError> {
+    let mut count = 0usize;
+    for &track_id in track_ids {
+        let mut current = get_track_tag_update(conn, track_id)?;
+
+        if let Some(ref artist_name) = update.artist_name {
+            current.artist_name = artist_name.clone();
+        }
+        if let Some(ref album_title) = update.album_title {
+            current.album_title = if album_title.is_empty() {
+                None
+            } else {
+                Some(album_title.clone())
+            };
+        }
+        if let Some(year_override) = update.year {
+            current.year = year_override;
+        }
+        if let Some(ref genres) = update.genre_names {
+            current.genre_names = genres.clone();
+        }
+
+        update_track_metadata(conn, track_id, &current)?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+// ============================================================================
 // Distinct-value helpers (used for tag-editor autocomplete suggestions)
 // ============================================================================
 

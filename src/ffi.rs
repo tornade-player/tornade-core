@@ -256,6 +256,10 @@ mod ffi {
         fn remove_track_artwork(track_id: i64) -> String;
         fn remove_album_artwork(album_id: i64) -> String;
         fn set_track_artwork_from_scrape(track_id: i64, musicbrainz_id: &str) -> String;
+
+        // Bulk multi-track metadata editing
+        fn update_multiple_tracks_metadata(track_ids_json: &str, json: &str) -> String;
+        fn write_multiple_tracks_file_tags(track_ids_json: &str) -> String;
     }
 }
 
@@ -4008,6 +4012,180 @@ fn set_track_artwork_from_scrape(track_id: i64, musicbrainz_id: &str) -> String 
         Err(e) => serde_json::json!({
             "success": false,
             "error": format!("{}", e)
+        })
+        .to_string(),
+    }
+}
+
+// ── Bulk multi-track metadata editing ────────────────────────────────────────
+
+fn update_multiple_tracks_metadata(track_ids_json: &str, json: &str) -> String {
+    let track_ids: Vec<i64> = match serde_json::from_str(track_ids_json) {
+        Ok(ids) => ids,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Invalid track_ids JSON: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    let update: crate::db::queries::MultiTrackTagUpdate = match serde_json::from_str(json) {
+        Ok(u) => u,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Invalid JSON: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let conn = match pool.get() {
+                Ok(c) => c,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get database connection: {}", e)
+                    })
+                    .to_string();
+                }
+            };
+
+            match crate::db::queries::update_multiple_tracks_metadata(&conn, &track_ids, &update) {
+                Ok(tracks_affected) => serde_json::json!({
+                    "success": true,
+                    "data": { "tracks_affected": tracks_affected }
+                })
+                .to_string(),
+                Err(e) => serde_json::json!({
+                    "success": false,
+                    "error": format!("{}", e)
+                })
+                .to_string(),
+            }
+        }
+        Err(e) => serde_json::json!({
+            "success": false,
+            "error": format!("FFI initialization failed: {}", e)
+        })
+        .to_string(),
+    }
+}
+
+fn write_multiple_tracks_file_tags(track_ids_json: &str) -> String {
+    let track_ids: Vec<i64> = match serde_json::from_str(track_ids_json) {
+        Ok(ids) => ids,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Invalid track_ids JSON: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    match get_or_init_pool() {
+        Ok(pool) => {
+            let conn = match pool.get() {
+                Ok(c) => c,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to get database connection: {}", e)
+                    })
+                    .to_string();
+                }
+            };
+
+            let svc = crate::services::TagWriterService::new();
+            let mut tracks_written: i64 = 0;
+            let mut errors: Vec<serde_json::Value> = Vec::new();
+
+            for &track_id in &track_ids {
+                // Load current track data for writing.
+                let (file_path_str, tag_update) = match conn.query_row(
+                    "SELECT t.file_path, t.title, t.track_number, t.disc_number, t.year,
+                             al.title AS album_title,
+                             ar_al.name AS album_artist_name,
+                             (SELECT a.name FROM track_artists ta
+                              JOIN artists a ON a.id = ta.artist_id
+                              WHERE ta.track_id = t.id ORDER BY ta.position LIMIT 1) AS primary_artist,
+                             (SELECT GROUP_CONCAT(g.name, char(31)) FROM track_genres tg
+                              JOIN genres g ON g.id = tg.genre_id
+                              WHERE tg.track_id = t.id ORDER BY g.name) AS genre_names_raw
+                      FROM tracks t
+                      LEFT JOIN albums  al    ON al.id = t.album_id
+                      LEFT JOIN artists ar_al ON ar_al.id = al.artist_id
+                      WHERE t.id = ?1",
+                    rusqlite::params![track_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,          // file_path
+                            row.get::<_, String>(1)?,          // title
+                            row.get::<_, Option<u32>>(2)?,     // track_number
+                            row.get::<_, u32>(3)?,             // disc_number
+                            row.get::<_, Option<i64>>(4)?,     // year
+                            row.get::<_, Option<String>>(5)?,  // album_title
+                            row.get::<_, Option<String>>(6)?,  // album_artist_name
+                            row.get::<_, Option<String>>(7)?,  // primary_artist
+                            row.get::<_, Option<String>>(8)?,  // genre_names_raw
+                        ))
+                    },
+                ) {
+                    Ok((fp, title, tn, dn, yr, at, aa, pa, gr)) => {
+                        let artist_name = pa.unwrap_or_default();
+                        let genre_names: Vec<String> = gr
+                            .map(|s| s.split('\x1f').map(str::to_string).collect())
+                            .unwrap_or_default();
+                        let disc = if dn == 0 { None } else { Some(dn) };
+                        let year: Option<u16> = yr.and_then(|y| u16::try_from(y).ok());
+                        (fp, crate::services::TrackTagUpdate {
+                            title,
+                            artist_name,
+                            album_title: at,
+                            album_artist_name: aa,
+                            year,
+                            genre_names,
+                            track_number: tn,
+                            disc_number: disc,
+                        })
+                    }
+                    Err(e) => {
+                        errors.push(serde_json::json!({
+                            "track_id": track_id,
+                            "reason": format!("Failed to fetch track: {}", e)
+                        }));
+                        continue;
+                    }
+                };
+
+                let file_path = std::path::Path::new(&file_path_str);
+                match svc.write_track_tags(file_path, &tag_update) {
+                    Ok(()) => tracks_written += 1,
+                    Err(e) => errors.push(serde_json::json!({
+                        "file_path": file_path_str,
+                        "reason": format!("{}", e)
+                    })),
+                }
+            }
+
+            let success = errors.is_empty();
+            serde_json::json!({
+                "success": success,
+                "data": {
+                    "tracks_written": tracks_written,
+                    "errors": errors
+                }
+            })
+            .to_string()
+        }
+        Err(e) => serde_json::json!({
+            "success": false,
+            "error": format!("FFI initialization failed: {}", e)
         })
         .to_string(),
     }
