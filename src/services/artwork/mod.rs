@@ -113,19 +113,28 @@ impl ArtworkService {
         *self.fetch_cancelled.lock_infallible() = false;
     }
 
-    /// Fetch artwork for all albums (and optionally artists)
-    pub async fn fetch_all_artwork(&self, fetch_artists: bool) -> Result<(), String> {
+    /// Fetch artwork for all albums (and optionally artists).
+    ///
+    /// `force = true` resets all previous failure markers and re-scrapes everything,
+    /// including albums that already have artwork.
+    /// `force = false` (default) skips albums whose scrape was already attempted
+    /// and failed, as well as albums that already have artwork.
+    pub async fn fetch_all_artwork(&self, fetch_artists: bool, force: bool) -> Result<(), String> {
         self.reset_cancel();
         // One-shot: delete legacy {album_db_id}.jpg files created before MBID-based naming
         self.cleanup_legacy_artwork_if_needed();
         let start_time = Local::now();
 
-        // Get albums without online artwork
-        let albums = self.get_albums_without_artwork()?;
+        if force {
+            self.reset_artwork_fetch_attempts()?;
+        }
+
+        // Get albums to scrape
+        let albums = self.get_albums_for_scrape(force)?;
         let total_albums = albums.len();
         let total_items = albums.len() as u32
             + if fetch_artists {
-                self.get_artists_without_photos()?.len() as u32
+                self.get_artists_for_scrape(force)?.len() as u32
             } else {
                 0
             };
@@ -192,7 +201,7 @@ impl ArtworkService {
 
         // Fetch artist photos if requested
         if fetch_artists {
-            let artists = self.get_artists_without_photos()?;
+            let artists = self.get_artists_for_scrape(force)?;
             total_artists = artists.len();
 
             for artist in artists {
@@ -317,10 +326,12 @@ impl ArtworkService {
             }
             Ok(None) => {
                 log::warn!("No artwork found for album {artist_name} - {album_title}");
+                let _ = self.mark_album_fetch_attempted(album_id);
                 false
             }
             Err(e) => {
                 log::error!("Error fetching artwork for album {artist_name} - {album_title}: {e}");
+                let _ = self.mark_album_fetch_attempted(album_id);
                 false
             }
         }
@@ -390,18 +401,30 @@ impl ArtworkService {
         Ok(())
     }
 
-    /// Get albums without online artwork
-    fn get_albums_without_artwork(&self) -> Result<Vec<AlbumInfo>, String> {
+    /// Get albums to scrape.
+    ///
+    /// `force = true`: all albums (no filter — re-scrape even those with artwork).
+    /// `force = false`: only albums where `online_artwork_path IS NULL`
+    ///   AND `artwork_fetch_attempted_at IS NULL` (never tried or not yet failed).
+    fn get_albums_for_scrape(&self, force: bool) -> Result<Vec<AlbumInfo>, String> {
         let conn = self.pool.get().map_err(|e| e.to_string())?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT a.id, a.title, ar.name as artist_name
-                 FROM albums a
-                 JOIN artists ar ON a.artist_id = ar.id
-                 WHERE a.online_artwork_path IS NULL
-                 ORDER BY ar.name, a.title",
-            )
-            .map_err(|e| e.to_string())?;
+        // force=true  → failed + new (no artwork, regardless of prior attempt)
+        // force=false → new only (no artwork AND never attempted)
+        let sql = if force {
+            "SELECT a.id, a.title, ar.name as artist_name
+             FROM albums a
+             JOIN artists ar ON a.artist_id = ar.id
+             WHERE a.online_artwork_path IS NULL
+             ORDER BY ar.name, a.title"
+        } else {
+            "SELECT a.id, a.title, ar.name as artist_name
+             FROM albums a
+             JOIN artists ar ON a.artist_id = ar.id
+             WHERE a.online_artwork_path IS NULL
+               AND a.artwork_fetch_attempted_at IS NULL
+             ORDER BY ar.name, a.title"
+        };
+        let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
 
         let albums = stmt
             .query_map([], |row| {
@@ -418,17 +441,42 @@ impl ArtworkService {
         Ok(albums)
     }
 
-    /// Get artists without photos (i.e. not yet attempted)
-    fn get_artists_without_photos(&self) -> Result<Vec<ArtistInfo>, String> {
+    /// Reset artwork fetch attempt markers for elements that still have no artwork.
+    /// Elements that already succeeded keep their data untouched.
+    fn reset_artwork_fetch_attempts(&self) -> Result<(), String> {
         let conn = self.pool.get().map_err(|e| e.to_string())?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, name
-                 FROM artists
-                 WHERE photo_fetched_at IS NULL
-                 ORDER BY name",
-            )
-            .map_err(|e| e.to_string())?;
+        conn.execute_batch(
+            "UPDATE albums SET artwork_fetch_attempted_at = NULL WHERE online_artwork_path IS NULL;
+             UPDATE artists SET photo_fetched_at = NULL WHERE photo_path IS NULL;",
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Mark an album as "fetch attempted" without saving artwork.
+    /// Prevents endless retries on albums not found in MusicBrainz.
+    fn mark_album_fetch_attempted(&self, album_id: i64) -> Result<(), String> {
+        let conn = self.pool.get().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE albums SET artwork_fetch_attempted_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            [album_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Get artists to scrape.
+    ///
+    /// `force = true`: failed + new (no photo, regardless of prior attempt).
+    /// `force = false`: new only (never attempted).
+    fn get_artists_for_scrape(&self, force: bool) -> Result<Vec<ArtistInfo>, String> {
+        let conn = self.pool.get().map_err(|e| e.to_string())?;
+        let sql = if force {
+            "SELECT id, name FROM artists WHERE photo_path IS NULL ORDER BY name"
+        } else {
+            "SELECT id, name FROM artists WHERE photo_fetched_at IS NULL ORDER BY name"
+        };
+        let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
 
         let artists = stmt
             .query_map([], |row| {

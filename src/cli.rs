@@ -1526,7 +1526,7 @@ impl TornadeCli {
         let artwork_service = self.artwork.clone();
 
         runtime.block_on(async move {
-            match artwork_service.fetch_all_artwork(fetch_artists).await {
+            match artwork_service.fetch_all_artwork(fetch_artists, false).await {
                 Ok(()) => {
                     // Poll for progress until complete
                     while let Some(progress) = artwork_service.get_progress() {

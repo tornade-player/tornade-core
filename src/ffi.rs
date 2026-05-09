@@ -234,7 +234,7 @@ mod ffi {
         fn import_files(paths_json: &str) -> String;
 
         // Artwork Fetching Functions
-        fn fetch_all_artwork(fetch_artists: bool) -> String;
+        fn fetch_all_artwork(fetch_artists: bool, force: bool) -> String;
         fn fetch_album_artwork(album_id: i64) -> String;
         fn get_artwork_fetch_progress() -> String;
         fn cancel_artwork_fetch() -> String;
@@ -256,6 +256,7 @@ mod ffi {
         fn remove_track_artwork(track_id: i64) -> String;
         fn remove_album_artwork(album_id: i64) -> String;
         fn set_track_artwork_from_scrape(track_id: i64, musicbrainz_id: &str) -> String;
+        fn set_album_artwork_from_scrape(album_id: i64, musicbrainz_id: &str) -> String;
 
         // Bulk multi-track metadata editing
         fn update_multiple_tracks_metadata(track_ids_json: &str, json: &str) -> String;
@@ -468,6 +469,8 @@ fn get_tracks_page(offset: u32, limit: u32, sort_by: &str, sort_dir: &str) -> St
                 "play_count" => "t.play_count",
                 "rating" => "t.rating",
                 "file_path" => "t.file_path",
+                "created_at" => "t.created_at",
+                "last_played_at" => "t.last_played_at",
                 _ => "t.title",
             };
             let order_dir = if sort_dir.eq_ignore_ascii_case("desc") {
@@ -2664,7 +2667,7 @@ fn import_files(paths_json: &str) -> String {
 
 // Artwork Fetching Functions
 
-fn fetch_all_artwork(fetch_artists: bool) -> String {
+fn fetch_all_artwork(fetch_artists: bool, force: bool) -> String {
     // Fetch artwork for all albums and optionally artists
     match get_or_init_artwork() {
         Ok(()) => {
@@ -2673,7 +2676,7 @@ fn fetch_all_artwork(fetch_artists: bool) -> String {
             if let Some(artwork_service) = artwork_opt.as_ref() {
                 let service_clone = artwork_service.clone();
                 TOKIO_RUNTIME.spawn(async move {
-                    if let Err(e) = service_clone.fetch_all_artwork(fetch_artists).await {
+                    if let Err(e) = service_clone.fetch_all_artwork(fetch_artists, force).await {
                         log::error!("Artwork fetch failed: {e}");
                     }
                 });
@@ -4005,6 +4008,136 @@ fn set_track_artwork_from_scrape(track_id: i64, musicbrainz_id: &str) -> String 
             "success": true,
             "data": {
                 "track_id": track_id,
+                "artwork_hash": hash
+            }
+        })
+        .to_string(),
+        Err(e) => serde_json::json!({
+            "success": false,
+            "error": format!("{}", e)
+        })
+        .to_string(),
+    }
+}
+
+fn set_album_artwork_from_scrape(album_id: i64, musicbrainz_id: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let pool = match get_or_init_pool() {
+        Ok(p) => p,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Failed to initialize database pool: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Failed to get database connection: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    let mb_id = musicbrainz_id.to_string();
+    let image_bytes_result = TOKIO_RUNTIME.block_on(async move {
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .user_agent("Tornade-Music-Player/1.0 ( contact@tornade.app )")
+            .build()
+            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+        let url = format!("https://coverartarchive.org/release/{}/front-500", mb_id);
+        log::debug!("Fetching artwork from Cover Art Archive: {url}");
+
+        let response = http_client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("Cover Art Archive request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            log::warn!(
+                "Cover Art Archive: no artwork for release {} (status {})",
+                mb_id,
+                response.status()
+            );
+            return Err("No artwork available for this release".to_string());
+        }
+
+        const MAX_IMAGE_SIZE: usize = 10 * 1024 * 1024;
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| format!("Failed to read image bytes: {}", e))?;
+
+        if bytes.len() > MAX_IMAGE_SIZE {
+            let size_mb = bytes.len() as f64 / (1024.0 * 1024.0);
+            return Err(format!("Image exceeds 10 MB limit ({:.1} MB)", size_mb));
+        }
+
+        Ok(bytes.to_vec())
+    });
+
+    let image_bytes = match image_bytes_result {
+        Ok(b) => b,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": e
+            })
+            .to_string();
+        }
+    };
+
+    let mut hasher = DefaultHasher::new();
+    image_bytes.hash(&mut hasher);
+    let hash = format!("{:x}", hasher.finish());
+
+    let app_paths = match AppPaths::new() {
+        Ok(p) => p,
+        Err(e) => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("Failed to initialize app paths: {}", e)
+            })
+            .to_string();
+        }
+    };
+
+    let cache_dir = app_paths.artwork_cache_dir();
+    if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+        return serde_json::json!({
+            "success": false,
+            "error": format!("Failed to create artwork cache dir: {}", e)
+        })
+        .to_string();
+    }
+
+    let dest_path = cache_dir.join(format!("{}.jpg", hash));
+    if let Err(e) = std::fs::write(&dest_path, &image_bytes) {
+        return serde_json::json!({
+            "success": false,
+            "error": format!("Failed to write artwork file: {}", e)
+        })
+        .to_string();
+    }
+
+    let dest_path_str = dest_path.to_string_lossy().to_string();
+
+    match crate::db::queries::set_album_artwork(&conn, album_id, &dest_path_str, &hash) {
+        Ok(()) => serde_json::json!({
+            "success": true,
+            "data": {
+                "album_id": album_id,
                 "artwork_hash": hash
             }
         })

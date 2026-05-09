@@ -372,6 +372,15 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO schema_migrations (version) VALUES (?1)", [12])?;
     }
 
+    // Migration 13: Track failed artwork scrape attempts on albums so they are
+    // skipped on subsequent "new only" runs (mirrors photo_fetched_at on artists).
+    if current_version < 13 {
+        conn.execute_batch(
+            "ALTER TABLE albums ADD COLUMN artwork_fetch_attempted_at DATETIME;",
+        )?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (?1)", [13])?;
+    }
+
     Ok(())
 }
 
