@@ -508,6 +508,16 @@ impl PlayerService {
                     last_missing = Some(path);
                     current += 1;
                 }
+                Err(PlayerError::TrackNotFound(id)) => {
+                    warn!("Track {id} not found in DB (deleted?), skipping");
+                    let mut state = self.state.lock().unwrap();
+                    if state.skipped_track_ids.len() < 500 {
+                        state.skipped_track_ids.insert(track_id);
+                    }
+                    drop(state);
+                    last_missing = Some(format!("track:{id}"));
+                    current += 1;
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -1357,6 +1367,7 @@ mod tests {
             last_played_at: None,
             play_count: 0,
             artist_names: vec![],
+            year: None,
         };
 
         // Simulate playback that started 5 seconds ago (3s duration + 1s buffer = 4s threshold).
@@ -1398,6 +1409,7 @@ mod tests {
             last_played_at: None,
             play_count: 0,
             artist_names: vec![],
+            year: None,
         };
 
         // Simulate playback that started 10 seconds ago — well within 300 s duration.

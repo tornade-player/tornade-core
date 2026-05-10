@@ -1442,6 +1442,33 @@ mod tests {
         assert!(result.duration.as_nanos() > 0);
     }
 
+    #[test]
+    fn test_rescan_adds_new_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_flac(tmp.path(), "track1.flac");
+        write_flac(tmp.path(), "track2.flac");
+
+        let (env, svc) = setup();
+        let source = svc.add_source("Test", tmp.path()).unwrap();
+        let first_result = svc.scan_directory(tmp.path(), source.id).unwrap();
+        assert_eq!(first_result.tracks_added, 2, "first scan: 2 tracks");
+
+        // Add a new file and rescan using the same source
+        write_flac(tmp.path(), "track3.flac");
+        let source2 = svc.add_source("Test", tmp.path()).unwrap();
+        assert_eq!(source.id, source2.id, "same source reused on rescan");
+
+        let second_result = svc.scan_directory(tmp.path(), source2.id).unwrap();
+        assert_eq!(second_result.tracks_added, 3, "rescan: all 3 files processed");
+
+        // Verify 3 distinct tracks in DB
+        let conn = env.pool.get().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 3, "DB must contain exactly 3 tracks after rescan");
+    }
+
     // ── validate_sources ─────────────────────────────────────────────────────
 
     #[test]

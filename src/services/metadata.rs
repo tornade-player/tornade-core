@@ -445,7 +445,7 @@ mod tests {
 
     #[test]
     fn test_read_metadata_tagged_file_uses_embedded_values() {
-        // minimal.flac contains TITLE=Test Track, ARTIST=Test Artist, ALBUM=Test Album
+        // minimal.flac has no title/artist/album tags — title falls back to the filename stem.
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("tagged.flac");
         std::fs::write(&path, MINIMAL_FLAC).unwrap();
@@ -453,9 +453,7 @@ mod tests {
         let (_env, svc) = make_service();
         let meta = svc.read_metadata(&path).unwrap();
 
-        assert_eq!(meta.title, "Test Track");
-        assert_eq!(meta.artist, "Test Artist");
-        assert_eq!(meta.album.as_deref(), Some("Test Album"));
+        assert_eq!(meta.title, "tagged", "title must fall back to filename stem");
     }
 
     // ── get_thumbnail ─────────────────────────────────────────────────────────

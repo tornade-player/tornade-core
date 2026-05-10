@@ -323,12 +323,9 @@ pub fn insert_track(
         ],
     )?;
 
-    let rowid = conn.last_insert_rowid();
-    if rowid != 0 {
-        return Ok(rowid);
-    }
-    // ON CONFLICT DO UPDATE hit — last_insert_rowid() may return 0.
-    // Fall back to querying the existing row by (source_id, file_path).
+    // Always query by (source_id, file_path) — avoids relying on last_insert_rowid(),
+    // which can return a stale value from an earlier INSERT (artist or album) in the
+    // same connection context when ON CONFLICT DO UPDATE fires on the tracks table.
     conn.query_row(
         "SELECT id FROM tracks WHERE source_id = ?1 AND file_path = ?2",
         params![source_id, file_path_str],
