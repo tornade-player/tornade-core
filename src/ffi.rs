@@ -1151,11 +1151,13 @@ fn add_track_to_playlist(playlist_id: i64, track_id: i64) -> String {
         Ok(pool) => {
             let playlist_service = PlaylistService::new(pool.clone());
             match playlist_service.add_tracks(playlist_id, vec![track_id]) {
-                Ok(()) => serde_json::json!({
+                Ok(result) => serde_json::json!({
                     "success": true,
                     "data": {
                         "playlist_id": playlist_id,
-                        "track_id": track_id
+                        "track_id": track_id,
+                        "added": result.added,
+                        "already_present": result.already_present
                     }
                 })
                 .to_string(),
@@ -2983,105 +2985,39 @@ fn write_track_file_tags(track_id: i64) -> String {
                 }
             };
 
-            // Fetch the track row joined with album and primary artist name.
-            // Also fetch year from tracks.year (migration 12) and genre names
-            // from track_genres/genres via GROUP_CONCAT.
-            let row = conn.query_row(
-                "SELECT t.title, t.file_path, t.track_number, t.disc_number, t.year,
-                        al.title AS album_title,
-                        ar.name  AS album_artist_name,
-                        (SELECT GROUP_CONCAT(a.name, char(31))
-                         FROM track_artists ta
-                         JOIN artists a ON a.id = ta.artist_id
-                         WHERE ta.track_id = t.id
-                         ORDER BY ta.position) AS artist_names_raw,
-                        (SELECT GROUP_CONCAT(g.name, char(31))
-                         FROM track_genres tg
-                         JOIN genres g ON g.id = tg.genre_id
-                         WHERE tg.track_id = t.id
-                         ORDER BY g.name) AS genre_names_raw
-                 FROM tracks t
-                 LEFT JOIN albums  al ON al.id = t.album_id
-                 LEFT JOIN artists ar ON ar.id = al.artist_id
-                 WHERE t.id = ?1",
-                rusqlite::params![track_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,         // title
-                        row.get::<_, String>(1)?,         // file_path
-                        row.get::<_, Option<u32>>(2)?,    // track_number
-                        row.get::<_, u32>(3)?,            // disc_number
-                        row.get::<_, Option<i64>>(4)?,    // year
-                        row.get::<_, Option<String>>(5)?, // album_title
-                        row.get::<_, Option<String>>(6)?, // album_artist_name
-                        row.get::<_, Option<String>>(7)?, // artist_names_raw
-                        row.get::<_, Option<String>>(8)?, // genre_names_raw
-                    ))
-                },
-            );
+            // Read the track's current metadata (DB→file read-back) via the
+            // shared helper so this logic can be reused outside the FFI layer.
+            let (file_path_buf, update) =
+                match crate::db::queries::build_track_tag_update_from_db(&conn, track_id) {
+                    Ok(data) => data,
+                    Err(crate::services::LibraryError::TrackNotFound(_)) => {
+                        return serde_json::json!({
+                            "success": false,
+                            "error": format!("Track {} not found", track_id),
+                            "data": { "track_id": track_id }
+                        })
+                        .to_string();
+                    }
+                    Err(crate::services::LibraryError::Database(e)) => {
+                        return serde_json::json!({
+                            "success": false,
+                            "error": format!("Failed to fetch track: {}", e),
+                            "data": { "track_id": track_id }
+                        })
+                        .to_string();
+                    }
+                    Err(e) => {
+                        return serde_json::json!({
+                            "success": false,
+                            "error": format!("Failed to fetch track: {}", e),
+                            "data": { "track_id": track_id }
+                        })
+                        .to_string();
+                    }
+                };
 
-            let (
-                title,
-                file_path_str,
-                track_number,
-                disc_number,
-                year_raw,
-                album_title,
-                album_artist_name,
-                artist_names_raw,
-                genre_names_raw,
-            ) = match row {
-                Ok(data) => data,
-                Err(rusqlite::Error::QueryReturnedNoRows) => {
-                    return serde_json::json!({
-                        "success": false,
-                        "error": format!("Track {} not found", track_id),
-                        "data": { "track_id": track_id }
-                    })
-                    .to_string();
-                }
-                Err(e) => {
-                    return serde_json::json!({
-                        "success": false,
-                        "error": format!("Failed to fetch track: {}", e),
-                        "data": { "track_id": track_id }
-                    })
-                    .to_string();
-                }
-            };
-
-            // Derive primary artist name from the GROUP_CONCAT list (first entry).
-            let artist_name = artist_names_raw
-                .as_deref()
-                .and_then(|s| s.split('\x1f').next())
-                .unwrap_or("")
-                .to_string();
-
-            let genre_names: Vec<String> = genre_names_raw
-                .map(|s| s.split('\x1f').map(str::to_string).collect())
-                .unwrap_or_default();
-
-            // disc_number == 0 is the sentinel "not set" value used in the DB schema.
-            let disc_number_opt = if disc_number == 0 {
-                None
-            } else {
-                Some(disc_number)
-            };
-
-            let year_opt: Option<u16> = year_raw.and_then(|y| u16::try_from(y).ok());
-
-            let update = crate::services::TrackTagUpdate {
-                title,
-                artist_name,
-                album_title,
-                album_artist_name,
-                year: year_opt,
-                genre_names,
-                track_number,
-                disc_number: disc_number_opt,
-            };
-
-            let file_path = std::path::Path::new(&file_path_str);
+            let file_path_str = file_path_buf.to_string_lossy().to_string();
+            let file_path = file_path_buf.as_path();
             let svc = crate::services::TagWriterService::new();
             match svc.write_track_tags(file_path, &update) {
                 Ok(()) => serde_json::json!({
@@ -3541,8 +3477,8 @@ fn scrape_album_by_query(album_title: &str, artist: &str) -> String {
     let rate_limiter = std::sync::Arc::new(Mutex::new(artwork::RateLimiter::new(1100)));
     let client = artwork::MusicBrainzClient::new(http_client, rate_limiter);
 
-    let candidates_result = TOKIO_RUNTIME
-        .block_on(async { client.search_release_metadata(album_title, artist).await });
+    let candidates_result =
+        TOKIO_RUNTIME.block_on(async { client.search_release_metadata(album_title, artist).await });
 
     match candidates_result {
         Ok(candidates) => {

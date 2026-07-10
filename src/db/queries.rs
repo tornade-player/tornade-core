@@ -1301,26 +1301,34 @@ pub fn get_playlist(conn: &Connection, id: i64) -> Result<Option<Playlist>> {
 }
 
 /// Append `track_id` to the end of `playlist_id`. Position is `MAX(position) + 1`.
-pub fn add_track_to_playlist(conn: &Connection, playlist_id: i64, track_id: i64) -> Result<()> {
-    // Get max position
-    let max_pos: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(position), -1) FROM playlist_tracks WHERE playlist_id = ?1",
-        params![playlist_id],
-        |row| row.get(0),
+///
+/// Idempotent: if `(playlist_id, track_id)` already exists, no row is inserted.
+/// Returns `true` if a new row was inserted, `false` if the track was already
+/// present in the playlist.
+pub fn add_track_to_playlist(conn: &Connection, playlist_id: i64, track_id: i64) -> Result<bool> {
+    // Insert only if this (playlist_id, track_id) pair does not already exist.
+    // Position is computed as MAX(position) + 1 for the target playlist.
+    let inserted = conn.execute(
+        "INSERT INTO playlist_tracks (playlist_id, track_id, position)
+         SELECT ?1, ?2,
+                (SELECT COALESCE(MAX(position), -1) + 1
+                 FROM playlist_tracks WHERE playlist_id = ?1)
+         WHERE NOT EXISTS (
+             SELECT 1 FROM playlist_tracks
+             WHERE playlist_id = ?1 AND track_id = ?2
+         )",
+        params![playlist_id, track_id],
     )?;
 
-    conn.execute(
-        "INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",
-        params![playlist_id, track_id, max_pos + 1],
-    )?;
+    if inserted > 0 {
+        // Update playlist timestamp only when something actually changed.
+        conn.execute(
+            "UPDATE playlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            params![playlist_id],
+        )?;
+    }
 
-    // Update playlist timestamp
-    conn.execute(
-        "UPDATE playlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
-        params![playlist_id],
-    )?;
-
-    Ok(())
+    Ok(inserted > 0)
 }
 
 // ============================================================================
@@ -1482,6 +1490,116 @@ pub fn update_track_metadata(
     Ok(())
 }
 
+/// Read a track's current metadata from the database and build a
+/// [`TrackTagUpdate`] plus the on-disk file path.
+///
+/// This is the canonical DB→file read-back used before writing tags to the
+/// audio file: it reflects exactly what is stored in SQLite (title, primary
+/// artist, album, album artist, year, genres, track/disc number) so that the
+/// file tags can be brought in sync with the database.
+///
+/// The primary artist is derived from the first entry of the ordered
+/// `track_artists` list. Genres are read from `track_genres`/`genres`. A
+/// `disc_number` of `0` is the schema sentinel for "not set" and is mapped to
+/// `None`.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::TrackNotFound`] when no track has the given id, or
+/// [`LibraryError::Database`] on any other SQL failure.
+pub fn build_track_tag_update_from_db(
+    conn: &Connection,
+    track_id: i64,
+) -> std::result::Result<(PathBuf, TrackTagUpdate), LibraryError> {
+    // Fetch the track row joined with album and primary artist name.
+    // Also fetch year from tracks.year (migration 12) and genre names
+    // from track_genres/genres via GROUP_CONCAT.
+    let row = conn.query_row(
+        "SELECT t.title, t.file_path, t.track_number, t.disc_number, t.year,
+                al.title AS album_title,
+                ar.name  AS album_artist_name,
+                (SELECT GROUP_CONCAT(a.name, char(31))
+                 FROM track_artists ta
+                 JOIN artists a ON a.id = ta.artist_id
+                 WHERE ta.track_id = t.id
+                 ORDER BY ta.position) AS artist_names_raw,
+                (SELECT GROUP_CONCAT(g.name, char(31))
+                 FROM track_genres tg
+                 JOIN genres g ON g.id = tg.genre_id
+                 WHERE tg.track_id = t.id
+                 ORDER BY g.name) AS genre_names_raw
+         FROM tracks t
+         LEFT JOIN albums  al ON al.id = t.album_id
+         LEFT JOIN artists ar ON ar.id = al.artist_id
+         WHERE t.id = ?1",
+        params![track_id],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,         // title
+                row.get::<_, String>(1)?,         // file_path
+                row.get::<_, Option<u32>>(2)?,    // track_number
+                row.get::<_, u32>(3)?,            // disc_number
+                row.get::<_, Option<i64>>(4)?,    // year
+                row.get::<_, Option<String>>(5)?, // album_title
+                row.get::<_, Option<String>>(6)?, // album_artist_name
+                row.get::<_, Option<String>>(7)?, // artist_names_raw
+                row.get::<_, Option<String>>(8)?, // genre_names_raw
+            ))
+        },
+    );
+
+    let (
+        title,
+        file_path_str,
+        track_number,
+        disc_number,
+        year_raw,
+        album_title,
+        album_artist_name,
+        artist_names_raw,
+        genre_names_raw,
+    ) = match row {
+        Ok(data) => data,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            return Err(LibraryError::TrackNotFound(track_id));
+        }
+        Err(e) => return Err(LibraryError::Database(e)),
+    };
+
+    // Derive primary artist name from the GROUP_CONCAT list (first entry).
+    let artist_name = artist_names_raw
+        .as_deref()
+        .and_then(|s| s.split('\x1f').next())
+        .unwrap_or("")
+        .to_string();
+
+    let genre_names: Vec<String> = genre_names_raw
+        .map(|s| s.split('\x1f').map(str::to_string).collect())
+        .unwrap_or_default();
+
+    // disc_number == 0 is the sentinel "not set" value used in the DB schema.
+    let disc_number_opt = if disc_number == 0 {
+        None
+    } else {
+        Some(disc_number)
+    };
+
+    let year_opt: Option<u16> = year_raw.and_then(|y| u16::try_from(y).ok());
+
+    let update = TrackTagUpdate {
+        title,
+        artist_name,
+        album_title,
+        album_artist_name,
+        year: year_opt,
+        genre_names,
+        track_number,
+        disc_number: disc_number_opt,
+    };
+
+    Ok((PathBuf::from(file_path_str), update))
+}
+
 /// Batch of album-level metadata changes submitted from the tag-editor modal.
 ///
 /// Applying this update touches the `albums` row, the `artists` table (upsert),
@@ -1615,8 +1733,9 @@ pub fn get_track_tag_update(
     conn: &Connection,
     track_id: i64,
 ) -> std::result::Result<crate::services::TrackTagUpdate, LibraryError> {
-    let row = conn.query_row(
-        "SELECT t.title, t.track_number, t.disc_number, t.year,
+    let row = conn
+        .query_row(
+            "SELECT t.title, t.track_number, t.disc_number, t.year,
                 al.title AS album_title,
                 ar_album.name AS album_artist_name,
                 (SELECT a.name
@@ -1634,21 +1753,21 @@ pub fn get_track_tag_update(
          LEFT JOIN albums  al      ON al.id = t.album_id
          LEFT JOIN artists ar_album ON ar_album.id = al.artist_id
          WHERE t.id = ?1",
-        params![track_id],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,          // title
-                row.get::<_, Option<u32>>(1)?,     // track_number
-                row.get::<_, u32>(2)?,             // disc_number
-                row.get::<_, Option<i64>>(3)?,     // year
-                row.get::<_, Option<String>>(4)?,  // album_title
-                row.get::<_, Option<String>>(5)?,  // album_artist_name
-                row.get::<_, Option<String>>(6)?,  // primary_artist_name
-                row.get::<_, Option<String>>(7)?,  // genre_names_raw
-            ))
-        },
-    )
-    .map_err(LibraryError::Database)?;
+            params![track_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,         // title
+                    row.get::<_, Option<u32>>(1)?,    // track_number
+                    row.get::<_, u32>(2)?,            // disc_number
+                    row.get::<_, Option<i64>>(3)?,    // year
+                    row.get::<_, Option<String>>(4)?, // album_title
+                    row.get::<_, Option<String>>(5)?, // album_artist_name
+                    row.get::<_, Option<String>>(6)?, // primary_artist_name
+                    row.get::<_, Option<String>>(7)?, // genre_names_raw
+                ))
+            },
+        )
+        .map_err(LibraryError::Database)?;
 
     let (
         title,
@@ -1665,7 +1784,11 @@ pub fn get_track_tag_update(
     let genre_names: Vec<String> = genre_names_raw
         .map(|s| s.split('\x1f').map(str::to_string).collect())
         .unwrap_or_default();
-    let disc_number_opt = if disc_number == 0 { None } else { Some(disc_number) };
+    let disc_number_opt = if disc_number == 0 {
+        None
+    } else {
+        Some(disc_number)
+    };
     let year: Option<u16> = year_raw.and_then(|y| u16::try_from(y).ok());
 
     Ok(crate::services::TrackTagUpdate {

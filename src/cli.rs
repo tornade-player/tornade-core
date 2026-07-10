@@ -1199,7 +1199,10 @@ impl TornadeCli {
         }
 
         match self.playlist.add_tracks(playlist_id, track_ids.clone()) {
-            Ok(()) => println!("✅ Added {} track(s) to playlist", track_ids.len()),
+            Ok(result) => println!(
+                "✅ Added {} track(s) to playlist ({} already present)",
+                result.added, result.already_present
+            ),
             Err(e) => println!("❌ Failed to add tracks: {e}"),
         }
 
@@ -1526,7 +1529,10 @@ impl TornadeCli {
         let artwork_service = self.artwork.clone();
 
         runtime.block_on(async move {
-            match artwork_service.fetch_all_artwork(fetch_artists, false).await {
+            match artwork_service
+                .fetch_all_artwork(fetch_artists, false)
+                .await
+            {
                 Ok(()) => {
                     // Poll for progress until complete
                     while let Some(progress) = artwork_service.get_progress() {
