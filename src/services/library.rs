@@ -642,6 +642,17 @@ impl LibraryService {
         queries::get_source(&conn, source_id)?.ok_or(LibraryError::SourceNotFound(source_id))
     }
 
+    /// Remove a library source and all of its tracks (`tracks.source_id` has
+    /// `ON DELETE CASCADE`). Returns the number of source rows removed.
+    pub fn remove_source(&self, source_id: i64) -> Result<usize> {
+        let conn = self.pool.get()?;
+        let n = conn.execute(
+            "DELETE FROM sources WHERE id = ?1",
+            rusqlite::params![source_id],
+        )?;
+        Ok(n)
+    }
+
     /// Find a source by its path (to avoid duplicate sources)
     pub fn find_source_by_path(&self, path: &Path) -> Result<Option<Source>> {
         let sources = self.list_sources()?;
