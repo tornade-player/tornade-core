@@ -1470,7 +1470,10 @@ mod tests {
         assert_eq!(source.id, source2.id, "same source reused on rescan");
 
         let second_result = svc.scan_directory(tmp.path(), source2.id).unwrap();
-        assert_eq!(second_result.tracks_added, 3, "rescan: all 3 files processed");
+        assert_eq!(
+            second_result.tracks_added, 3,
+            "rescan: all 3 files processed"
+        );
 
         // Verify 3 distinct tracks in DB
         let conn = env.pool.get().unwrap();

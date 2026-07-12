@@ -602,14 +602,11 @@ impl MusicBrainzClient {
                     .map(|ac| ac.artist.name.clone());
 
                 // Year: scan all releases for any date — first release may lack one.
-                let year = recording
-                    .releases
-                    .as_ref()
-                    .and_then(|releases| {
-                        releases
-                            .iter()
-                            .find_map(|r| r.date.as_deref().and_then(year_from_mb_date))
-                    });
+                let year = recording.releases.as_ref().and_then(|releases| {
+                    releases
+                        .iter()
+                        .find_map(|r| r.date.as_deref().and_then(year_from_mb_date))
+                });
 
                 // Genre priority: recording → any release → release-group.
                 let genres: Vec<String> = recording

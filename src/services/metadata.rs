@@ -453,7 +453,10 @@ mod tests {
         let (_env, svc) = make_service();
         let meta = svc.read_metadata(&path).unwrap();
 
-        assert_eq!(meta.title, "tagged", "title must fall back to filename stem");
+        assert_eq!(
+            meta.title, "tagged",
+            "title must fall back to filename stem"
+        );
     }
 
     // ── get_thumbnail ─────────────────────────────────────────────────────────
