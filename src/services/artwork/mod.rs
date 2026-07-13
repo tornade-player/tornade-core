@@ -791,7 +791,7 @@ mod tests {
     fn test_get_albums_without_artwork() {
         let (env, _artist_id, _album_id) = setup_artwork_env();
         let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
-        let albums = service.get_albums_without_artwork().unwrap();
+        let albums = service.get_albums_for_scrape(false).unwrap();
         assert_eq!(albums.len(), 1);
         assert_eq!(albums[0].title, "The Wall");
     }
@@ -806,7 +806,7 @@ mod tests {
             .update_album_artwork(album_id, "/path/to/art.jpg".to_string())
             .unwrap();
 
-        let albums = service.get_albums_without_artwork().unwrap();
+        let albums = service.get_albums_for_scrape(false).unwrap();
         assert_eq!(albums.len(), 0);
     }
 
@@ -859,7 +859,7 @@ mod tests {
     fn test_get_artists_without_photos() {
         let (env, _artist_id, _album_id) = setup_artwork_env();
         let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
-        let artists = service.get_artists_without_photos().unwrap();
+        let artists = service.get_artists_for_scrape(false).unwrap();
         assert_eq!(artists.len(), 1);
         assert_eq!(artists[0].name, "Pink Floyd");
     }
@@ -950,7 +950,7 @@ mod tests {
         drop(conn);
 
         let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
-        let albums = service.get_albums_without_artwork().unwrap();
+        let albums = service.get_albums_for_scrape(false).unwrap();
         assert_eq!(albums.len(), 2);
         // Ordered by artist name: ABBA before Zappa
         assert_eq!(albums[0].artist_name, "ABBA");
@@ -961,7 +961,7 @@ mod tests {
     fn test_get_albums_without_artwork_empty_library() {
         let env = TestEnv::new();
         let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
-        let albums = service.get_albums_without_artwork().unwrap();
+        let albums = service.get_albums_for_scrape(false).unwrap();
         assert!(albums.is_empty());
     }
 
@@ -977,7 +977,7 @@ mod tests {
         drop(conn);
 
         let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
-        let artists = service.get_artists_without_photos().unwrap();
+        let artists = service.get_artists_for_scrape(false).unwrap();
         assert_eq!(artists.len(), 3);
         assert_eq!(artists[0].name, "Alice Coltrane");
         assert_eq!(artists[1].name, "John Coltrane");
@@ -997,7 +997,7 @@ mod tests {
             .update_artist_photo(with_photo, "/photo.jpg")
             .unwrap();
 
-        let artists = service.get_artists_without_photos().unwrap();
+        let artists = service.get_artists_for_scrape(false).unwrap();
         assert_eq!(artists.len(), 1);
         assert_eq!(artists[0].name, "Unknown Artist");
     }
@@ -1070,13 +1070,13 @@ mod tests {
         let service = ArtworkService::new(env.pool.clone(), env.app_paths.clone());
 
         // Before: artist should appear in "without photos" list
-        assert_eq!(service.get_artists_without_photos().unwrap().len(), 1);
+        assert_eq!(service.get_artists_for_scrape(false).unwrap().len(), 1);
 
         // Mark as attempted (not found in TADB, no photo saved)
         service.mark_artist_fetch_attempted(artist_id).unwrap();
 
         // After: artist should no longer appear (photo_fetched_at is set)
-        assert_eq!(service.get_artists_without_photos().unwrap().len(), 0);
+        assert_eq!(service.get_artists_for_scrape(false).unwrap().len(), 0);
         // But photo_path should still be NULL
         let conn = env.pool.get().unwrap();
         let photo_path: Option<String> = conn

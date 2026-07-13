@@ -4,9 +4,23 @@ use crate::db::{DbPool, queries};
 use crate::models::Playlist;
 use crate::services::error::PlaylistError;
 use log::info;
+use serde::Serialize;
 use std::path::Path;
 
 type Result<T> = std::result::Result<T, PlaylistError>;
+
+/// Outcome of a bulk [`PlaylistService::add_tracks`] operation.
+///
+/// Adding tracks to a playlist is duplicate-safe: a track already present in the
+/// playlist is not inserted again. This struct reports how many tracks were
+/// actually added versus how many were skipped because they were already present.
+#[derive(Debug, Clone, Serialize)]
+pub struct PlaylistAddResult {
+    /// Number of tracks newly inserted into the playlist.
+    pub added: usize,
+    /// Number of tracks skipped because they were already in the playlist.
+    pub already_present: usize,
+}
 
 /// Manages user-created playlists: creation, renaming, deletion, and track ordering.
 ///
@@ -109,16 +123,84 @@ impl PlaylistService {
         Ok(())
     }
 
-    /// Add tracks to playlist
-    pub fn add_tracks(&self, playlist_id: i64, track_ids: Vec<i64>) -> Result<()> {
+    /// Add tracks to a playlist, skipping any that are already present.
+    ///
+    /// This is duplicate-safe: a track already in the playlist is not inserted
+    /// again. Returns a [`PlaylistAddResult`] reporting how many tracks were
+    /// newly added versus already present.
+    pub fn add_tracks(&self, playlist_id: i64, track_ids: Vec<i64>) -> Result<PlaylistAddResult> {
         let conn = self.pool.get()?;
 
+        let mut added = 0;
+        let mut already_present = 0;
         for track_id in track_ids {
-            queries::add_track_to_playlist(&conn, playlist_id, track_id)?;
+            if queries::add_track_to_playlist(&conn, playlist_id, track_id)? {
+                added += 1;
+            } else {
+                already_present += 1;
+            }
         }
 
-        info!("Added tracks to playlist {playlist_id}");
-        Ok(())
+        info!(
+            "Added {added} track(s) to playlist {playlist_id} ({already_present} already present)"
+        );
+        Ok(PlaylistAddResult {
+            added,
+            already_present,
+        })
+    }
+
+    /// Remove the given tracks from a playlist in a single transaction, then
+    /// re-normalize the remaining tracks' positions to a contiguous `0..n` range.
+    ///
+    /// Tracks not present in the playlist are ignored. Returns the number of
+    /// rows actually removed. The tracks themselves remain in the library.
+    pub fn remove_tracks(&self, playlist_id: i64, track_ids: &[i64]) -> Result<usize> {
+        if track_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let mut conn = self.pool.get()?;
+        let tx = conn.transaction()?;
+
+        let mut removed = 0;
+        for &track_id in track_ids {
+            removed += tx.execute(
+                "DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2",
+                rusqlite::params![playlist_id, track_id],
+            )?;
+        }
+
+        if removed > 0 {
+            // Re-normalize positions to a contiguous 0..n range, preserving order.
+            let remaining: Vec<i64> = {
+                let mut stmt = tx.prepare(
+                    "SELECT track_id FROM playlist_tracks WHERE playlist_id = ?1 ORDER BY position",
+                )?;
+                let ids: rusqlite::Result<Vec<i64>> = stmt
+                    .query_map(rusqlite::params![playlist_id], |row| row.get(0))?
+                    .collect();
+                ids?
+            };
+
+            for (pos, track_id) in remaining.iter().enumerate() {
+                tx.execute(
+                    "UPDATE playlist_tracks SET position = ?1
+                     WHERE playlist_id = ?2 AND track_id = ?3",
+                    rusqlite::params![pos as i64, playlist_id, track_id],
+                )?;
+            }
+
+            tx.execute(
+                "UPDATE playlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+                rusqlite::params![playlist_id],
+            )?;
+        }
+
+        tx.commit()?;
+
+        info!("Removed {removed} track(s) from playlist {playlist_id}");
+        Ok(removed)
     }
 
     /// Remove track from playlist at position
@@ -316,6 +398,93 @@ mod tests {
         service.remove_track(pl.id, 0).unwrap();
         let updated = service.get_playlist(pl.id).unwrap().unwrap();
         assert_eq!(updated.tracks.len(), 1);
+    }
+
+    // ── T027: duplicate-safe add_tracks ──────────────────────────────────────
+
+    #[test]
+    fn test_add_tracks_is_duplicate_safe() {
+        let (env, service) = setup();
+        let (_, _, _, _, t1, _t2) = env.seed_basic_library();
+        let pl = service.create_playlist("Dedup", None).unwrap();
+
+        // First add reports the track as newly added.
+        let first = service.add_tracks(pl.id, vec![t1]).unwrap();
+        assert_eq!(first.added, 1);
+        assert_eq!(first.already_present, 0);
+
+        // Second add of the SAME track inserts no new row and reports it present.
+        let second = service.add_tracks(pl.id, vec![t1]).unwrap();
+        assert_eq!(second.added, 0);
+        assert_eq!(second.already_present, 1);
+
+        // Only ONE playlist_tracks row exists for that track.
+        let updated = service.get_playlist(pl.id).unwrap().unwrap();
+        let count = updated.tracks.iter().filter(|pt| pt.track_id == t1).count();
+        assert_eq!(count, 1, "duplicate add must not create a second row");
+        assert_eq!(updated.tracks.len(), 1);
+    }
+
+    #[test]
+    fn test_add_tracks_mixed_new_and_existing() {
+        let (env, service) = setup();
+        let (_, _, _, _, t1, t2) = env.seed_basic_library();
+        let pl = service.create_playlist("Mixed", None).unwrap();
+        service.add_tracks(pl.id, vec![t1]).unwrap();
+
+        // t1 already present, t2 is new.
+        let result = service.add_tracks(pl.id, vec![t1, t2]).unwrap();
+        assert_eq!(result.added, 1);
+        assert_eq!(result.already_present, 1);
+
+        let updated = service.get_playlist(pl.id).unwrap().unwrap();
+        assert_eq!(updated.tracks.len(), 2);
+    }
+
+    // ── T028: remove_tracks deletes matching rows + re-normalizes positions ──
+
+    #[test]
+    fn test_remove_tracks_deletes_only_matching_and_renormalizes() {
+        let (env, service) = setup();
+        let (_, _, _, _, t1, t2) = env.seed_basic_library();
+        let pl = service.create_playlist("Bulk", None).unwrap();
+        service.add_tracks(pl.id, vec![t1, t2]).unwrap();
+
+        // Remove only t1; t2 must remain.
+        let removed = service.remove_tracks(pl.id, &[t1]).unwrap();
+        assert_eq!(removed, 1);
+
+        let updated = service.get_playlist(pl.id).unwrap().unwrap();
+        let ids: Vec<i64> = updated.tracks.iter().map(|pt| pt.track_id).collect();
+        assert_eq!(ids, vec![t2]);
+
+        // Positions must be re-normalized to a contiguous 0..n range.
+        let conn = env.pool.get().unwrap();
+        let positions: Vec<i64> = conn
+            .prepare(
+                "SELECT position FROM playlist_tracks WHERE playlist_id = ?1 ORDER BY position",
+            )
+            .unwrap()
+            .query_map(rusqlite::params![pl.id], |row| row.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(positions, vec![0], "positions must be contiguous from 0");
+    }
+
+    #[test]
+    fn test_remove_tracks_ignores_non_present_ids() {
+        let (env, service) = setup();
+        let (_, _, _, _, t1, t2) = env.seed_basic_library();
+        let pl = service.create_playlist("Partial", None).unwrap();
+        service.add_tracks(pl.id, vec![t1]).unwrap();
+
+        // t2 is not in the playlist; only t1 is removed.
+        let removed = service.remove_tracks(pl.id, &[t1, t2]).unwrap();
+        assert_eq!(removed, 1);
+
+        let updated = service.get_playlist(pl.id).unwrap().unwrap();
+        assert!(updated.tracks.is_empty());
     }
 
     #[test]

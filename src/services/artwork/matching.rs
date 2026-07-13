@@ -99,7 +99,7 @@ mod tests {
     #[test]
     fn test_score_between_0_and_1_for_partial_overlap() {
         let score = fuzzy_match("Dark Side", "Abbey Road");
-        assert!(score >= 0.0 && score <= 1.0, "score must be in [0, 1]");
+        assert!((0.0..=1.0).contains(&score), "score must be in [0, 1]");
     }
 
     #[test]
@@ -116,8 +116,8 @@ mod tests {
         let s1 = fuzzy_match("xyz", "abc");
         let s2 = fuzzy_match("abc", "xyz");
         // The char-level path isn't guaranteed to be symmetric, but both should be in [0,1]
-        assert!(s1 >= 0.0 && s1 <= 1.0);
-        assert!(s2 >= 0.0 && s2 <= 1.0);
+        assert!((0.0..=1.0).contains(&s1));
+        assert!((0.0..=1.0).contains(&s2));
     }
 
     #[test]

@@ -642,6 +642,17 @@ impl LibraryService {
         queries::get_source(&conn, source_id)?.ok_or(LibraryError::SourceNotFound(source_id))
     }
 
+    /// Remove a library source and all of its tracks (`tracks.source_id` has
+    /// `ON DELETE CASCADE`). Returns the number of source rows removed.
+    pub fn remove_source(&self, source_id: i64) -> Result<usize> {
+        let conn = self.pool.get()?;
+        let n = conn.execute(
+            "DELETE FROM sources WHERE id = ?1",
+            rusqlite::params![source_id],
+        )?;
+        Ok(n)
+    }
+
     /// Find a source by its path (to avoid duplicate sources)
     pub fn find_source_by_path(&self, path: &Path) -> Result<Option<Source>> {
         let sources = self.list_sources()?;
@@ -1100,7 +1111,7 @@ mod tests {
         let path = write_flac(tmp.path(), "track.flac");
 
         let (_env, svc) = setup();
-        let first = svc.import_paths(&[path.clone()]).unwrap();
+        let first = svc.import_paths(std::slice::from_ref(&path)).unwrap();
         let second = svc.import_paths(&[path]).unwrap();
 
         assert_eq!(first.len(), 1);
@@ -1459,7 +1470,10 @@ mod tests {
         assert_eq!(source.id, source2.id, "same source reused on rescan");
 
         let second_result = svc.scan_directory(tmp.path(), source2.id).unwrap();
-        assert_eq!(second_result.tracks_added, 3, "rescan: all 3 files processed");
+        assert_eq!(
+            second_result.tracks_added, 3,
+            "rescan: all 3 files processed"
+        );
 
         // Verify 3 distinct tracks in DB
         let conn = env.pool.get().unwrap();

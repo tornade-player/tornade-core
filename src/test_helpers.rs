@@ -15,6 +15,12 @@ pub struct TestEnv {
     pub app_paths: AppPaths,
 }
 
+impl Default for TestEnv {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TestEnv {
     /// Create a new test environment with initialized database
     pub fn new() -> Self {
