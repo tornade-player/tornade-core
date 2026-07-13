@@ -4392,7 +4392,7 @@ mod tests {
         let flac = tmp.path().join("song.flac");
         std::fs::write(&flac, MINIMAL_FLAC).unwrap();
 
-        let (count1, p1) = import_with_env(&env, &[flac.clone()]);
+        let (count1, p1) = import_with_env(&env, std::slice::from_ref(&flac));
         assert_eq!(count1, 1, "first import: 1 track");
         let (pid1, _) = p1.expect("first import: playlist created");
 

@@ -98,7 +98,7 @@ mod tests {
         writeln!(temp_file, "#EXTM3U").unwrap();
         writeln!(temp_file, "# This is a comment").unwrap();
         writeln!(temp_file, "/path/to/song1.flac").unwrap();
-        writeln!(temp_file, "").unwrap(); // Empty line
+        writeln!(temp_file).unwrap(); // Empty line
         writeln!(temp_file, "/path/to/song2.flac").unwrap();
         temp_file.flush().unwrap();
 

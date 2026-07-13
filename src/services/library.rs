@@ -1111,7 +1111,7 @@ mod tests {
         let path = write_flac(tmp.path(), "track.flac");
 
         let (_env, svc) = setup();
-        let first = svc.import_paths(&[path.clone()]).unwrap();
+        let first = svc.import_paths(std::slice::from_ref(&path)).unwrap();
         let second = svc.import_paths(&[path]).unwrap();
 
         assert_eq!(first.len(), 1);

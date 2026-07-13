@@ -966,7 +966,7 @@ mod tests {
             &conn,
             title, // use title as unique source name to avoid conflicts
             SourceType::Disk,
-            Some(&file_path.parent().unwrap().to_path_buf()),
+            Some(file_path.parent().unwrap()),
         )
         .unwrap();
         queries::insert_track(
@@ -975,7 +975,7 @@ mod tests {
             None,
             artist_id,
             source_id,
-            &file_path.to_path_buf(),
+            file_path,
             500,
             None,
             Some(44100),
