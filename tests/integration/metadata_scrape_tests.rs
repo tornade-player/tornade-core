@@ -41,7 +41,8 @@ const MB_RELEASE_JSON: &str = r#"{
     "score": 95,
     "artist-credit": [{"artist": {"name": "Daft Punk"}}],
     "genres": [{"name": "Electronic", "count": 8}],
-    "release-group": {"primary-type": "Album"}
+    "release-group": {"primary-type": "Album"},
+    "cover-art-archive": {"front": true}
   }]
 }"#;
 
@@ -85,7 +86,10 @@ async fn test_search_recording_metadata_success() {
     assert_eq!(candidates.len(), 1, "expected exactly one candidate");
 
     let c = &candidates[0];
-    assert_eq!(c.musicbrainz_id, "abc-123");
+    // musicbrainz_id is the release id when a release is present (used to fetch
+    // cover art via Cover Art Archive), falling back to the recording id
+    // otherwise — see `search_recording_metadata`.
+    assert_eq!(c.musicbrainz_id, "r1");
     assert_eq!(c.title, "One More Time");
     assert_eq!(c.artist, "Daft Punk");
     assert_eq!(c.album.as_deref(), Some("Discovery"));
@@ -183,7 +187,7 @@ async fn test_search_release_metadata_success() {
     assert_eq!(c.genres, vec!["Electronic"]);
     assert!(
         c.has_artwork,
-        "release-group present should imply has_artwork"
+        "release's cover-art-archive.front should imply has_artwork"
     );
     assert_eq!(c.score, 95);
     // Release search sets album to None (the release IS the album)
