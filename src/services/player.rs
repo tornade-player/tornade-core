@@ -830,6 +830,15 @@ impl PlayerService {
         Ok(())
     }
 
+    /// Visualizer tap: up to `n` of the most recent interleaved output samples
+    /// (post-volume, newest last) plus the stream channel count. Returns an
+    /// empty buffer when the audio engine is not initialized; zeros while
+    /// paused or stopped. Intended for meters/spectra in front-ends.
+    pub fn visualizer_samples(&self, n: usize) -> (Vec<f32>, u16) {
+        self.with_controls(|c| (c.visualizer_samples(n), c.device_config().0))
+            .unwrap_or((Vec::new(), 2))
+    }
+
     pub fn get_volume(&self) -> f32 {
         self.state.lock().unwrap().volume
     }
