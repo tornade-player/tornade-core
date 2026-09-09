@@ -32,6 +32,11 @@ struct PlayerState {
     playback_start_time: Option<Instant>,
     paused_at: Option<Duration>,
     skipped_track_ids: HashSet<i64>,
+    /// Set when a track was restored from a previous session but never
+    /// actually loaded into the audio engine. `resume()` checks this to do a
+    /// full load-and-seek instead of a plain unpause (which would no-op on an
+    /// empty engine).
+    pending_resume_seek: Option<Duration>,
 }
 
 impl PlayerService {
@@ -59,12 +64,15 @@ impl PlayerService {
         let mut current_track = None;
         let mut playback_state = PlaybackState::Stopped;
         let mut paused_at = None;
+        let mut pending_resume_seek = None;
         if let Some(track_id) = persisted.current_track_id
             && let Ok(conn) = pool.get()
             && let Ok(Some(track)) = crate::db::queries::get_track(&conn, track_id)
             && track.file_path.exists()
         {
-            paused_at = Some(Duration::from_secs_f64(persisted.playback_position));
+            let position = Duration::from_secs_f64(persisted.playback_position);
+            paused_at = Some(position);
+            pending_resume_seek = Some(position);
             current_track = Some(track);
             playback_state = PlaybackState::Paused;
         }
@@ -79,6 +87,7 @@ impl PlayerService {
                 playback_start_time: None,
                 paused_at,
                 skipped_track_ids: HashSet::new(),
+                pending_resume_seek,
             })),
             engine: Arc::new(Mutex::new(None)),
             loading: Arc::new(AtomicBool::new(false)),
@@ -158,6 +167,7 @@ impl PlayerService {
             // Will be set accurately when audio actually starts
             state.playback_start_time = Some(Instant::now());
             state.paused_at = None;
+            state.pending_resume_seek = None;
 
             state.skipped_track_ids.remove(&track_id);
 
@@ -240,6 +250,14 @@ impl PlayerService {
 
     /// Resume playback
     pub fn resume(&self) -> Result<()> {
+        // A track restored from a previous session was never actually decoded
+        // into the audio engine — a plain unpause would silently no-op. Do a
+        // full load-and-seek instead, exactly like `seek()` does while playing.
+        let pending = self.state.lock().unwrap().pending_resume_seek;
+        if let Some(position) = pending {
+            return self.load_and_seek(position);
+        }
+
         self.with_controls(|c| c.set_paused(false))?;
 
         let mut state = self.state.lock().unwrap();
@@ -250,6 +268,94 @@ impl PlayerService {
         state.playback_state = PlaybackState::Playing;
 
         info!("Playback resumed");
+        Ok(())
+    }
+
+    /// Load the current track from disk and start playing from `position`.
+    /// Used to resume a track restored from a previous session, whose source
+    /// was never sent to the audio engine.
+    fn load_and_seek(&self, position: Duration) -> Result<()> {
+        self.ensure_engine()?;
+
+        let (track, volume) = {
+            let state = self.state.lock().unwrap();
+            let track = state
+                .current_track
+                .as_ref()
+                .ok_or(PlayerError::EmptyQueue)?
+                .clone(); // clone: must escape MutexGuard scope
+            (track, state.volume)
+        };
+
+        if !track.file_path.exists() {
+            return Err(PlayerError::FileNotFound(
+                track.file_path.to_string_lossy().into_owned(),
+            ));
+        }
+
+        let clamped_position = if position > track.duration {
+            track.duration
+        } else {
+            position
+        };
+
+        let (dev_ch, dev_sr) = self.with_controls(|c| c.device_config())?;
+        let bg_handle = self.with_controls(|c| c.bg_handle())?;
+        let bg_state = Arc::clone(&self.state);
+        let bg_loading = Arc::clone(&self.loading);
+        let file_path = track.file_path.clone();
+
+        self.loading.store(true, Relaxed);
+
+        {
+            let mut state = self.state.lock().unwrap();
+            state.playback_start_time = Some(Instant::now() - clamped_position);
+            state.paused_at = None;
+            state.pending_resume_seek = None;
+            state.playback_state = PlaybackState::Playing;
+        }
+
+        std::thread::spawn(move || {
+            let file_data = match std::fs::read(&file_path) {
+                Ok(data) => data,
+                Err(e) => {
+                    warn!("Resume background read failed: {e}");
+                    bg_loading.store(false, Relaxed);
+                    let mut state = bg_state.lock().unwrap();
+                    state.playback_state = PlaybackState::Stopped;
+                    state.current_track = None;
+                    return;
+                }
+            };
+            let decoder = match Decoder::new(std::io::Cursor::new(file_data)) {
+                Ok(d) => d,
+                Err(e) => {
+                    warn!("Resume background decode failed: {e}");
+                    bg_loading.store(false, Relaxed);
+                    let mut state = bg_state.lock().unwrap();
+                    state.playback_state = PlaybackState::Stopped;
+                    state.current_track = None;
+                    return;
+                }
+            };
+
+            let source: Box<dyn Iterator<Item = f32> + Send> =
+                Box::new(UniformSourceIterator::<_, f32>::new(
+                    decoder
+                        .skip_duration(clamped_position)
+                        .convert_samples::<f32>(),
+                    dev_ch,
+                    dev_sr,
+                ));
+
+            bg_handle.set_volume(volume);
+            bg_handle.play_source(source);
+            bg_loading.store(false, Relaxed);
+
+            bg_state.lock().unwrap().playback_start_time = Some(Instant::now() - clamped_position);
+        });
+
+        info!("Resumed restored track at {clamped_position:?}");
         Ok(())
     }
 
@@ -265,6 +371,7 @@ impl PlayerService {
             state.playback_state = PlaybackState::Stopped;
             state.playback_start_time = None;
             state.paused_at = None;
+            state.pending_resume_seek = None;
         }
 
         info!("Playback stopped");
@@ -303,6 +410,9 @@ impl PlayerService {
         if !was_playing {
             let mut state = self.state.lock().unwrap();
             state.paused_at = Some(clamped_position);
+            if state.pending_resume_seek.is_some() {
+                state.pending_resume_seek = Some(clamped_position);
+            }
             info!("Seeked to {clamped_position:?} while paused");
             return Ok(());
         }
@@ -2027,6 +2137,34 @@ mod tests {
             (player.get_position() - 0.25).abs() < 0.001,
             "expected restored position ~0.25, got {}",
             player.get_position()
+        );
+    }
+
+    #[test]
+    fn test_resume_after_restore_actually_starts_playback() {
+        // Regression: resuming a restored track must load and decode the
+        // file, not just flip a pause flag on an empty audio engine.
+        let (dir, pool) = create_test_pool();
+        let wav = dir.path().join("test.wav");
+        create_test_wav(&wav); // 0.5 s
+        let track_id = insert_test_track(&pool, &wav, "Test Track");
+
+        let persisted = PersistedState {
+            current_track_id: Some(track_id),
+            playback_position: 0.1,
+            ..Default::default()
+        };
+        app_state::save_state(&pool, &persisted).unwrap();
+
+        let player = make_player(pool);
+        assert_eq!(player.get_state(), PlaybackState::Paused);
+
+        player.resume().unwrap();
+        assert_eq!(player.get_state(), PlaybackState::Playing);
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(
+            player.is_track_finished(),
+            "resumed restored track should actually play and finish"
         );
     }
 
