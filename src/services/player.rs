@@ -53,15 +53,31 @@ impl PlayerService {
             queue.current_index
         );
 
+        // Restore the current track paused at its last position, if the
+        // track still exists in the database and its file is still reachable.
+        // Any failure here is silent: the player just starts empty, as before.
+        let mut current_track = None;
+        let mut playback_state = PlaybackState::Stopped;
+        let mut paused_at = None;
+        if let Some(track_id) = persisted.current_track_id
+            && let Ok(conn) = pool.get()
+            && let Ok(Some(track)) = crate::db::queries::get_track(&conn, track_id)
+            && track.file_path.exists()
+        {
+            paused_at = Some(Duration::from_secs_f64(persisted.playback_position));
+            current_track = Some(track);
+            playback_state = PlaybackState::Paused;
+        }
+
         Ok(PlayerService {
             pool,
             state: Arc::new(Mutex::new(PlayerState {
-                current_track: None,
+                current_track,
                 queue,
-                playback_state: PlaybackState::Stopped,
+                playback_state,
                 volume: persisted.volume,
                 playback_start_time: None,
-                paused_at: None,
+                paused_at,
                 skipped_track_ids: HashSet::new(),
             })),
             engine: Arc::new(Mutex::new(None)),
@@ -531,11 +547,12 @@ impl PlayerService {
 
     /// Persist current queue state to the database (best-effort, logs on failure)
     fn save_queue_state(&self) {
+        let position = self.get_position();
         let persisted = {
             let state = self.state.lock().unwrap();
             PersistedState {
                 current_track_id: state.current_track.as_ref().map(|t| t.id),
-                playback_position: 0.0,
+                playback_position: position,
                 queue: state.queue.tracks.clone(), // clone: PersistedState needs owned Vec
                 queue_index: state.queue.current_index,
                 shuffle_order: state.queue.shuffle_order.clone(), // clone: PersistedState needs owned Vec
@@ -547,6 +564,12 @@ impl PlayerService {
         if let Err(e) = app_state::save_state(&self.pool, &persisted) {
             warn!("Failed to persist queue state: {e}");
         }
+    }
+
+    /// Persist the current playback state (queue, current track, position) so
+    /// it can be restored on the next launch. Call this before the app exits.
+    pub fn save_state(&self) {
+        self.save_queue_state();
     }
 
     /// Set the playback queue
@@ -1957,5 +1980,87 @@ mod tests {
             "disabling shuffle must restore current_index to the original track position"
         );
         assert!(!player.is_shuffle_enabled());
+    }
+
+    // =========================================================================
+    // Resume position across sessions
+    // =========================================================================
+
+    #[test]
+    fn test_save_queue_state_persists_nonzero_position() {
+        let (dir, pool) = create_test_pool();
+        let wav = dir.path().join("test.wav");
+        create_test_wav(&wav);
+        let track_id = insert_test_track(&pool, &wav, "Test Track");
+        let player = make_player(pool.clone());
+        player.play(track_id).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        player.save_state();
+
+        let persisted = app_state::load_state(&pool).unwrap();
+        assert_eq!(persisted.current_track_id, Some(track_id));
+        assert!(
+            persisted.playback_position > 0.0,
+            "expected a non-zero persisted position, got {}",
+            persisted.playback_position
+        );
+    }
+
+    #[test]
+    fn test_new_restores_current_track_paused_at_position() {
+        let (dir, pool) = create_test_pool();
+        let wav = dir.path().join("test.wav");
+        create_test_wav(&wav);
+        let track_id = insert_test_track(&pool, &wav, "Test Track");
+
+        let persisted = PersistedState {
+            current_track_id: Some(track_id),
+            playback_position: 0.25,
+            ..Default::default()
+        };
+        app_state::save_state(&pool, &persisted).unwrap();
+
+        let player = make_player(pool);
+        assert_eq!(player.get_state(), PlaybackState::Paused);
+        assert_eq!(player.get_current_track().unwrap().id, track_id);
+        assert!(
+            (player.get_position() - 0.25).abs() < 0.001,
+            "expected restored position ~0.25, got {}",
+            player.get_position()
+        );
+    }
+
+    #[test]
+    fn test_new_ignores_deleted_track_silently() {
+        let (_dir, pool) = create_test_pool();
+
+        let persisted = PersistedState {
+            current_track_id: Some(99999), // never inserted
+            playback_position: 42.0,
+            ..Default::default()
+        };
+        app_state::save_state(&pool, &persisted).unwrap();
+
+        let player = make_player(pool);
+        assert_eq!(player.get_state(), PlaybackState::Stopped);
+        assert!(player.get_current_track().is_none());
+    }
+
+    #[test]
+    fn test_new_ignores_missing_file_silently() {
+        let (dir, pool) = create_test_pool();
+        let missing = dir.path().join("does_not_exist.wav");
+        let track_id = insert_test_track(&pool, &missing, "Missing Track");
+
+        let persisted = PersistedState {
+            current_track_id: Some(track_id),
+            playback_position: 12.0,
+            ..Default::default()
+        };
+        app_state::save_state(&pool, &persisted).unwrap();
+
+        let player = make_player(pool);
+        assert_eq!(player.get_state(), PlaybackState::Stopped);
+        assert!(player.get_current_track().is_none());
     }
 }
