@@ -16,7 +16,9 @@ use cpal::{BufferSize, SampleRate, StreamConfig, SupportedBufferSize};
 #[cfg(target_os = "macos")]
 use log::info;
 use log::warn;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed, Ordering::Release};
+use std::sync::atomic::{
+    AtomicBool, AtomicU32, AtomicUsize, Ordering::Acquire, Ordering::Relaxed, Ordering::Release,
+};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
@@ -160,12 +162,23 @@ mod hal {
 // Shared state (atomics only — safe for real-time audio thread)
 // ---------------------------------------------------------------------------
 
+/// Capacity of the visualizer sample ring in samples (must be a power of two).
+/// 16384 interleaved samples ≈ 170 ms of stereo audio at 48 kHz — enough for
+/// any meter/spectrum window while costing only 64 KB.
+const VIS_RING_SAMPLES: usize = 16384;
+
 pub struct SharedState {
     pub paused: AtomicBool,
     pub stopped: AtomicBool,
     pub finished: AtomicBool,
     pub volume: AtomicU32,          // f32 bits stored as u32
     pub callback_frames: AtomicU32, // actual frames per callback (set once)
+    /// Visualizer tap: the audio callback mirrors every output buffer
+    /// (post-volume, zeros while paused/stopped) into this ring so front-ends
+    /// can render meters or spectra. f32 bits stored as u32.
+    vis_buf: Box<[AtomicU32]>,
+    /// Monotonic count of samples ever written to `vis_buf` (write cursor).
+    vis_pos: AtomicUsize,
 }
 
 impl SharedState {
@@ -176,7 +189,20 @@ impl SharedState {
             finished: AtomicBool::new(false),
             volume: AtomicU32::new(volume.to_bits()),
             callback_frames: AtomicU32::new(0),
+            vis_buf: (0..VIS_RING_SAMPLES).map(|_| AtomicU32::new(0)).collect(),
+            vis_pos: AtomicUsize::new(0),
         }
+    }
+
+    /// Mirror an output buffer into the visualizer ring. Real-time safe:
+    /// relaxed atomic stores only, no locks or allocation. Readers may observe
+    /// a partially written window; that is fine for visualization purposes.
+    fn push_vis(&self, data: &[f32]) {
+        let start = self.vis_pos.load(Relaxed);
+        for (i, &s) in data.iter().enumerate() {
+            self.vis_buf[(start + i) & (VIS_RING_SAMPLES - 1)].store(s.to_bits(), Relaxed);
+        }
+        self.vis_pos.store(start + data.len(), Release);
     }
 }
 
@@ -228,6 +254,19 @@ impl AudioControls {
 
     pub fn device_config(&self) -> (u16, u32) {
         (self.device_channels, self.device_sample_rate)
+    }
+
+    /// Return up to `n` of the most recent interleaved output samples
+    /// (post-volume, newest last). Zeros while paused/stopped; fewer than `n`
+    /// samples right after engine startup. Interleaving follows the stream
+    /// channel count (`device_config().0`).
+    pub fn visualizer_samples(&self, n: usize) -> Vec<f32> {
+        let n = n.min(VIS_RING_SAMPLES);
+        let end = self.shared.vis_pos.load(Acquire);
+        let start = end.saturating_sub(n);
+        (start..end)
+            .map(|i| f32::from_bits(self.shared.vis_buf[i & (VIS_RING_SAMPLES - 1)].load(Relaxed)))
+            .collect()
     }
 
     /// Return a lightweight, Send-able handle for use in background threads.
@@ -382,6 +421,7 @@ impl AudioEngine {
                             let _ = garbage_tx.send(old);
                         }
                         data.fill(0.0);
+                        cb_shared.push_vis(data);
                         return;
                     }
 
@@ -397,6 +437,7 @@ impl AudioEngine {
 
                     if cb_shared.paused.load(Relaxed) || current_source.is_none() {
                         data.fill(0.0);
+                        cb_shared.push_vis(data);
                         return;
                     }
 
@@ -418,6 +459,7 @@ impl AudioEngine {
                         }
                         cb_shared.finished.store(true, Release);
                     }
+                    cb_shared.push_vis(data);
                 },
                 move |err| {
                     warn!("AudioEngine: stream error: {err}");
@@ -462,5 +504,38 @@ impl AudioEngine {
 
     pub fn controls(&self) -> &AudioControls {
         &self.controls
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vis_ring_returns_newest_samples_last() {
+        let shared = SharedState::new(1.0);
+        shared.push_vis(&[0.1, 0.2, 0.3, 0.4]);
+        shared.push_vis(&[0.5, 0.6]);
+
+        let end = shared.vis_pos.load(Acquire);
+        assert_eq!(end, 6);
+        let last_two: Vec<f32> = (end - 2..end)
+            .map(|i| f32::from_bits(shared.vis_buf[i & (VIS_RING_SAMPLES - 1)].load(Relaxed)))
+            .collect();
+        assert_eq!(last_two, vec![0.5, 0.6]);
+    }
+
+    #[test]
+    fn vis_ring_wraps_without_panicking() {
+        let shared = SharedState::new(1.0);
+        let big = vec![0.25_f32; VIS_RING_SAMPLES + 123];
+        shared.push_vis(&big);
+        shared.push_vis(&[0.75]);
+
+        let end = shared.vis_pos.load(Acquire);
+        assert_eq!(end, VIS_RING_SAMPLES + 124);
+        let newest =
+            f32::from_bits(shared.vis_buf[(end - 1) & (VIS_RING_SAMPLES - 1)].load(Relaxed));
+        assert_eq!(newest, 0.75);
     }
 }
