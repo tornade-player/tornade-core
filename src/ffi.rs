@@ -267,7 +267,7 @@ mod ffi {
 // Function implementations will be added in subsequent tasks (T012-T036)
 // Each function returns JSON-serialized results for cross-language data transfer
 
-fn get_library_stats() -> String {
+pub fn get_library_stats() -> String {
     // T012: Get library statistics (album count, artist count, track count)
     match get_or_init_pool() {
         Ok(pool) => {
@@ -335,7 +335,7 @@ fn get_library_stats() -> String {
     }
 }
 
-fn clean_library() -> String {
+pub fn clean_library() -> String {
     match get_or_init_pool() {
         Ok(pool) => {
             let conn = match pool.get() {
@@ -363,7 +363,7 @@ fn clean_library() -> String {
     }
 }
 
-fn scan_library(folder_path: &str) -> String {
+pub fn scan_library(folder_path: &str) -> String {
     // T013: Scan a folder for music files and add to library
     match get_or_init_library() {
         Ok(library_service) => {
@@ -408,7 +408,7 @@ fn scan_library(folder_path: &str) -> String {
     }
 }
 
-fn get_scan_progress() -> String {
+pub fn get_scan_progress() -> String {
     // Get the current scan progress from the global library service
     match get_or_init_library() {
         Ok(library_service) => {
@@ -441,7 +441,7 @@ fn get_scan_progress() -> String {
     }
 }
 
-fn get_tracks_page(offset: u32, limit: u32, sort_by: &str, sort_dir: &str) -> String {
+pub fn get_tracks_page(offset: u32, limit: u32, sort_by: &str, sort_dir: &str) -> String {
     // T014: Get paginated list of tracks (limit capped at 100)
     match get_or_init_pool() {
         Ok(pool) => {
@@ -569,7 +569,7 @@ fn get_tracks_page(offset: u32, limit: u32, sort_by: &str, sort_dir: &str) -> St
     }
 }
 
-fn get_random_tracks(count: u32) -> String {
+pub fn get_random_tracks(count: u32) -> String {
     match get_or_init_pool() {
         Ok(pool) => {
             let conn = match pool.get() {
@@ -628,7 +628,7 @@ fn get_random_tracks(count: u32) -> String {
     }
 }
 
-fn get_track_by_id(track_id: i64) -> String {
+pub fn get_track_by_id(track_id: i64) -> String {
     // T015: Get a single track by ID
     match get_or_init_pool() {
         Ok(pool) => {
@@ -669,7 +669,7 @@ fn get_track_by_id(track_id: i64) -> String {
     }
 }
 
-fn delete_tracks(track_ids_json: &str) -> String {
+pub fn delete_tracks(track_ids_json: &str) -> String {
     let track_ids: Vec<i64> = match serde_json::from_str(track_ids_json) {
         Ok(ids) => ids,
         Err(e) => {
@@ -722,7 +722,7 @@ fn delete_tracks(track_ids_json: &str) -> String {
     }
 }
 
-fn search_tracks(query: &str, limit: u32) -> String {
+pub fn search_tracks(query: &str, limit: u32) -> String {
     // T016: FTS5 search
     match get_or_init_pool() {
         Ok(pool) => {
@@ -760,7 +760,7 @@ fn search_tracks(query: &str, limit: u32) -> String {
     }
 }
 
-fn get_album_by_id(album_id: i64) -> String {
+pub fn get_album_by_id(album_id: i64) -> String {
     // Get a single album by ID
     match get_or_init_pool() {
         Ok(pool) => {
@@ -801,7 +801,7 @@ fn get_album_by_id(album_id: i64) -> String {
     }
 }
 
-fn get_albums_page(offset: u32, limit: u32) -> String {
+pub fn get_albums_page(offset: u32, limit: u32) -> String {
     // T017: Get paginated list of albums
     match get_or_init_pool() {
         Ok(pool) => {
@@ -851,7 +851,7 @@ fn get_albums_page(offset: u32, limit: u32) -> String {
     }
 }
 
-fn get_artist_by_id(artist_id: i64) -> String {
+pub fn get_artist_by_id(artist_id: i64) -> String {
     // Get a single artist by ID
     match get_or_init_pool() {
         Ok(pool) => {
@@ -892,7 +892,7 @@ fn get_artist_by_id(artist_id: i64) -> String {
     }
 }
 
-fn get_artist_albums(artist_id: i64) -> String {
+pub fn get_artist_albums(artist_id: i64) -> String {
     // Get all albums for an artist (as album artist OR as track artist)
     match get_or_init_pool() {
         Ok(pool) => {
@@ -928,7 +928,7 @@ fn get_artist_albums(artist_id: i64) -> String {
     }
 }
 
-fn get_artists_page(offset: u32, limit: u32) -> String {
+pub fn get_artists_page(offset: u32, limit: u32) -> String {
     // T018: Get paginated list of artists
     match get_or_init_pool() {
         Ok(pool) => {
@@ -980,7 +980,7 @@ fn get_artists_page(offset: u32, limit: u32) -> String {
     }
 }
 
-fn get_album_artwork(album_id: i64) -> Vec<u8> {
+pub fn get_album_artwork(album_id: i64) -> Vec<u8> {
     // T019: Get album artwork as raw bytes
     match get_or_init_pool() {
         Ok(pool) => {
@@ -1005,7 +1005,7 @@ fn get_album_artwork(album_id: i64) -> Vec<u8> {
     }
 }
 
-fn get_album_tracks(album_id: i64) -> String {
+pub fn get_album_tracks(album_id: i64) -> String {
     // Get all tracks for a specific album
     match get_or_init_pool() {
         Ok(pool) => {
@@ -1041,7 +1041,7 @@ fn get_album_tracks(album_id: i64) -> String {
     }
 }
 
-fn get_playlists() -> String {
+pub fn get_playlists() -> String {
     // T020: Get all playlists
     match get_or_init_pool() {
         Ok(pool) => {
@@ -1067,7 +1067,7 @@ fn get_playlists() -> String {
     }
 }
 
-fn create_playlist(name: &str) -> String {
+pub fn create_playlist(name: &str) -> String {
     // T021: Create a new playlist
     match get_or_init_pool() {
         Ok(pool) => {
@@ -1093,7 +1093,7 @@ fn create_playlist(name: &str) -> String {
     }
 }
 
-fn rename_playlist(playlist_id: i64, name: &str) -> String {
+pub fn rename_playlist(playlist_id: i64, name: &str) -> String {
     // Rename an existing playlist
     match get_or_init_pool() {
         Ok(pool) => {
@@ -1119,7 +1119,7 @@ fn rename_playlist(playlist_id: i64, name: &str) -> String {
     }
 }
 
-fn delete_playlist(playlist_id: i64) -> String {
+pub fn delete_playlist(playlist_id: i64) -> String {
     // T022: Delete a playlist
     match get_or_init_pool() {
         Ok(pool) => {
@@ -1145,7 +1145,7 @@ fn delete_playlist(playlist_id: i64) -> String {
     }
 }
 
-fn add_track_to_playlist(playlist_id: i64, track_id: i64) -> String {
+pub fn add_track_to_playlist(playlist_id: i64, track_id: i64) -> String {
     // T023: Add a track to a playlist
     match get_or_init_pool() {
         Ok(pool) => {
@@ -1176,7 +1176,7 @@ fn add_track_to_playlist(playlist_id: i64, track_id: i64) -> String {
     }
 }
 
-fn remove_track_from_playlist(playlist_id: i64, position: i64) -> String {
+pub fn remove_track_from_playlist(playlist_id: i64, position: i64) -> String {
     // Remove a track from a playlist at the given position
     match get_or_init_pool() {
         Ok(pool) => {
@@ -1205,7 +1205,7 @@ fn remove_track_from_playlist(playlist_id: i64, position: i64) -> String {
     }
 }
 
-fn import_m3u_playlist(path: &str) -> String {
+pub fn import_m3u_playlist(path: &str) -> String {
     // Import a .m3u file and create a new playlist from it
     match get_or_init_pool() {
         Ok(pool) => {
@@ -1232,7 +1232,7 @@ fn import_m3u_playlist(path: &str) -> String {
     }
 }
 
-fn play_track(track_id: i64) -> String {
+pub fn play_track(track_id: i64) -> String {
     // T024: Play a specific track
     // Sets queue to just this track and starts playback
     match get_or_init_player() {
@@ -1278,7 +1278,7 @@ fn play_track(track_id: i64) -> String {
     }
 }
 
-fn pause_playback() -> String {
+pub fn pause_playback() -> String {
     // T025: Pause playback
     match get_or_init_player() {
         Ok(()) => {
@@ -1313,7 +1313,7 @@ fn pause_playback() -> String {
     }
 }
 
-fn resume_playback() -> String {
+pub fn resume_playback() -> String {
     // T026: Resume playback
     match get_or_init_player() {
         Ok(()) => {
@@ -1348,7 +1348,7 @@ fn resume_playback() -> String {
     }
 }
 
-fn stop_playback() -> String {
+pub fn stop_playback() -> String {
     // T027: Stop playback
     match get_or_init_player() {
         Ok(()) => {
@@ -1383,7 +1383,7 @@ fn stop_playback() -> String {
     }
 }
 
-fn next_track() -> String {
+pub fn next_track() -> String {
     // T028: Skip to next track
     match get_or_init_player() {
         Ok(()) => {
@@ -1418,7 +1418,7 @@ fn next_track() -> String {
     }
 }
 
-fn previous_track() -> String {
+pub fn previous_track() -> String {
     // T029: Go to previous track
     match get_or_init_player() {
         Ok(()) => {
@@ -1453,7 +1453,7 @@ fn previous_track() -> String {
     }
 }
 
-fn jump_to_queue_index(index: i64) -> String {
+pub fn jump_to_queue_index(index: i64) -> String {
     // Jump to specific index in queue
     match get_or_init_player() {
         Ok(()) => {
@@ -1488,7 +1488,7 @@ fn jump_to_queue_index(index: i64) -> String {
     }
 }
 
-fn get_player_state() -> String {
+pub fn get_player_state() -> String {
     // T030: Get current player state
     match get_or_init_player() {
         Ok(()) => {
@@ -1557,7 +1557,7 @@ fn get_player_state() -> String {
     }
 }
 
-fn get_queue() -> String {
+pub fn get_queue() -> String {
     // T031: Get current playback queue
     match get_or_init_player() {
         Ok(()) => {
@@ -1597,7 +1597,7 @@ fn get_queue() -> String {
     }
 }
 
-fn add_to_queue(track_id: i64) -> String {
+pub fn add_to_queue(track_id: i64) -> String {
     // T032: Add track to queue
     match get_or_init_player() {
         Ok(()) => {
@@ -1632,7 +1632,7 @@ fn add_to_queue(track_id: i64) -> String {
     }
 }
 
-fn add_tracks_to_queue(track_ids: &str) -> String {
+pub fn add_tracks_to_queue(track_ids: &str) -> String {
     // Add multiple tracks to queue
     match get_or_init_player() {
         Ok(()) => {
@@ -1679,7 +1679,7 @@ fn add_tracks_to_queue(track_ids: &str) -> String {
     }
 }
 
-fn set_queue(track_ids: &str) -> String {
+pub fn set_queue(track_ids: &str) -> String {
     // Replace the entire queue with new tracks
     match get_or_init_player() {
         Ok(()) => {
@@ -1726,7 +1726,7 @@ fn set_queue(track_ids: &str) -> String {
     }
 }
 
-fn clear_queue() -> String {
+pub fn clear_queue() -> String {
     // T033: Clear the playback queue
     match get_or_init_player() {
         Ok(()) => {
@@ -1761,7 +1761,7 @@ fn clear_queue() -> String {
     }
 }
 
-fn reorder_queue(track_ids: &str) -> String {
+pub fn reorder_queue(track_ids: &str) -> String {
     // T034: Reorder queue with provided track IDs (JSON array string)
     match get_or_init_player() {
         Ok(()) => {
@@ -1808,7 +1808,7 @@ fn reorder_queue(track_ids: &str) -> String {
     }
 }
 
-fn set_volume(volume: f64) -> String {
+pub fn set_volume(volume: f64) -> String {
     // T035: Set playback volume (0.0 - 1.0)
     match get_or_init_player() {
         Ok(()) => {
@@ -1843,7 +1843,7 @@ fn set_volume(volume: f64) -> String {
     }
 }
 
-fn seek_to_position(position: f64) -> String {
+pub fn seek_to_position(position: f64) -> String {
     // T036: Seek to specific position in track (in seconds)
     match get_or_init_player() {
         Ok(()) => {
@@ -1880,7 +1880,7 @@ fn seek_to_position(position: f64) -> String {
     }
 }
 
-fn toggle_shuffle() -> String {
+pub fn toggle_shuffle() -> String {
     // Toggle shuffle mode on/off
     match get_or_init_player() {
         Ok(()) => {
@@ -1916,7 +1916,7 @@ fn toggle_shuffle() -> String {
     }
 }
 
-fn set_shuffle(enabled: bool) -> String {
+pub fn set_shuffle(enabled: bool) -> String {
     // Set shuffle mode to specific state
     match get_or_init_player() {
         Ok(()) => {
@@ -1951,7 +1951,7 @@ fn set_shuffle(enabled: bool) -> String {
     }
 }
 
-fn toggle_repeat() -> String {
+pub fn toggle_repeat() -> String {
     // Cycle through repeat modes: Off -> All -> One -> Off
     match get_or_init_player() {
         Ok(()) => {
@@ -1993,7 +1993,7 @@ fn toggle_repeat() -> String {
     }
 }
 
-fn set_repeat_mode(mode: &str) -> String {
+pub fn set_repeat_mode(mode: &str) -> String {
     // Set specific repeat mode: "off", "all", or "one"
     match get_or_init_player() {
         Ok(()) => {
@@ -2040,7 +2040,7 @@ fn set_repeat_mode(mode: &str) -> String {
     }
 }
 
-fn clear_unavailable_tracks() -> String {
+pub fn clear_unavailable_tracks() -> String {
     // Clear the set of skipped/unavailable track IDs so they are retried on
     // the next playback attempt (e.g. after a NAS volume has remounted).
     match get_or_init_player() {
@@ -2067,7 +2067,7 @@ fn clear_unavailable_tracks() -> String {
     }
 }
 
-fn get_genres() -> String {
+pub fn get_genres() -> String {
     // Get all genres with track and album counts
     match get_or_init_pool() {
         Ok(pool) => {
@@ -2145,7 +2145,7 @@ fn get_genres() -> String {
     }
 }
 
-fn search_genres(query: &str, limit: u32) -> String {
+pub fn search_genres(query: &str, limit: u32) -> String {
     if query.trim().is_empty() {
         return serde_json::json!({
             "success": true,
@@ -2270,7 +2270,7 @@ fn search_genres_with_pool(pool: &crate::db::DbPool, query: &str, limit: u32) ->
     .to_string()
 }
 
-fn get_genre_tracks(genre_id: i64) -> String {
+pub fn get_genre_tracks(genre_id: i64) -> String {
     // Get all tracks for a specific genre
     match get_or_init_pool() {
         Ok(pool) => {
@@ -2306,7 +2306,7 @@ fn get_genre_tracks(genre_id: i64) -> String {
     }
 }
 
-fn get_genre_artists(genre_id: i64) -> String {
+pub fn get_genre_artists(genre_id: i64) -> String {
     // Get all artists for a specific genre
     match get_or_init_pool() {
         Ok(pool) => {
@@ -2342,7 +2342,7 @@ fn get_genre_artists(genre_id: i64) -> String {
     }
 }
 
-fn get_similar_artists(artist_id: i64) -> String {
+pub fn get_similar_artists(artist_id: i64) -> String {
     match get_or_init_pool() {
         Ok(pool) => {
             let conn = match pool.get() {
@@ -2377,7 +2377,7 @@ fn get_similar_artists(artist_id: i64) -> String {
     }
 }
 
-fn get_genre_albums(genre_id: i64) -> String {
+pub fn get_genre_albums(genre_id: i64) -> String {
     // Get all albums for a specific genre
     match get_or_init_pool() {
         Ok(pool) => {
@@ -2413,7 +2413,7 @@ fn get_genre_albums(genre_id: i64) -> String {
     }
 }
 
-fn get_album_genres(album_id: i64) -> String {
+pub fn get_album_genres(album_id: i64) -> String {
     // Get all genres for a specific album
     match get_or_init_pool() {
         Ok(pool) => {
@@ -2449,7 +2449,7 @@ fn get_album_genres(album_id: i64) -> String {
     }
 }
 
-fn get_artist_genres(artist_id: i64) -> String {
+pub fn get_artist_genres(artist_id: i64) -> String {
     // Get all genres for a specific artist (from all their tracks)
     match get_or_init_pool() {
         Ok(pool) => {
@@ -2485,7 +2485,7 @@ fn get_artist_genres(artist_id: i64) -> String {
     }
 }
 
-fn get_track_genres(track_id: i64) -> String {
+pub fn get_track_genres(track_id: i64) -> String {
     // Get all genres for a specific track
     match get_or_init_pool() {
         Ok(pool) => {
@@ -2521,7 +2521,7 @@ fn get_track_genres(track_id: i64) -> String {
     }
 }
 
-fn get_album_featuring_artists(album_id: i64, exclude_artist_id: i64) -> String {
+pub fn get_album_featuring_artists(album_id: i64, exclude_artist_id: i64) -> String {
     // Get all secondary/featuring artists for an album (excluding the album's own artist)
     match get_or_init_pool() {
         Ok(pool) => {
@@ -2563,7 +2563,7 @@ fn get_album_featuring_artists(album_id: i64, exclude_artist_id: i64) -> String 
 
 // Import Functions
 
-fn import_files(paths_json: &str) -> String {
+pub fn import_files(paths_json: &str) -> String {
     // Parse JSON array of path strings
     let path_strings: Vec<String> = match serde_json::from_str(paths_json) {
         Ok(v) => v,
@@ -2669,7 +2669,7 @@ fn import_files(paths_json: &str) -> String {
 
 // Artwork Fetching Functions
 
-fn fetch_all_artwork(fetch_artists: bool, force: bool) -> String {
+pub fn fetch_all_artwork(fetch_artists: bool, force: bool) -> String {
     // Fetch artwork for all albums and optionally artists
     match get_or_init_artwork() {
         Ok(()) => {
@@ -2706,7 +2706,7 @@ fn fetch_all_artwork(fetch_artists: bool, force: bool) -> String {
     }
 }
 
-fn fetch_album_artwork(album_id: i64) -> String {
+pub fn fetch_album_artwork(album_id: i64) -> String {
     // Fetch artwork for a specific album
     match get_or_init_artwork() {
         Ok(()) => {
@@ -2742,7 +2742,7 @@ fn fetch_album_artwork(album_id: i64) -> String {
     }
 }
 
-fn get_artwork_fetch_progress() -> String {
+pub fn get_artwork_fetch_progress() -> String {
     // Get current artwork fetch progress
     match get_or_init_artwork() {
         Ok(()) => {
@@ -2782,7 +2782,7 @@ fn get_artwork_fetch_progress() -> String {
     }
 }
 
-fn cancel_artwork_fetch() -> String {
+pub fn cancel_artwork_fetch() -> String {
     // Cancel ongoing artwork fetch
     match get_or_init_artwork() {
         Ok(()) => {
@@ -2812,7 +2812,7 @@ fn cancel_artwork_fetch() -> String {
     }
 }
 
-fn get_album_artwork_with_online(album_id: i64) -> Vec<u8> {
+pub fn get_album_artwork_with_online(album_id: i64) -> Vec<u8> {
     // Get album artwork, preferring online artwork over embedded
     match get_or_init_pool() {
         Ok(pool) => {
@@ -2846,7 +2846,7 @@ fn get_album_artwork_with_online(album_id: i64) -> Vec<u8> {
     }
 }
 
-fn get_artist_photo(artist_id: i64) -> Vec<u8> {
+pub fn get_artist_photo(artist_id: i64) -> Vec<u8> {
     // Get artist photo
     match get_or_init_pool() {
         Ok(pool) => {
@@ -2878,7 +2878,7 @@ fn get_artist_photo(artist_id: i64) -> Vec<u8> {
 
 // ── Metadata Editing Stubs (T009) ────────────────────────────────────────────
 
-fn update_track_metadata(track_id: i64, json: &str) -> String {
+pub fn update_track_metadata(track_id: i64, json: &str) -> String {
     let update: crate::services::TrackTagUpdate = match serde_json::from_str(json) {
         Ok(u) => u,
         Err(e) => {
@@ -2924,7 +2924,7 @@ fn update_track_metadata(track_id: i64, json: &str) -> String {
     }
 }
 
-fn update_album_metadata(album_id: i64, json: &str) -> String {
+pub fn update_album_metadata(album_id: i64, json: &str) -> String {
     let update: crate::db::queries::AlbumTagUpdate = match serde_json::from_str(json) {
         Ok(u) => u,
         Err(e) => {
@@ -2970,7 +2970,7 @@ fn update_album_metadata(album_id: i64, json: &str) -> String {
     }
 }
 
-fn write_track_file_tags(track_id: i64) -> String {
+pub fn write_track_file_tags(track_id: i64) -> String {
     match get_or_init_pool() {
         Ok(pool) => {
             let conn = match pool.get() {
@@ -3042,7 +3042,7 @@ fn write_track_file_tags(track_id: i64) -> String {
     }
 }
 
-fn write_album_file_tags(album_id: i64) -> String {
+pub fn write_album_file_tags(album_id: i64) -> String {
     match get_or_init_pool() {
         Ok(pool) => {
             let conn = match pool.get() {
@@ -3146,7 +3146,7 @@ fn write_album_file_tags(album_id: i64) -> String {
     }
 }
 
-fn get_metadata_suggestions(field: &str) -> String {
+pub fn get_metadata_suggestions(field: &str) -> String {
     // Validate field early to avoid unnecessary DB connection
     match field {
         "artist" | "genre" | "album" | "year" => {}
@@ -3206,7 +3206,7 @@ fn get_metadata_suggestions(field: &str) -> String {
     }
 }
 
-fn scrape_track_metadata(track_id: i64) -> String {
+pub fn scrape_track_metadata(track_id: i64) -> String {
     // 1. Get DB connection
     let pool = match get_or_init_pool() {
         Ok(p) => p,
@@ -3306,7 +3306,7 @@ fn scrape_track_metadata(track_id: i64) -> String {
     }
 }
 
-fn scrape_album_metadata(album_id: i64) -> String {
+pub fn scrape_album_metadata(album_id: i64) -> String {
     // 1. Get DB connection
     let pool = match get_or_init_pool() {
         Ok(p) => p,
@@ -3406,7 +3406,7 @@ fn scrape_album_metadata(album_id: i64) -> String {
     }
 }
 
-fn scrape_track_by_query(title: &str, artist: &str) -> String {
+pub fn scrape_track_by_query(title: &str, artist: &str) -> String {
     let http_client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .connect_timeout(std::time::Duration::from_secs(5))
@@ -3457,7 +3457,7 @@ fn scrape_track_by_query(title: &str, artist: &str) -> String {
     }
 }
 
-fn scrape_album_by_query(album_title: &str, artist: &str) -> String {
+pub fn scrape_album_by_query(album_title: &str, artist: &str) -> String {
     let http_client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .connect_timeout(std::time::Duration::from_secs(5))
@@ -3508,7 +3508,7 @@ fn scrape_album_by_query(album_title: &str, artist: &str) -> String {
     }
 }
 
-fn set_track_artwork_from_path(track_id: i64, image_path: &str) -> String {
+pub fn set_track_artwork_from_path(track_id: i64, image_path: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
@@ -3613,7 +3613,7 @@ fn set_track_artwork_from_path(track_id: i64, image_path: &str) -> String {
     }
 }
 
-fn set_album_artwork_from_path(album_id: i64, image_path: &str) -> String {
+pub fn set_album_artwork_from_path(album_id: i64, image_path: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
@@ -3718,7 +3718,7 @@ fn set_album_artwork_from_path(album_id: i64, image_path: &str) -> String {
     }
 }
 
-fn remove_track_artwork(track_id: i64) -> String {
+pub fn remove_track_artwork(track_id: i64) -> String {
     let pool = match get_or_init_pool() {
         Ok(p) => p,
         Err(e) => {
@@ -3757,7 +3757,7 @@ fn remove_track_artwork(track_id: i64) -> String {
     }
 }
 
-fn remove_album_artwork(album_id: i64) -> String {
+pub fn remove_album_artwork(album_id: i64) -> String {
     let pool = match get_or_init_pool() {
         Ok(p) => p,
         Err(e) => {
@@ -3796,7 +3796,7 @@ fn remove_album_artwork(album_id: i64) -> String {
     }
 }
 
-fn set_track_artwork_from_scrape(track_id: i64, musicbrainz_id: &str) -> String {
+pub fn set_track_artwork_from_scrape(track_id: i64, musicbrainz_id: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
@@ -3956,7 +3956,7 @@ fn set_track_artwork_from_scrape(track_id: i64, musicbrainz_id: &str) -> String 
     }
 }
 
-fn set_album_artwork_from_scrape(album_id: i64, musicbrainz_id: &str) -> String {
+pub fn set_album_artwork_from_scrape(album_id: i64, musicbrainz_id: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
@@ -4088,7 +4088,7 @@ fn set_album_artwork_from_scrape(album_id: i64, musicbrainz_id: &str) -> String 
 
 // ── Bulk multi-track metadata editing ────────────────────────────────────────
 
-fn update_multiple_tracks_metadata(track_ids_json: &str, json: &str) -> String {
+pub fn update_multiple_tracks_metadata(track_ids_json: &str, json: &str) -> String {
     let track_ids: Vec<i64> = match serde_json::from_str(track_ids_json) {
         Ok(ids) => ids,
         Err(e) => {
@@ -4145,7 +4145,7 @@ fn update_multiple_tracks_metadata(track_ids_json: &str, json: &str) -> String {
     }
 }
 
-fn write_multiple_tracks_file_tags(track_ids_json: &str) -> String {
+pub fn write_multiple_tracks_file_tags(track_ids_json: &str) -> String {
     let track_ids: Vec<i64> = match serde_json::from_str(track_ids_json) {
         Ok(ids) => ids,
         Err(e) => {
