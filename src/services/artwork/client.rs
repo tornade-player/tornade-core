@@ -2,6 +2,7 @@
 
 use crate::utils::MutexExt;
 use serde::Deserialize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -185,10 +186,36 @@ pub fn is_transient_error(error: &str) -> bool {
         .iter()
         .any(|s| error.contains(s))
         || error.contains("search failed:")
+        || error.contains("refused every key")
 }
 
 /// Times a request is sent again after MusicBrainz answered 429/502/503/504.
 const MAX_RETRIES: u32 = 3;
+
+/// Keys tried for TheAudioDB, in order: `TORNADE_AUDIODB_KEY` (a premium key) when set, then the public test keys. The
+/// service has already retired one of them without notice (`2` answers 404 since 2026), so the next one is tried when a
+/// key is refused, and the one that worked is kept for the following requests.
+const AUDIODB_PUBLIC_KEYS: [&str; 2] = ["123", "2"];
+
+/// Index (in [`audiodb_keys`]) of the key that worked last.
+static AUDIODB_KEY: AtomicUsize = AtomicUsize::new(0);
+
+fn audiodb_keys() -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    if let Ok(k) = std::env::var("TORNADE_AUDIODB_KEY") {
+        let k = k.trim().to_string();
+        if !k.is_empty() {
+            keys.push(k);
+        }
+    }
+    keys.extend(AUDIODB_PUBLIC_KEYS.iter().map(|k| k.to_string()));
+    keys
+}
+
+/// Whether TheAudioDB refused the key (not "artist not found": that one is a 200 with `"artists": null`).
+fn is_key_refusal(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 401 | 403 | 404)
+}
 
 /// MusicBrainz API client (also handles TheAudioDB for artist photos)
 pub struct MusicBrainzClient {
@@ -414,6 +441,41 @@ impl MusicBrainzClient {
         Ok(None)
     }
 
+    /// The search request, with the first key that TheAudioDB accepts.
+    async fn audiodb_search(&self, artist_name: &str) -> Result<reqwest::Response, String> {
+        let keys = audiodb_keys();
+        let start = AUDIODB_KEY.load(Ordering::Relaxed) % keys.len();
+        let mut last = None;
+        for step in 0..keys.len() {
+            let i = (start + step) % keys.len();
+            let url = format!(
+                "{}/api/v1/json/{}/search.php?s={}",
+                self.theaudiodb_base_url,
+                keys[i],
+                urlencoding::encode(artist_name)
+            );
+            log::debug!("Searching TheAudioDB for artist: {url}");
+            let response = self
+                .get_limited(&url)
+                .await
+                .map_err(|e| format!("TheAudioDB search failed: {e}"))?;
+            if is_key_refusal(response.status()) {
+                log::warn!("TheAudioDB refused key #{i} (status: {})", response.status());
+                last = Some(response.status());
+                continue;
+            }
+            AUDIODB_KEY.store(i, Ordering::Relaxed);
+            if !response.status().is_success() {
+                return Err(format!("TheAudioDB returned status: {}", response.status()));
+            }
+            return Ok(response);
+        }
+        Err(format!(
+            "TheAudioDB refused every key (status: {}): the artists are left to be tried again",
+            last.map(|s| s.as_u16()).unwrap_or(0)
+        ))
+    }
+
     /// Search for an artist photo and rich metadata via TheAudioDB.
     ///
     /// Uses the free public API (test key `123`; the old key `2` now answers 404) — no registration required.
@@ -423,20 +485,7 @@ impl MusicBrainzClient {
         &self,
         artist_name: &str,
     ) -> Result<Option<ArtistSearchResult>, String> {
-        let url = format!(
-            "{}/api/v1/json/123/search.php?s={}",
-            self.theaudiodb_base_url,
-            urlencoding::encode(artist_name)
-        );
-
-        log::debug!("Searching TheAudioDB for artist: {url}");
-
-        let response = self.get_limited(&url).await
-            .map_err(|e| format!("TheAudioDB search failed: {e}"))?;
-
-        if !response.status().is_success() {
-            return Err(format!("TheAudioDB returned status: {}", response.status()));
-        }
+        let response = self.audiodb_search(artist_name).await?;
 
         let search_result: TADBSearchResult = response
             .json()
@@ -1370,6 +1419,55 @@ mod tests {
     }
 
     // ── search_artist_photo (TheAudioDB) ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_search_artist_photo_falls_back_to_the_next_key() {
+        let mock_server = MockServer::start().await;
+        // The first key is retired (404); the second one is accepted
+        Mock::given(method("GET"))
+            .and(path("/api/v1/json/123/search.php"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({"Message": "Not found"})))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/json/2/search.php"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(tadb_artists_json(&[])))
+            .mount(&mock_server)
+            .await;
+
+        let client =
+            no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
+        // 200 with no artist = a working key and an unknown artist
+        assert!(client.search_artist_photo("Nobody").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_search_artist_photo_every_key_refused_is_a_passing_error() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock_server)
+            .await;
+
+        let client =
+            no_rate_limit_client(&mock_server.uri(), &mock_server.uri(), &mock_server.uri());
+        let err = client.search_artist_photo("Coldplay").await.unwrap_err();
+        assert!(err.contains("refused every key"), "{err}");
+        // The artists must be tried again later, not marked as attempted
+        assert!(is_transient_error(&err));
+    }
+
+    /// Real service: the keys must still work (`cargo test -- --ignored audiodb_live`).
+    #[tokio::test]
+    #[ignore]
+    async fn audiodb_live_key_works() {
+        let client = MusicBrainzClient::new(
+            reqwest::Client::new(),
+            Arc::new(Mutex::new(RateLimiter::new(1200))),
+        );
+        let found = client.search_artist_photo("Coldplay").await.unwrap();
+        assert!(found.is_some(), "TheAudioDB did not find Coldplay: the key is probably retired");
+    }
 
     #[tokio::test]
     async fn test_search_artist_photo_not_found_returns_none() {

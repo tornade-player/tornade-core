@@ -151,17 +151,35 @@ impl ArtworkService {
     /// `force = false` (default) skips albums whose scrape was already attempted
     /// and failed, as well as albums that already have artwork.
     pub async fn fetch_all_artwork(&self, fetch_artists: bool, force: bool) -> Result<(), String> {
+        self.fetch_artwork(true, fetch_artists, force).await
+    }
+
+    /// Fetch only the photos and details of the artists (the albums are left alone).
+    pub async fn fetch_artists_only(&self, force: bool) -> Result<(), String> {
+        self.fetch_artwork(false, true, force).await
+    }
+
+    async fn fetch_artwork(
+        &self,
+        fetch_albums: bool,
+        fetch_artists: bool,
+        force: bool,
+    ) -> Result<(), String> {
         self.reset_cancel();
         // One-shot: delete legacy {album_db_id}.jpg files created before MBID-based naming
         self.cleanup_legacy_artwork_if_needed();
         let start_time = Local::now();
 
         if force {
-            self.reset_artwork_fetch_attempts()?;
+            self.reset_artwork_fetch_attempts(fetch_albums, fetch_artists)?;
         }
 
         // Get albums to scrape
-        let albums = self.get_albums_for_scrape(force)?;
+        let albums = if fetch_albums {
+            self.get_albums_for_scrape(force)?
+        } else {
+            Vec::new()
+        };
         let total_albums = albums.len();
         let total_items = albums.len() as u32
             + if fetch_artists {
@@ -491,13 +509,18 @@ impl ArtworkService {
 
     /// Reset artwork fetch attempt markers for elements that still have no artwork.
     /// Elements that already succeeded keep their data untouched.
-    fn reset_artwork_fetch_attempts(&self) -> Result<(), String> {
+    fn reset_artwork_fetch_attempts(&self, albums: bool, artists: bool) -> Result<(), String> {
         let conn = self.pool.get().map_err(|e| e.to_string())?;
-        conn.execute_batch(
-            "UPDATE albums SET artwork_fetch_attempted_at = NULL WHERE online_artwork_path IS NULL;
-             UPDATE artists SET photo_fetched_at = NULL WHERE photo_path IS NULL;",
-        )
-        .map_err(|e| e.to_string())?;
+        if albums {
+            conn.execute_batch(
+                "UPDATE albums SET artwork_fetch_attempted_at = NULL WHERE online_artwork_path IS NULL;",
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        if artists {
+            conn.execute_batch("UPDATE artists SET photo_fetched_at = NULL WHERE photo_path IS NULL;")
+                .map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
 

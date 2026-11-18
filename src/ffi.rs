@@ -235,6 +235,7 @@ mod ffi {
 
         // Artwork Fetching Functions
         fn fetch_all_artwork(fetch_artists: bool, force: bool) -> String;
+        fn fetch_artist_photos(force: bool) -> String;
         fn fetch_album_artwork(album_id: i64) -> String;
         fn get_artwork_fetch_progress() -> String;
         fn cancel_artwork_fetch() -> String;
@@ -2687,6 +2688,42 @@ pub fn fetch_all_artwork(fetch_artists: bool, force: bool) -> String {
                     "success": true,
                     "data": {
                         "message": "Artwork fetch started"
+                    }
+                })
+                .to_string()
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "error": "Artwork service not initialized"
+                })
+                .to_string()
+            }
+        }
+        Err(e) => serde_json::json!({
+            "success": false,
+            "error": format!("Failed to initialize artwork service: {}", e)
+        })
+        .to_string(),
+    }
+}
+
+pub fn fetch_artist_photos(force: bool) -> String {
+    // Fetch only the photos and details of the artists, in the background
+    match get_or_init_artwork() {
+        Ok(()) => {
+            let artwork_opt = ARTWORK_SERVICE.lock_infallible();
+            if let Some(artwork_service) = artwork_opt.as_ref() {
+                let service_clone = artwork_service.clone();
+                TOKIO_RUNTIME.spawn(async move {
+                    if let Err(e) = service_clone.fetch_artists_only(force).await {
+                        log::error!("Artist photo fetch failed: {e}");
+                    }
+                });
+
+                serde_json::json!({
+                    "success": true,
+                    "data": {
+                        "message": "Artist photo fetch started"
                     }
                 })
                 .to_string()
