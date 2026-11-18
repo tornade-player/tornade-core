@@ -143,39 +143,52 @@ pub struct ArtistSearchResult {
     pub theaudiodb_id: Option<String>,
 }
 
-/// Rate limiter to respect API rate limits
+/// Rate limiter to respect API rate limits.
+///
+/// Each caller reserves the next free slot, `min_interval_ms` after the previous one, and waits for it: the interval is kept
+/// between the requests that are really sent (counting from the moment of the call let two requests go out back to back
+/// whenever one of them had waited, which MusicBrainz answers with 503).
 pub struct RateLimiter {
     min_interval_ms: u64,
-    last_request: Option<Instant>,
+    next_slot: Option<Instant>,
 }
 
 impl RateLimiter {
     pub fn new(min_interval_ms: u64) -> Self {
         Self {
             min_interval_ms,
-            last_request: None,
+            next_slot: None,
         }
     }
 
-    /// Calculate wait time if necessary to respect rate limit
+    /// Reserves the next slot and returns how long to wait for it (None: now).
     pub fn calculate_wait(&mut self) -> Option<Duration> {
-        let wait_time = if let Some(last) = self.last_request {
-            let elapsed = last.elapsed();
-            let min_duration = Duration::from_millis(self.min_interval_ms);
+        let now = Instant::now();
+        let slot = self.next_slot.filter(|n| *n > now).unwrap_or(now);
+        self.next_slot = Some(slot + Duration::from_millis(self.min_interval_ms));
+        (slot > now).then(|| slot - now)
+    }
 
-            if elapsed < min_duration {
-                Some(min_duration - elapsed)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        self.last_request = Some(Instant::now());
-        wait_time
+    /// Pushes the next slot at least `delay` away (a server asked to slow down).
+    pub fn penalize(&mut self, delay: Duration) {
+        let until = Instant::now() + delay;
+        if self.next_slot.is_none_or(|n| n < until) {
+            self.next_slot = Some(until);
+        }
     }
 }
+
+/// Whether an error message is a passing one (the server asked to slow down, or the network failed): the album or the
+/// artist must be tried again later, not marked as "attempted".
+pub fn is_transient_error(error: &str) -> bool {
+    ["status: 429", "status: 502", "status: 503", "status: 504"]
+        .iter()
+        .any(|s| error.contains(s))
+        || error.contains("search failed:")
+}
+
+/// Times a request is sent again after MusicBrainz answered 429/502/503/504.
+const MAX_RETRIES: u32 = 3;
 
 /// MusicBrainz API client (also handles TheAudioDB for artist photos)
 pub struct MusicBrainzClient {
@@ -215,6 +228,35 @@ impl MusicBrainzClient {
             musicbrainz_base_url: musicbrainz_base_url.to_string(),
             coverart_base_url: coverart_base_url.to_string(),
             theaudiodb_base_url: theaudiodb_base_url.to_string(),
+        }
+    }
+
+    /// GET with the shared rate limit. A 429/502/503/504 (MusicBrainz refusing or overloaded) is sent again after the delay
+    /// the server asks for (`Retry-After`, at most 60 s) or 2, 4, 8 s, and every other request waits behind that delay too.
+    async fn get_limited(&self, url: &str) -> Result<reqwest::Response, reqwest::Error> {
+        let mut attempt = 0u32;
+        loop {
+            let wait = self.rate_limiter.lock_infallible().calculate_wait();
+            if let Some(duration) = wait {
+                tokio::time::sleep(duration).await;
+            }
+            let response = self.http_client.get(url).send().await?;
+            let status = response.status();
+            if !matches!(status.as_u16(), 429 | 502 | 503 | 504) || attempt >= MAX_RETRIES {
+                return Ok(response);
+            }
+            let asked = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse::<u64>().ok());
+            let delay = Duration::from_secs(asked.unwrap_or(2u64 << attempt).min(60));
+            log::warn!(
+                "{status} from {url}: trying again in {delay:?} (attempt {} of {MAX_RETRIES})",
+                attempt + 1
+            );
+            self.rate_limiter.lock_infallible().penalize(delay);
+            attempt += 1;
         }
     }
 
@@ -265,14 +307,6 @@ impl MusicBrainzClient {
         artist_name: &str,
         album_title: &str,
     ) -> Result<Option<ArtworkSearchResult>, String> {
-        let wait_time = {
-            let mut limiter = self.rate_limiter.lock_infallible();
-            limiter.calculate_wait()
-        };
-        if let Some(duration) = wait_time {
-            tokio::time::sleep(duration).await;
-        }
-
         let url = format!(
             "{}/ws/2/release/?query={}&fmt=json&limit=5",
             self.musicbrainz_base_url,
@@ -281,15 +315,7 @@ impl MusicBrainzClient {
 
         log::debug!("Searching MusicBrainz: {url}");
 
-        let response = self
-            .http_client
-            .get(&url)
-            .header(
-                "User-Agent",
-                "Tornade-Music-Player/1.0 ( thomas@example.com )",
-            )
-            .send()
-            .await
+        let response = self.get_limited(&url).await
             .map_err(|e| format!("MusicBrainz search failed: {e}"))?;
 
         if !response.status().is_success() {
@@ -319,14 +345,6 @@ impl MusicBrainzClient {
                 continue;
             }
 
-            let wait_time = {
-                let mut limiter = self.rate_limiter.lock_infallible();
-                limiter.calculate_wait()
-            };
-            if let Some(duration) = wait_time {
-                tokio::time::sleep(duration).await;
-            }
-
             let artwork_url = format!(
                 "{}/release/{}/front-500",
                 self.coverart_base_url, release.id
@@ -334,7 +352,7 @@ impl MusicBrainzClient {
 
             log::debug!("Trying Cover Art Archive: {artwork_url}");
 
-            match self.http_client.get(&artwork_url).send().await {
+            match self.get_limited(&artwork_url).await {
                 Ok(resp) if resp.status().is_success() => {
                     const MAX_IMAGE_SIZE: usize = 5 * 1024 * 1024;
                     match resp.bytes().await {
@@ -405,14 +423,6 @@ impl MusicBrainzClient {
         &self,
         artist_name: &str,
     ) -> Result<Option<ArtistSearchResult>, String> {
-        let wait_time = {
-            let mut limiter = self.rate_limiter.lock_infallible();
-            limiter.calculate_wait()
-        };
-        if let Some(duration) = wait_time {
-            tokio::time::sleep(duration).await;
-        }
-
         let url = format!(
             "{}/api/v1/json/2/search.php?s={}",
             self.theaudiodb_base_url,
@@ -421,11 +431,7 @@ impl MusicBrainzClient {
 
         log::debug!("Searching TheAudioDB for artist: {url}");
 
-        let response = self
-            .http_client
-            .get(&url)
-            .send()
-            .await
+        let response = self.get_limited(&url).await
             .map_err(|e| format!("TheAudioDB search failed: {e}"))?;
 
         if !response.status().is_success() {
@@ -533,14 +539,6 @@ impl MusicBrainzClient {
         title: &str,
         artist: &str,
     ) -> Result<Vec<crate::services::metadata_scrape::ScrapeCandidate>, String> {
-        let wait_time = {
-            let mut limiter = self.rate_limiter.lock_infallible();
-            limiter.calculate_wait()
-        };
-        if let Some(duration) = wait_time {
-            tokio::time::sleep(duration).await;
-        }
-
         let query = format!("recording:\"{title}\" AND artist:\"{artist}\"");
         let url = format!(
             "{}/ws/2/recording/?query={}&fmt=json&inc=artist-credits+releases+release-groups+genres+tags&limit=5",
@@ -550,15 +548,7 @@ impl MusicBrainzClient {
 
         log::debug!("Searching MusicBrainz recordings: {url}");
 
-        let response = self
-            .http_client
-            .get(&url)
-            .header(
-                "User-Agent",
-                "Tornade-Music-Player/1.0 ( thomas@example.com )",
-            )
-            .send()
-            .await
+        let response = self.get_limited(&url).await
             .map_err(|e| format!("MusicBrainz recording search failed: {e}"))?;
 
         if !response.status().is_success() {
@@ -696,14 +686,6 @@ impl MusicBrainzClient {
         album_title: &str,
         artist: &str,
     ) -> Result<Vec<crate::services::metadata_scrape::ScrapeCandidate>, String> {
-        let wait_time = {
-            let mut limiter = self.rate_limiter.lock_infallible();
-            limiter.calculate_wait()
-        };
-        if let Some(duration) = wait_time {
-            tokio::time::sleep(duration).await;
-        }
-
         let query = format!("release:\"{album_title}\" AND artist:\"{artist}\"");
         let url = format!(
             "{}/ws/2/release/?query={}&fmt=json&inc=recordings+artist-credits+genres+cover-art-archive&limit=5",
@@ -713,15 +695,7 @@ impl MusicBrainzClient {
 
         log::debug!("Searching MusicBrainz releases: {url}");
 
-        let response = self
-            .http_client
-            .get(&url)
-            .header(
-                "User-Agent",
-                "Tornade-Music-Player/1.0 ( thomas@example.com )",
-            )
-            .send()
-            .await
+        let response = self.get_limited(&url).await
             .map_err(|e| format!("MusicBrainz release search failed: {e}"))?;
 
         if !response.status().is_success() {
@@ -1075,6 +1049,69 @@ mod tests {
     // ── RateLimiter ──────────────────────────────────────────────────────────
 
     #[test]
+    fn test_rate_limiter_counts_from_the_slot_not_from_the_call() {
+        // The caller that waited sends its request at its slot: the next one must be a full interval after it
+        let mut limiter = RateLimiter::new(60);
+        assert!(limiter.calculate_wait().is_none());
+        let wait = limiter.calculate_wait().expect("second call waits");
+        std::thread::sleep(wait);
+        let third = limiter.calculate_wait().expect("third call still waits a full interval");
+        assert!(third >= Duration::from_millis(40), "{third:?}");
+    }
+
+    #[test]
+    fn test_rate_limiter_penalize_pushes_the_next_slot() {
+        let mut limiter = RateLimiter::new(10);
+        limiter.penalize(Duration::from_millis(200));
+        let wait = limiter.calculate_wait().expect("waits for the penalty");
+        assert!(wait > Duration::from_millis(150), "{wait:?}");
+    }
+
+    #[test]
+    fn test_transient_errors_are_recognised() {
+        assert!(is_transient_error("MusicBrainz returned status: 503 Service Unavailable"));
+        assert!(is_transient_error("MusicBrainz returned status: 429 Too Many Requests"));
+        assert!(is_transient_error("MusicBrainz search failed: operation timed out"));
+        assert!(!is_transient_error("MusicBrainz returned status: 404 Not Found"));
+        assert!(!is_transient_error("Failed to parse MusicBrainz response: eof"));
+    }
+
+    #[tokio::test]
+    async fn test_get_limited_sends_a_503_again() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/x"))
+            .respond_with(ResponseTemplate::new(503).insert_header("Retry-After", "0"))
+            .up_to_n_times(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/x"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let client = MusicBrainzClient::new(reqwest::Client::new(), Arc::new(Mutex::new(RateLimiter::new(1))));
+        let response = client.get_limited(&format!("{}/x", server.uri())).await.unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_get_limited_gives_up_after_the_retries() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(503).insert_header("Retry-After", "0"))
+            .mount(&server)
+            .await;
+        let client = MusicBrainzClient::new(reqwest::Client::new(), Arc::new(Mutex::new(RateLimiter::new(1))));
+        let response = client.get_limited(&format!("{}/x", server.uri())).await.unwrap();
+        assert_eq!(response.status().as_u16(), 503);
+        // The first request and MAX_RETRIES more
+        assert_eq!(server.received_requests().await.unwrap().len(), 1 + MAX_RETRIES as usize);
+    }
+
+
+    #[test]
     fn test_rate_limiter_first_call_no_wait() {
         let mut limiter = RateLimiter::new(1000);
         let wait = limiter.calculate_wait();
@@ -1262,7 +1299,8 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/ws/2/release/"))
-            .respond_with(ResponseTemplate::new(503))
+            // Retry-After: 0, or the three retries would wait 2 + 4 + 8 s
+            .respond_with(ResponseTemplate::new(503).insert_header("Retry-After", "0"))
             .mount(&mock_server)
             .await;
 
@@ -1271,7 +1309,8 @@ mod tests {
         let result = client
             .search_album_artwork("Abbey Road", "The Beatles")
             .await;
-        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(is_transient_error(&error), "{error}");
     }
 
     #[tokio::test]

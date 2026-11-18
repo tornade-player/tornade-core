@@ -166,6 +166,9 @@ pub struct SharedState {
     pub finished: AtomicBool,
     pub volume: AtomicU32,          // f32 bits stored as u32
     pub callback_frames: AtomicU32, // actual frames per callback (set once)
+    /// Set by the stream's error callback (device unplugged, default output changed, ALSA POLLERR...): the stream is dead
+    /// and the player has to build a new one.
+    pub failed: AtomicBool,
 }
 
 impl SharedState {
@@ -176,6 +179,7 @@ impl SharedState {
             finished: AtomicBool::new(false),
             volume: AtomicU32::new(volume.to_bits()),
             callback_frames: AtomicU32::new(0),
+            failed: AtomicBool::new(false),
         }
     }
 }
@@ -219,6 +223,11 @@ impl AudioControls {
 
     pub fn set_volume(&self, volume: f32) {
         self.shared.volume.store(volume.to_bits(), Relaxed);
+    }
+
+    /// Whether the output stream reported an error: it will not play any more and must be rebuilt.
+    pub fn has_failed(&self) -> bool {
+        self.shared.failed.load(Relaxed)
     }
 
     pub fn is_finished(&self) -> bool {
@@ -365,6 +374,7 @@ impl AudioEngine {
         let (garbage_tx, garbage_rx) = mpsc::channel::<BoxedSource>();
 
         let cb_shared = Arc::clone(&shared);
+        let err_shared = Arc::clone(&shared);
         let mut current_source: Option<BoxedSource> = None;
 
         let stream = device
@@ -420,7 +430,10 @@ impl AudioEngine {
                     }
                 },
                 move |err| {
-                    warn!("AudioEngine: stream error: {err}");
+                    // A dead stream calls this again and again: said once, the player rebuilds the stream
+                    if !err_shared.failed.swap(true, Relaxed) {
+                        warn!("AudioEngine: stream error: {err} (the output will be reopened)");
+                    }
                 },
                 None,
             )

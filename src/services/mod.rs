@@ -20,6 +20,7 @@ pub mod audio_engine;
 pub mod duplicate;
 pub mod error;
 pub mod events;
+pub mod file_cache;
 pub mod library;
 pub mod metadata;
 pub mod metadata_edit;

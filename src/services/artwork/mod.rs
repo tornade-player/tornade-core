@@ -13,6 +13,7 @@ use crate::utils::MutexExt;
 use crate::utils::paths::AppPaths;
 use chrono::Local;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Live progress state for an in-progress artwork fetch operation.
@@ -54,6 +55,9 @@ impl ArtworkFetchProgress {
     }
 }
 
+/// Passing errors in a row after which a fetch stops.
+const MAX_CONSECUTIVE_TRANSIENT: u32 = 5;
+
 /// Downloads and caches album artwork and artist photos from MusicBrainz / Cover Art Archive.
 ///
 /// All network calls respect a 1 req/s rate limit imposed by the MusicBrainz API
@@ -70,6 +74,8 @@ pub struct ArtworkService {
     rate_limiter: Arc<Mutex<RateLimiter>>,
     fetch_progress: Arc<Mutex<Option<ArtworkFetchProgress>>>,
     fetch_cancelled: Arc<Mutex<bool>>,
+    /// Passing errors in a row (server busy, network): after a few the fetch stops instead of hammering the server.
+    consecutive_transient: Arc<AtomicU32>,
 }
 
 impl ArtworkService {
@@ -79,7 +85,14 @@ impl ArtworkService {
             .timeout(std::time::Duration::from_secs(15)) // Hard timeout per request
             .connect_timeout(std::time::Duration::from_secs(5)) // Connection timeout
             .pool_max_idle_per_host(2) // Limit connections per host
-            .user_agent("Tornade-Music-Player/1.0 ( contact@tornade.app )")
+            // MusicBrainz wants an application name with a way to reach its authors, and rate limits each one: a frontend
+            // gives its own through TORNADE_USER_AGENT ("App/1.0 ( https://example.org/app )")
+            .user_agent(
+                std::env::var("TORNADE_USER_AGENT")
+                    .ok()
+                    .filter(|v| !v.trim().is_empty())
+                    .unwrap_or_else(|| "Tornade-Music-Player/1.0 ( contact@tornade.app )".to_string()),
+            )
             .build()
             .expect("Failed to create HTTP client");
 
@@ -87,9 +100,10 @@ impl ArtworkService {
             pool,
             app_paths,
             http_client,
-            rate_limiter: Arc::new(Mutex::new(RateLimiter::new(1100))), // 1.1 req/sec (safe margin)
+            rate_limiter: Arc::new(Mutex::new(RateLimiter::new(1200))), // MusicBrainz allows 1 request/s on average: a margin
             fetch_progress: Arc::new(Mutex::new(None)),
             fetch_cancelled: Arc::new(Mutex::new(false)),
+            consecutive_transient: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -111,6 +125,23 @@ impl ArtworkService {
     /// Reset cancellation flag
     fn reset_cancel(&self) {
         *self.fetch_cancelled.lock_infallible() = false;
+        self.consecutive_transient.store(0, Ordering::Relaxed);
+    }
+
+    /// Whether the server keeps refusing: the fetch stops, what was not reached stays to be tried again. The progress is
+    /// closed (the items not reached count as failed) so that the interface sees the end.
+    fn refused_too_often(&self) -> bool {
+        let refused = self.consecutive_transient.load(Ordering::Relaxed) >= MAX_CONSECUTIVE_TRANSIENT;
+        if refused {
+            log::error!(
+                "Artwork fetch stopped: {MAX_CONSECUTIVE_TRANSIENT} requests in a row failed (server busy or no network). Try again later."
+            );
+            if let Some(p) = self.fetch_progress.lock_infallible().as_mut() {
+                p.failed += p.total_items.saturating_sub(p.processed_items);
+                p.processed_items = p.total_items;
+            }
+        }
+        refused
     }
 
     /// Fetch artwork for all albums (and optionally artists).
@@ -154,7 +185,7 @@ impl ArtworkService {
 
         // Fetch album artwork
         for album in albums {
-            if self.is_cancelled() {
+            if self.is_cancelled() || self.refused_too_often() {
                 break;
             }
 
@@ -170,6 +201,7 @@ impl ArtworkService {
                 continue;
             }
 
+            let before = self.consecutive_transient.load(Ordering::Relaxed);
             let success = self
                 .fetch_album_artwork_internal(
                     &mb_client,
@@ -178,6 +210,9 @@ impl ArtworkService {
                     &album.artist_name,
                 )
                 .await;
+            if self.consecutive_transient.load(Ordering::Relaxed) == before {
+                self.consecutive_transient.store(0, Ordering::Relaxed);
+            }
 
             if success {
                 albums_successful += 1;
@@ -205,7 +240,7 @@ impl ArtworkService {
             total_artists = artists.len();
 
             for artist in artists {
-                if self.is_cancelled() {
+                if self.is_cancelled() || self.refused_too_often() {
                     break;
                 }
 
@@ -219,9 +254,13 @@ impl ArtworkService {
                     continue;
                 }
 
+                let before = self.consecutive_transient.load(Ordering::Relaxed);
                 let success = self
                     .fetch_artist_photo_internal(&mb_client, artist.id, &artist.name)
                     .await;
+                if self.consecutive_transient.load(Ordering::Relaxed) == before {
+                    self.consecutive_transient.store(0, Ordering::Relaxed);
+                }
 
                 if success {
                     artists_successful += 1;
@@ -331,7 +370,12 @@ impl ArtworkService {
             }
             Err(e) => {
                 log::error!("Error fetching artwork for album {artist_name} - {album_title}: {e}");
-                let _ = self.mark_album_fetch_attempted(album_id);
+                // A refusal to slow down or a network failure says nothing about the album: it stays to be tried again
+                if client::is_transient_error(&e) {
+                    self.consecutive_transient.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    let _ = self.mark_album_fetch_attempted(album_id);
+                }
                 false
             }
         }
@@ -381,9 +425,13 @@ impl ArtworkService {
                 false
             }
             Err(e) => {
-                // Network/parse error — also mark as attempted to avoid hammering the API
                 log::error!("Error fetching data for artist {artist_name}: {e}");
-                let _ = self.mark_artist_fetch_attempted(artist_id);
+                // A passing error (server busy, network) leaves the artist to be tried again; the others are marked
+                if client::is_transient_error(&e) {
+                    self.consecutive_transient.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    let _ = self.mark_artist_fetch_attempted(artist_id);
+                }
                 false
             }
         }

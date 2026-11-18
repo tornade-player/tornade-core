@@ -6,6 +6,7 @@ use crate::models::{Queue, RepeatMode, Track};
 use crate::services::audio_engine::AudioEngine;
 use crate::services::error::PlayerError;
 use crate::services::events::PlaybackState;
+use crate::services::file_cache::FileCache;
 use crate::utils::app_state::{self, PersistedState};
 use log::{info, warn};
 use rodio::source::UniformSourceIterator;
@@ -22,6 +23,46 @@ pub struct PlayerService {
     state: Arc<Mutex<PlayerState>>,
     engine: Arc<Mutex<Option<AudioEngine>>>,
     loading: Arc<AtomicBool>,
+    /// Whole files of the tracks around the current one, kept for network mounts (see `file_cache`).
+    files: Arc<FileCache>,
+    /// When the output stream was last rebuilt after an error: a device that keeps failing is not retried in a loop.
+    last_audio_recovery: Mutex<Option<Instant>>,
+}
+
+/// Ids of the tracks before and after the current queue position, in play order. None at the ends of the queue unless it
+/// repeats; no next track when the current one repeats.
+fn neighbours(queue: &Queue) -> (Option<i64>, Option<i64>) {
+    let len = queue.len();
+    if len == 0 {
+        return (None, None);
+    }
+    let at = |slot: usize| {
+        let index = if queue.shuffle_enabled {
+            *queue.shuffle_order.get(slot)?
+        } else {
+            slot
+        };
+        queue.tracks.get(index).copied()
+    };
+    let current = queue.current_index;
+    let repeat_all = queue.repeat_mode == RepeatMode::All;
+    let next = if queue.repeat_mode == RepeatMode::One {
+        None
+    } else if current + 1 < len {
+        at(current + 1)
+    } else if repeat_all {
+        at(0)
+    } else {
+        None
+    };
+    let previous = if current > 0 {
+        at(current - 1)
+    } else if repeat_all {
+        at(len - 1)
+    } else {
+        None
+    };
+    (previous, next)
 }
 
 struct PlayerState {
@@ -91,6 +132,8 @@ impl PlayerService {
             })),
             engine: Arc::new(Mutex::new(None)),
             loading: Arc::new(AtomicBool::new(false)),
+            files: Arc::new(FileCache::default()),
+            last_audio_recovery: Mutex::new(None),
         })
     }
 
@@ -104,6 +147,44 @@ impl PlayerService {
                 })?);
         }
         Ok(())
+    }
+
+    /// Reopens the audio output after its stream failed (headphones or a USB interface unplugged, the default output
+    /// changed, ALSA POLLERR): the dead engine is dropped, a new one opens the current default device and the playing
+    /// track goes on from where it was. When there is no device any more, playback is paused and a resume tries again.
+    /// Called at each state poll; at most once every 2 s.
+    fn recover_audio_if_failed(&self) {
+        if !self.with_controls(|c| c.has_failed()).unwrap_or(false) {
+            return;
+        }
+        {
+            let mut last = self.last_audio_recovery.lock().unwrap();
+            if last.is_some_and(|t| t.elapsed() < Duration::from_secs(2)) {
+                return;
+            }
+            *last = Some(Instant::now());
+        }
+        warn!("Audio output lost: reopening the default output");
+        let position = Duration::from_secs_f64(self.get_position());
+        let playing = matches!(
+            self.state.lock().unwrap().playback_state,
+            PlaybackState::Playing
+        );
+        // Dropping the engine drops the dead stream (and its stream of error callbacks)
+        *self.engine.lock().unwrap() = None;
+        if playing && let Err(e) = self.load_and_seek(position) {
+            warn!("Could not reopen the audio output: {e}");
+            let mut state = self.state.lock().unwrap();
+            state.playback_state = PlaybackState::Paused;
+            state.paused_at = Some(position);
+            state.pending_resume_seek = Some(position);
+        } else if !playing {
+            // Paused: the next resume must load the track again, there is no engine to unpause
+            let mut state = self.state.lock().unwrap();
+            if state.current_track.is_some() {
+                state.pending_resume_seek = Some(state.paused_at.unwrap_or(position));
+            }
+        }
     }
 
     /// Lock the engine and run a closure with a reference to AudioControls.
@@ -155,6 +236,7 @@ impl PlayerService {
         let bg_handle = self.with_controls(|c| c.bg_handle())?;
         let bg_state = Arc::clone(&self.state);
         let bg_loading = Arc::clone(&self.loading);
+        let bg_files = Arc::clone(&self.files);
         let file_path = track.file_path.clone();
 
         self.loading.store(true, Relaxed);
@@ -189,9 +271,24 @@ impl PlayerService {
             }
         }
 
+        // The files around this track: kept for a network mount, the next one is read once this one plays
+        let (previous_path, next_path) = {
+            let (previous, next) = neighbours(&self.state.lock().unwrap().queue);
+            let path_of = |id: Option<i64>| {
+                id.and_then(|id| crate::db::queries::get_track(&conn, id).ok().flatten())
+                    .map(|t| t.file_path)
+            };
+            (path_of(previous), path_of(next))
+        };
+        let wanted: Vec<_> = [Some(file_path.clone()), previous_path, next_path.clone()]
+            .into_iter()
+            .flatten()
+            .collect();
+        self.files.keep_only(&wanted);
+
         // Background: read file from NAS, decode, send to audio callback
         std::thread::spawn(move || {
-            let file_data = match std::fs::read(&file_path) {
+            let file_data = match bg_files.read(&file_path) {
                 Ok(data) => data,
                 Err(e) => {
                     warn!("Background file read failed: {e}");
@@ -229,6 +326,11 @@ impl PlayerService {
 
             // Set playback_start_time NOW — when audio actually begins
             bg_state.lock().unwrap().playback_start_time = Some(Instant::now());
+
+            // Now that this track plays, the next one is read in advance (only on a network mount)
+            if let Some(next) = next_path {
+                bg_files.prefetch(&next);
+            }
         });
 
         Ok(())
@@ -303,6 +405,7 @@ impl PlayerService {
         let bg_handle = self.with_controls(|c| c.bg_handle())?;
         let bg_state = Arc::clone(&self.state);
         let bg_loading = Arc::clone(&self.loading);
+        let bg_files = Arc::clone(&self.files);
         let file_path = track.file_path.clone();
 
         self.loading.store(true, Relaxed);
@@ -316,7 +419,7 @@ impl PlayerService {
         }
 
         std::thread::spawn(move || {
-            let file_data = match std::fs::read(&file_path) {
+            let file_data = match bg_files.read(&file_path) {
                 Ok(data) => data,
                 Err(e) => {
                     warn!("Resume background read failed: {e}");
@@ -423,6 +526,7 @@ impl PlayerService {
         let bg_handle = self.with_controls(|c| c.bg_handle())?;
         let bg_state = Arc::clone(&self.state);
         let bg_loading = Arc::clone(&self.loading);
+        let bg_files = Arc::clone(&self.files);
         let file_path = track.file_path.clone();
 
         self.loading.store(true, Relaxed);
@@ -436,7 +540,7 @@ impl PlayerService {
 
         // Background: read file, decode with skip, send to callback
         std::thread::spawn(move || {
-            let file_data = match std::fs::read(&file_path) {
+            let file_data = match bg_files.read(&file_path) {
                 Ok(data) => data,
                 Err(e) => {
                     warn!("Seek background read failed: {e}");
@@ -980,6 +1084,9 @@ impl PlayerService {
     /// 2. Fallback: elapsed wall-clock time > track duration + 1 s — catches
     ///    edge cases where the source never signals exhaustion.
     pub fn is_track_finished(&self) -> bool {
+        // The state poll is the heartbeat of the player: a failed output stream is rebuilt here
+        self.recover_audio_if_failed();
+
         // If a new track is currently being loaded, the audio engine's `finished`
         // flag may still reflect the previous track. Suppress auto-advance until
         // the background thread has sent the new source to the render callback.
@@ -2200,5 +2307,70 @@ mod tests {
         let player = make_player(pool);
         assert_eq!(player.get_state(), PlaybackState::Stopped);
         assert!(player.get_current_track().is_none());
+    }
+}
+
+#[cfg(test)]
+mod neighbours_tests {
+    use super::*;
+
+    fn queue(current: usize, repeat: RepeatMode) -> Queue {
+        Queue {
+            tracks: vec![10, 20, 30],
+            current_index: current,
+            repeat_mode: repeat,
+            ..Queue::new()
+        }
+    }
+
+    #[test]
+    fn neighbours_follow_the_queue() {
+        assert_eq!(neighbours(&queue(1, RepeatMode::Off)), (Some(10), Some(30)));
+        assert_eq!(neighbours(&queue(0, RepeatMode::Off)), (None, Some(20)));
+        assert_eq!(neighbours(&queue(2, RepeatMode::Off)), (Some(20), None));
+    }
+
+    #[test]
+    fn neighbours_wrap_when_the_queue_repeats() {
+        assert_eq!(neighbours(&queue(2, RepeatMode::All)), (Some(20), Some(10)));
+        assert_eq!(neighbours(&queue(0, RepeatMode::All)), (Some(30), Some(20)));
+    }
+
+    #[test]
+    fn a_repeated_track_has_no_next_to_read() {
+        assert_eq!(neighbours(&queue(1, RepeatMode::One)).1, None);
+    }
+
+    #[test]
+    fn neighbours_follow_the_shuffle_order() {
+        let mut q = queue(1, RepeatMode::Off);
+        q.shuffle_enabled = true;
+        q.shuffle_order = vec![2, 0, 1];
+        // Play order: 30, 10, 20; the current slot 1 is track 10
+        assert_eq!(neighbours(&q), (Some(30), Some(20)));
+    }
+
+    #[test]
+    fn an_empty_queue_has_no_neighbours() {
+        assert_eq!(neighbours(&Queue::new()), (None, None));
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use crate::db;
+
+    #[test]
+    fn nothing_happens_without_a_failed_engine() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let pool = db::create_pool(dir.path().join("test.db")).unwrap();
+        db::initialize_database(&pool).unwrap();
+        let service = PlayerService::new(pool).unwrap();
+        // No engine at all: the poll must not create one, nor change the state
+        service.recover_audio_if_failed();
+        assert_eq!(service.get_state(), PlaybackState::Stopped);
+        assert!(service.engine.lock().unwrap().is_none());
+        assert!(service.last_audio_recovery.lock().unwrap().is_none());
     }
 }
