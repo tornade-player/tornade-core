@@ -416,7 +416,7 @@ impl MusicBrainzClient {
 
     /// Search for an artist photo and rich metadata via TheAudioDB.
     ///
-    /// Uses the free public API (key `2`) — no registration required.
+    /// Uses the free public API (test key `123`; the old key `2` now answers 404) — no registration required.
     /// Returns an `ArtistSearchResult` with all available metadata plus image bytes when found.
     /// Returns `Ok(None)` only if the artist was not found in TheAudioDB at all.
     pub async fn search_artist_photo(
@@ -424,7 +424,7 @@ impl MusicBrainzClient {
         artist_name: &str,
     ) -> Result<Option<ArtistSearchResult>, String> {
         let url = format!(
-            "{}/api/v1/json/2/search.php?s={}",
+            "{}/api/v1/json/123/search.php?s={}",
             self.theaudiodb_base_url,
             urlencoding::encode(artist_name)
         );
@@ -1376,7 +1376,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .and(path("/api/v1/json/2/search.php"))
+            .and(path("/api/v1/json/123/search.php"))
             .respond_with(ResponseTemplate::new(200).set_body_json(tadb_artists_json(&[])))
             .mount(&mock_server)
             .await;
@@ -1394,7 +1394,7 @@ mod tests {
         let photo_path = "/images/media/artist/thumb/pinkfloyd.jpg";
 
         Mock::given(method("GET"))
-            .and(path("/api/v1/json/2/search.php"))
+            .and(path("/api/v1/json/123/search.php"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(tadb_artists_json(&[&format!(
                     "{}{}",
@@ -1426,7 +1426,7 @@ mod tests {
         let photo_path = "/images/media/artist/thumb/artist.jpg";
 
         Mock::given(method("GET"))
-            .and(path("/api/v1/json/2/search.php"))
+            .and(path("/api/v1/json/123/search.php"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(tadb_artists_json(&[&format!(
                     "{}{}",
@@ -1458,7 +1458,7 @@ mod tests {
         let fake_photo = b"FAKE_ABBA_PHOTO".to_vec();
 
         Mock::given(method("GET"))
-            .and(path("/api/v1/json/2/search.php"))
+            .and(path("/api/v1/json/123/search.php"))
             .respond_with(ResponseTemplate::new(200).set_body_json(
                 tadb_artists_json_with_metadata(&format!("{}{}", mock_server.uri(), photo_path)),
             ))
@@ -1501,7 +1501,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .and(path("/api/v1/json/2/search.php"))
+            .and(path("/api/v1/json/123/search.php"))
             .respond_with(ResponseTemplate::new(500))
             .mount(&mock_server)
             .await;
@@ -1517,7 +1517,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .and(path("/api/v1/json/2/search.php"))
+            .and(path("/api/v1/json/123/search.php"))
             .respond_with(ResponseTemplate::new(200).set_body_string("{ bad json }"))
             .mount(&mock_server)
             .await;
