@@ -184,6 +184,81 @@ impl SharedState {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Level meter: the sound before the volume, in BANDS bands from low to high (for a visualiser)
+// ---------------------------------------------------------------------------
+
+pub const BANDS: usize = 12;
+static LEVELS: [AtomicU32; BANDS] = [const { AtomicU32::new(0) }; BANDS];
+
+/// Level of each band, 0.0..=1.0 (f32 bits), updated by the audio callback; the interface reads it a few times a second
+pub fn levels() -> [f32; BANDS] {
+    let mut out = [0.0; BANDS];
+    for (o, l) in out.iter_mut().zip(LEVELS.iter()) {
+        *o = f32::from_bits(l.load(Relaxed));
+    }
+    out
+}
+
+/// Splits the mono mix into bands with a bank of one-pole low-passes (edges 60 Hz to 12 kHz, geometric): the energy of a band
+/// is the difference of two neighbouring low-passes. Cheap enough for the real-time thread: BANDS - 1 multiplications per frame.
+struct Analyzer {
+    channels: usize,
+    seen: usize,
+    sum: f32,
+    coef: [f32; BANDS - 1],
+    low: [f32; BANDS - 1],
+    energy: [f32; BANDS],
+    frames: u32,
+    shown: [f32; BANDS],
+}
+
+impl Analyzer {
+    fn new(channels: usize, rate: u32) -> Self {
+        let mut coef = [0.0; BANDS - 1];
+        for (i, c) in coef.iter_mut().enumerate() {
+            let hz = 60.0 * (12000.0f32 / 60.0).powf(i as f32 / (BANDS as f32 - 2.0));
+            *c = 1.0 - (-2.0 * std::f32::consts::PI * hz / rate as f32).exp();
+        }
+        Analyzer { channels: channels.max(1), seen: 0, sum: 0.0, coef, low: [0.0; BANDS - 1], energy: [0.0; BANDS], frames: 0, shown: [0.0; BANDS] }
+    }
+
+    fn push(&mut self, sample: f32) {
+        self.sum += sample;
+        self.seen += 1;
+        if self.seen < self.channels {
+            return;
+        }
+        let x = self.sum / self.channels as f32;
+        self.sum = 0.0;
+        self.seen = 0;
+        let mut below = 0.0;
+        for i in 0..BANDS - 1 {
+            self.low[i] += self.coef[i] * (x - self.low[i]);
+            let band = self.low[i] - below;
+            self.energy[i] += band * band;
+            below = self.low[i];
+        }
+        let top = x - below;
+        self.energy[BANDS - 1] += top * top;
+        self.frames += 1;
+    }
+
+    /// End of a callback: levels in dB mapped to 0..1, a fast rise and a slow fall
+    fn publish(&mut self) {
+        for i in 0..BANDS {
+            let rms = if self.frames > 0 { (self.energy[i] / self.frames as f32).sqrt() } else { 0.0 };
+            // High bands carry less energy in music: a gentle tilt keeps the whole spectrum alive
+            let db = 20.0 * (rms + 1e-6).log10() + i as f32 * 1.2;
+            let level = ((db + 56.0) / 46.0).clamp(0.0, 1.0);
+            self.shown[i] = if level > self.shown[i] { level } else { self.shown[i] * 0.85 };
+            LEVELS[i].store(self.shown[i].to_bits(), Relaxed);
+            self.energy[i] = 0.0;
+        }
+        self.frames = 0;
+    }
+}
+
 type BoxedSource = Box<dyn Iterator<Item = f32> + Send>;
 
 // ---------------------------------------------------------------------------
@@ -376,6 +451,7 @@ impl AudioEngine {
         let cb_shared = Arc::clone(&shared);
         let err_shared = Arc::clone(&shared);
         let mut current_source: Option<BoxedSource> = None;
+        let mut meter = Analyzer::new(channels as usize, stream_rate);
 
         let stream = device
             .build_output_stream(
@@ -392,6 +468,7 @@ impl AudioEngine {
                             let _ = garbage_tx.send(old);
                         }
                         data.fill(0.0);
+                        meter.publish();
                         return;
                     }
 
@@ -407,6 +484,7 @@ impl AudioEngine {
 
                     if cb_shared.paused.load(Relaxed) || current_source.is_none() {
                         data.fill(0.0);
+                        meter.publish();
                         return;
                     }
 
@@ -416,12 +494,14 @@ impl AudioEngine {
                         if done {
                             *sample = 0.0;
                         } else if let Some(s) = src.next() {
+                            meter.push(s);
                             *sample = s * vol;
                         } else {
                             *sample = 0.0;
                             done = true;
                         }
                     }
+                    meter.publish();
                     if done {
                         if let Some(old) = current_source.take() {
                             let _ = garbage_tx.send(old);

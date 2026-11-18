@@ -1489,6 +1489,11 @@ pub fn jump_to_queue_index(index: i64) -> String {
     }
 }
 
+/// Level of the sound being played in 12 bands, low to high, each 0..1 (JSON array): for a visualiser
+pub fn get_audio_levels() -> String {
+    serde_json::to_string(&crate::services::audio_engine::levels().to_vec()).unwrap_or_else(|_| "[]".into())
+}
+
 pub fn get_player_state() -> String {
     // T030: Get current player state
     match get_or_init_player() {
